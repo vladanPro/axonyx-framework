@@ -134,6 +134,33 @@ let node = ax!(button(class="primary", data_state="ready")[
 ]);
 ```
 
+Layout primitives now exist as normal components too:
+
+```rust
+use axonix_core::layout_prelude::*;
+use axonix_core::prelude::*;
+
+let node = render_component(
+    grid,
+    GridProps {
+        cols: 3,
+        gap: Gap::Token("md"),
+        children: children([
+            text("Card A"),
+            text("Card B"),
+            text("Card C"),
+        ]),
+    },
+);
+```
+
+The first layout kit now includes:
+
+- `stack`
+- `grid`
+- `container`
+- `center`
+
 ## Repo Layout
 
 ```text

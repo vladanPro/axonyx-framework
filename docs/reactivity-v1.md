@@ -200,3 +200,38 @@ The current implementation in `axonix-core` is intentionally a draft:
 - `resource` returns a loading state placeholder
 
 That is enough to stabilize API shape before we build the real scheduler and dependency graph.
+
+## Layout draft
+
+Axonix now has a first layout layer through ordinary components:
+
+```rust
+use axonix_core::layout_prelude::*;
+use axonix_core::prelude::*;
+
+let node = render_component(
+    grid,
+    GridProps {
+        cols: 3,
+        gap: Gap::Token("md"),
+        children: children([
+            text("Card A"),
+            text("Card B"),
+            text("Card C"),
+        ]),
+    },
+);
+```
+
+Current layout primitives:
+
+- `stack`
+- `grid`
+- `container`
+- `center`
+
+Current design choice:
+
+- layout is modeled first as ordinary components
+- later it can be exposed as pipe-friendly sugar as well
+- the stable base stays simple and composable

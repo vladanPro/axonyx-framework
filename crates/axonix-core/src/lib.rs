@@ -1,9 +1,11 @@
+pub mod layout;
 pub mod reactive;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use axonix_macros::component;
+pub use layout::prelude as layout_prelude;
 pub use reactive::prelude;
 
 #[macro_export]
