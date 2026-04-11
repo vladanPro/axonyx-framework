@@ -392,3 +392,19 @@ Current backend statements:
 
 This draft is deliberately limited.
 It is meant to capture framework-native backend authoring shapes that can lower into Rust, not to become a new general-purpose language.
+
+## Backend parser draft
+
+Axonix now also has a first backend parser draft that reads the backend authoring syntax into the backend AST.
+
+What it currently targets:
+
+- top-level `route`, `loader`, `action`, and `job` blocks
+- `data` bindings
+- `input:` sections for actions
+- mutation statements through `insert` and `update`
+- response and invalidation steps such as `return` and `revalidate`
+- async-style steps such as `send ... with ...`
+
+This is intentionally the backend equivalent of the current frontend parser sketch:
+small, focused, and built around real template examples instead of trying to solve every future language feature immediately.

@@ -1,5 +1,6 @@
 pub mod ax_ast;
 pub mod ax_backend_ast;
+pub mod ax_backend_parser;
 pub mod ax_lowering;
 pub mod ax_parser;
 pub mod layout;
@@ -13,6 +14,7 @@ use thiserror::Error;
 pub use axonix_macros::component;
 pub use ax_ast::prelude as ax_ast_prelude;
 pub use ax_backend_ast::prelude as ax_backend_ast_prelude;
+pub use ax_backend_parser::prelude as ax_backend_parser_prelude;
 pub use ax_lowering::prelude as ax_lowering_prelude;
 pub use ax_parser::prelude as ax_parser_prelude;
 pub use layout::prelude as layout_prelude;

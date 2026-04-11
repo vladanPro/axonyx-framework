@@ -282,6 +282,24 @@ Current backend model includes:
 
 The draft is intentionally small and focused on framework-shaped patterns rather than replacing all of Rust.
 
+## Backend Parser Draft
+
+Axonix now also has a first backend parser draft that can read indentation-based backend authoring blocks.
+
+Current parser draft handles:
+
+- `route METHOD "/path"`
+- `loader Name`
+- `action Name`
+- `job Name`
+- `data`
+- `input:`
+- `insert`
+- `update`
+- `revalidate`
+- `return`
+- `send ... with ...`
+
 ## Repo Layout
 
 ```text
