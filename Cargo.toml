@@ -1,0 +1,26 @@
+[workspace]
+members = [
+  "crates/axonix-core",
+  "crates/axonix-adapter-blokbite",
+  "crates/create-axonix",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+thiserror = "2.0.12"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+clap = { version = "4.5.48", features = ["derive"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+

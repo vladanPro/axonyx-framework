@@ -1,0 +1,11 @@
+[package]
+name = "create-axonix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scaffold a new Axonix app"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+
