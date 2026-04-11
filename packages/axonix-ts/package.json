@@ -1,0 +1,15 @@
+{
+  "name": "@axonix/ts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript builder API for Axonix IR",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
+

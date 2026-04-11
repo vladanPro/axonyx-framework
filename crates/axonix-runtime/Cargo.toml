@@ -1,10 +1,11 @@
 [package]
-name = "axonix-core"
+name = "axonix-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-thiserror.workspace = true
 serde.workspace = true
-axonix-macros = { path = "../axonix-macros" }
+serde_json.workspace = true
+axonix-core = { path = "../axonix-core" }
+

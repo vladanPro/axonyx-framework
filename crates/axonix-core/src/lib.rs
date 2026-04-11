@@ -1,5 +1,10 @@
+pub mod reactive;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use axonix_macros::component;
+pub use reactive::prelude;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pipeline {
@@ -12,12 +17,68 @@ pub struct Call {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AxonixIr {
+    pub source: Source,
+    pub transforms: Vec<Transform>,
+    pub view: View,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Source {
+    pub kind: SourceKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SourceKind {
+    Collection { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Transform {
+    pub kind: TransformKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransformKind {
+    Grid { columns: u16 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct View {
+    pub kind: ViewKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ViewKind {
+    Card,
+    Named { name: String },
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
     #[error("pipeline is empty")]
     EmptyPipeline,
     #[error("invalid stage syntax: {0}")]
     InvalidStage(String),
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CompileError {
+    #[error("unable to parse pipeline: {0}")]
+    ParseFailed(#[from] ParseError),
+    #[error("pipeline must contain at least two stages: source and view")]
+    TooFewStages,
+    #[error("invalid source stage: {0:?}")]
+    InvalidSource(Vec<String>),
+    #[error("invalid transform stage: {0:?}")]
+    InvalidTransform(Vec<String>),
+    #[error("invalid view stage: {0:?}")]
+    InvalidView(Vec<String>),
+    #[error("missing required argument for stage: {0:?}")]
+    MissingArgument(Vec<String>),
+    #[error("invalid numeric argument in stage: {0:?}")]
+    InvalidNumber(Vec<String>),
 }
 
 pub fn parse_pipeline(input: &str) -> Result<Pipeline, ParseError> {
@@ -77,6 +138,104 @@ fn parse_call(stage: &str) -> Result<Call, ParseError> {
     Ok(Call { path, args })
 }
 
+pub fn compile_pipeline(input: &str) -> Result<AxonixIr, CompileError> {
+    let pipeline = parse_pipeline(input)?;
+    compile_ir(&pipeline)
+}
+
+pub fn compile_ir(pipeline: &Pipeline) -> Result<AxonixIr, CompileError> {
+    if pipeline.stages.len() < 2 {
+        return Err(CompileError::TooFewStages);
+    }
+
+    let source_call = &pipeline.stages[0];
+    let view_call = pipeline.stages.last().expect("len checked");
+    let transform_calls = &pipeline.stages[1..pipeline.stages.len() - 1];
+
+    let source = compile_source(source_call)?;
+    let mut transforms = Vec::with_capacity(transform_calls.len());
+    for call in transform_calls {
+        transforms.push(compile_transform(call)?);
+    }
+    let view = compile_view(view_call)?;
+
+    Ok(AxonixIr {
+        source,
+        transforms,
+        view,
+    })
+}
+
+fn compile_source(call: &Call) -> Result<Source, CompileError> {
+    let normalized = normalize_path(&call.path);
+    let is_collection_source = normalized.as_slice() == ["db", "stream"]
+        || normalized.as_slice() == ["from"];
+    if !is_collection_source {
+        return Err(CompileError::InvalidSource(call.path.clone()));
+    }
+    let collection = call
+        .args
+        .first()
+        .map(|x| trim_quotes(x))
+        .ok_or_else(|| CompileError::MissingArgument(call.path.clone()))?;
+    if collection.is_empty() {
+        return Err(CompileError::MissingArgument(call.path.clone()));
+    }
+    Ok(Source {
+        kind: SourceKind::Collection { name: collection },
+    })
+}
+
+fn compile_transform(call: &Call) -> Result<Transform, CompileError> {
+    let normalized = normalize_path(&call.path);
+    let is_grid = normalized.as_slice() == ["layout", "grid"] || normalized.as_slice() == ["grid"];
+    if !is_grid {
+        return Err(CompileError::InvalidTransform(call.path.clone()));
+    }
+
+    let columns = call
+        .args
+        .first()
+        .map(|x| trim_quotes(x))
+        .map(|x| x.parse::<u16>())
+        .transpose()
+        .map_err(|_| CompileError::InvalidNumber(call.path.clone()))?
+        .unwrap_or(3);
+
+    Ok(Transform {
+        kind: TransformKind::Grid { columns },
+    })
+}
+
+fn compile_view(call: &Call) -> Result<View, CompileError> {
+    let normalized = normalize_path(&call.path);
+    if normalized.as_slice() == ["card"] || normalized.as_slice() == ["view", "card"] {
+        return Ok(View {
+            kind: ViewKind::Card,
+        });
+    }
+
+    if let Some(name) = call.path.last() {
+        return Ok(View {
+            kind: ViewKind::Named { name: name.clone() },
+        });
+    }
+
+    Err(CompileError::InvalidView(call.path.clone()))
+}
+
+fn normalize_path(path: &[String]) -> Vec<String> {
+    path.iter().map(|x| x.trim().to_ascii_lowercase()).collect::<Vec<_>>()
+}
+
+fn trim_quotes(input: &str) -> String {
+    input
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +249,27 @@ mod tests {
         assert_eq!(parsed.stages[1].path, vec!["layout", "Grid"]);
         assert_eq!(parsed.stages[2].path, vec!["Card"]);
     }
-}
 
+    #[test]
+    fn compiles_pipeline_to_ir() {
+        let parsed = parse_pipeline(r#"Db.Stream("posts") |> layout.Grid(4) |> Card()"#)
+            .expect("pipeline should parse");
+        let ir = compile_ir(&parsed).expect("pipeline should compile");
+
+        assert_eq!(
+            ir.source,
+            Source {
+                kind: SourceKind::Collection {
+                    name: "posts".to_string()
+                }
+            }
+        );
+        assert_eq!(
+            ir.transforms,
+            vec![Transform {
+                kind: TransformKind::Grid { columns: 4 }
+            }]
+        );
+        assert_eq!(ir.view, View { kind: ViewKind::Card });
+    }
+}
