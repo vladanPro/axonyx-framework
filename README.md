@@ -199,6 +199,55 @@ This first bridge keeps the model simple:
 - `Card()` uses the first-party `card` and `copy` primitives
 - named views such as `ProfileCard()` preserve their identity with `data-view`
 
+## `.ax` AST Draft
+
+Axonix now also has a first Rust AST draft for `.ax` authoring:
+
+```rust
+use axonix_core::ax_ast_prelude::*;
+
+let document = AxDocument::page(
+    "Home",
+    [
+        AxStatement::data(
+            "posts",
+            AxExpr::call(["Db", "Stream"], [AxExpr::string("posts")]),
+        ),
+        AxStatement::component(
+            AxComponent::new("Container")
+                .prop("max", "xl")
+                .block([AxStatement::component(
+                    AxComponent::new("Grid")
+                        .prop("cols", 3_i64)
+                        .prop("gap", "md")
+                        .block([AxStatement::each(
+                            "post",
+                            AxExpr::ident("posts"),
+                            [AxStatement::component(
+                                AxComponent::new("Card")
+                                    .prop("title", AxExpr::ident("post").member("title"))
+                                    .block([AxStatement::component(
+                                        AxComponent::new("Copy")
+                                            .inline(AxExpr::ident("post").member("excerpt")),
+                                    )]),
+                            )],
+                        )]),
+                )]),
+        ),
+    ],
+);
+```
+
+This draft intentionally models:
+
+- `page`
+- `data`
+- components
+- `each`
+- inline content through `->`
+- pipeline stages
+- styling layers through semantic props, `recipe`, and `class`
+
 ## Repo Layout
 
 ```text

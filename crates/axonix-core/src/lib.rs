@@ -1,3 +1,4 @@
+pub mod ax_ast;
 pub mod layout;
 pub mod pipeline_render;
 pub mod reactive;
@@ -7,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use axonix_macros::component;
+pub use ax_ast::prelude as ax_ast_prelude;
 pub use layout::prelude as layout_prelude;
 pub use pipeline_render::prelude as pipeline_prelude;
 pub use reactive::prelude;

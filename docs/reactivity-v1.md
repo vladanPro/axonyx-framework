@@ -320,3 +320,29 @@ What this currently gives us:
 
 This is still intentionally modest.
 The goal is to prove the pipeline can become real UI through Axonix-native components before we add a more advanced scheduler, richer transforms, or adapter layers.
+
+## `.ax` AST draft
+
+Axonix now has a first Rust AST draft for the future `.ax` authoring format.
+
+The goal is not to freeze parser behavior yet.
+The goal is to stabilize the shape of the syntax model before implementing the real parser.
+
+Current AST draft includes:
+
+- `AxDocument`
+- `AxPage`
+- `AxStatement`
+- `AxComponent`
+- `AxBody`
+- `AxExpr`
+- `AxPipeline`
+- `AxStyle`
+
+Important design choices in this draft:
+
+- semantic props stay separate from styling override layers
+- `recipe` and `class` live in `AxStyle`
+- inline child syntax such as `Copy -> post.excerpt` maps to `AxBody::Inline`
+- nested indentation maps to `AxBody::Block(Vec<AxStatement>)`
+- pipeline expressions have their own AST layer instead of being flattened too early
