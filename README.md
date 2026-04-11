@@ -282,6 +282,18 @@ Current backend model includes:
 
 The draft is intentionally small and focused on framework-shaped patterns rather than replacing all of Rust.
 
+## Query AST Draft
+
+Axonix now also has a first query AST draft for backend data loading.
+
+Current query model covers:
+
+- `Db.Stream("collection")`
+- `where field = value`
+- `order field asc|desc`
+- `limit`
+- `offset`
+
 ## Backend Parser Draft
 
 Axonix now also has a first backend parser draft that can read indentation-based backend authoring blocks.
@@ -299,6 +311,7 @@ Current parser draft handles:
 - `revalidate`
 - `return`
 - `send ... with ...`
+- query clauses through `where`, `order`, `limit`, and `offset`
 
 ## Repo Layout
 

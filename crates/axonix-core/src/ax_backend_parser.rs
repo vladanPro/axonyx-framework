@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::ax_ast::prelude::AxExpr;
 use crate::ax_backend_ast::prelude::*;
+use crate::ax_query_ast::prelude::*;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AxBackendParseError {
@@ -29,6 +30,12 @@ pub enum AxBackendParseError {
     InvalidReturn { line: usize },
     #[error("invalid send statement at line {line}")]
     InvalidSend { line: usize },
+    #[error("invalid query source at line {line}")]
+    InvalidQuerySource { line: usize },
+    #[error("invalid query clause at line {line}")]
+    InvalidQueryClause { line: usize },
+    #[error("invalid query number at line {line}")]
+    InvalidQueryNumber { line: usize },
     #[error("invalid expression at line {line}: {message}")]
     InvalidExpression { line: usize, message: String },
 }
@@ -273,8 +280,17 @@ impl Parser {
             return Err(AxBackendParseError::InvalidDataBinding { line: line.line });
         }
 
+        let expr = parse_expr(expr, line.line)?;
         self.pos += 1;
-        Ok(AxBackendStmt::data(name, parse_expr(expr, line.line)?))
+
+        if let Some(next) = self.current() {
+            if next.indent == line.indent + 2 && is_query_clause(&next.text) {
+                let query = self.parse_query_spec(expr, line.line, line.indent + 2)?;
+                return Ok(AxBackendStmt::data(name, query));
+            }
+        }
+
+        Ok(AxBackendStmt::data(name, expr))
     }
 
     fn parse_mutation(
@@ -342,6 +358,110 @@ impl Parser {
     fn current(&self) -> Option<&BackendLine> {
         self.lines.get(self.pos)
     }
+
+    fn parse_query_spec(
+        &mut self,
+        expr: AxExpr,
+        line: usize,
+        indent: usize,
+    ) -> Result<AxQuerySpec, AxBackendParseError> {
+        let source = query_source_from_expr(expr, line)?;
+        let mut query = AxQuerySpec::new(source);
+
+        while let Some(clause_line) = self.current() {
+            if clause_line.indent < indent {
+                break;
+            }
+
+            if clause_line.indent != indent {
+                return Err(AxBackendParseError::UnexpectedIndentation {
+                    line: clause_line.line,
+                });
+            }
+
+            let text = clause_line.text.as_str();
+            if let Some(rest) = text.strip_prefix("where ") {
+                let Some((field, value)) = rest.split_once('=') else {
+                    return Err(AxBackendParseError::InvalidQueryClause {
+                        line: clause_line.line,
+                    });
+                };
+
+                let field = field.trim();
+                let value = value.trim();
+                if field.is_empty() || value.is_empty() {
+                    return Err(AxBackendParseError::InvalidQueryClause {
+                        line: clause_line.line,
+                    });
+                }
+
+                query = query.filter(AxQueryFilter::new(
+                    field,
+                    AxQueryFilterOp::Eq,
+                    parse_expr(value, clause_line.line)?,
+                ));
+                self.pos += 1;
+                continue;
+            }
+
+            if let Some(rest) = text.strip_prefix("order ") {
+                let mut parts = rest.split_whitespace();
+                let field = parts.next().unwrap_or_default();
+                if field.is_empty() {
+                    return Err(AxBackendParseError::InvalidQueryClause {
+                        line: clause_line.line,
+                    });
+                }
+
+                let direction = match parts.next() {
+                    Some(value) if value.eq_ignore_ascii_case("desc") => {
+                        AxQueryOrderDirection::Desc
+                    }
+                    Some(value) if value.eq_ignore_ascii_case("asc") => AxQueryOrderDirection::Asc,
+                    None => AxQueryOrderDirection::Asc,
+                    Some(_) => {
+                        return Err(AxBackendParseError::InvalidQueryClause {
+                            line: clause_line.line,
+                        })
+                    }
+                };
+
+                query = query.order(AxQueryOrder::new(field, direction));
+                self.pos += 1;
+                continue;
+            }
+
+            if let Some(rest) = text.strip_prefix("limit ") {
+                let value = rest
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| AxBackendParseError::InvalidQueryNumber {
+                        line: clause_line.line,
+                    })?;
+                query = query.limit(value);
+                self.pos += 1;
+                continue;
+            }
+
+            if let Some(rest) = text.strip_prefix("offset ") {
+                let value = rest
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| AxBackendParseError::InvalidQueryNumber {
+                        line: clause_line.line,
+                    })?;
+                query = query.offset(value);
+                self.pos += 1;
+                continue;
+            }
+
+            return Err(AxBackendParseError::InvalidQueryClause {
+                line: clause_line.line,
+            });
+        }
+
+        Ok(query)
+    }
 }
 
 fn preprocess(input: &str) -> Result<Vec<BackendLine>, AxBackendParseError> {
@@ -370,6 +490,32 @@ fn preprocess(input: &str) -> Result<Vec<BackendLine>, AxBackendParseError> {
     }
 
     Ok(lines)
+}
+
+fn is_query_clause(text: &str) -> bool {
+    text.starts_with("where ")
+        || text.starts_with("order ")
+        || text.starts_with("limit ")
+        || text.starts_with("offset ")
+}
+
+fn query_source_from_expr(
+    expr: AxExpr,
+    line: usize,
+) -> Result<AxQuerySource, AxBackendParseError> {
+    match expr {
+        AxExpr::Call { path, args }
+            if path == vec!["Db".to_string(), "Stream".to_string()] && args.len() == 1 =>
+        {
+            match &args[0] {
+                AxExpr::String(collection) => Ok(AxQuerySource::Stream {
+                    collection: collection.clone(),
+                }),
+                _ => Err(AxBackendParseError::InvalidQuerySource { line }),
+            }
+        }
+        _ => Err(AxBackendParseError::InvalidQuerySource { line }),
+    }
 }
 
 fn parse_expr(input: &str, line: usize) -> Result<AxExpr, AxBackendParseError> {
@@ -528,6 +674,9 @@ mod tests {
         let input = r#"
 loader PostsList
   data posts = Db.Stream("posts")
+    where status = "published"
+    order created_at desc
+    limit 20
   return posts
 
 route GET "/api/posts"
@@ -542,6 +691,27 @@ route GET "/api/posts"
             panic!("expected loader block");
         };
         assert_eq!(loader.name, "PostsList");
+        let AxBackendStmt::Data(posts) = &loader.body[0] else {
+            panic!("expected data statement");
+        };
+        assert_eq!(
+            posts.value,
+            AxBackendValue::Query(
+                AxQuerySpec::new(AxQuerySource::Stream {
+                    collection: "posts".to_string(),
+                })
+                .filter(AxQueryFilter::new(
+                    "status",
+                    AxQueryFilterOp::Eq,
+                    AxExpr::string("published"),
+                ))
+                .order(AxQueryOrder::new(
+                    "created_at",
+                    AxQueryOrderDirection::Desc,
+                ))
+                .limit(20)
+            )
+        );
 
         let AxBackendBlock::Route(route) = &document.blocks[1] else {
             panic!("expected route block");

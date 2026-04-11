@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ax_ast::prelude::AxExpr;
+use crate::ax_query_ast::prelude::AxQuerySpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AxBackendDocument {
@@ -112,7 +113,7 @@ pub enum AxBackendStmt {
 }
 
 impl AxBackendStmt {
-    pub fn data(name: impl Into<String>, value: AxExpr) -> Self {
+    pub fn data(name: impl Into<String>, value: impl Into<AxBackendValue>) -> Self {
         Self::Data(AxBackendData::new(name, value))
     }
 
@@ -140,15 +141,33 @@ impl AxBackendStmt {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AxBackendData {
     pub name: String,
-    pub value: AxExpr,
+    pub value: AxBackendValue,
 }
 
 impl AxBackendData {
-    pub fn new(name: impl Into<String>, value: AxExpr) -> Self {
+    pub fn new(name: impl Into<String>, value: impl Into<AxBackendValue>) -> Self {
         Self {
             name: name.into(),
-            value,
+            value: value.into(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AxBackendValue {
+    Expr(AxExpr),
+    Query(AxQuerySpec),
+}
+
+impl From<AxExpr> for AxBackendValue {
+    fn from(value: AxExpr) -> Self {
+        Self::Expr(value)
+    }
+}
+
+impl From<AxQuerySpec> for AxBackendValue {
+    fn from(value: AxQuerySpec) -> Self {
+        Self::Query(value)
     }
 }
 
@@ -244,6 +263,7 @@ pub mod prelude {
     pub use super::AxBackendData;
     pub use super::AxBackendDocument;
     pub use super::AxBackendStmt;
+    pub use super::AxBackendValue;
     pub use super::AxField;
     pub use super::AxJob;
     pub use super::AxLoader;
@@ -256,6 +276,7 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ax_query_ast::prelude::*;
 
     #[test]
     fn builds_loader_action_and_route_blocks() {
@@ -264,7 +285,19 @@ mod tests {
                 "PostsList",
                 [AxBackendStmt::data(
                     "posts",
-                    AxExpr::call(["Db", "Stream"], [AxExpr::string("posts")]),
+                    AxQuerySpec::new(AxQuerySource::Stream {
+                        collection: "posts".to_string(),
+                    })
+                    .filter(AxQueryFilter::new(
+                        "status",
+                        AxQueryFilterOp::Eq,
+                        AxExpr::string("published"),
+                    ))
+                    .order(AxQueryOrder::new(
+                        "created_at",
+                        AxQueryOrderDirection::Desc,
+                    ))
+                    .limit(20),
                 ), AxBackendStmt::r#return(AxExpr::ident("posts"))],
             )),
             AxBackendBlock::Action(
