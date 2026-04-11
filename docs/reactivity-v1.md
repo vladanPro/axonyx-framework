@@ -285,3 +285,38 @@ let node = render_component(
     },
 );
 ```
+
+## Pipeline rendering draft
+
+Axonix now has a first bridge from pipeline IR into real `AxNode` output.
+
+Example:
+
+```rust
+use axonix_core::pipeline_prelude::*;
+
+let records = vec![
+    PipelineRecord::new("p1")
+        .titled("Card A")
+        .field("status", "draft"),
+    PipelineRecord::new("p2")
+        .titled("Card B")
+        .field("status", "published"),
+];
+
+let node = render_pipeline_node(
+    r#"Db.Stream("posts") |> layout.Grid(2) |> Card()"#,
+    &records,
+)?;
+```
+
+What this currently gives us:
+
+- a real renderable tree instead of only parsed IR
+- source metadata wrapped into the output tree
+- transforms mapped to Axonix layout components
+- `Card()` mapped to first-party UI primitives
+- named views such as `ProfileCard()` preserved with `data-view`
+
+This is still intentionally modest.
+The goal is to prove the pipeline can become real UI through Axonix-native components before we add a more advanced scheduler, richer transforms, or adapter layers.

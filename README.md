@@ -170,6 +170,35 @@ The first UI primitive kit now includes:
 - `input`
 - `copy`
 
+## Pipeline To UI Draft
+
+Pipelines can now be rendered into real `AxNode` trees through the first pipeline rendering bridge:
+
+```rust
+use axonix_core::pipeline_prelude::*;
+
+let records = vec![
+    PipelineRecord::new("p1")
+        .titled("Card A")
+        .field("status", "draft"),
+    PipelineRecord::new("p2")
+        .titled("Card B")
+        .field("status", "published"),
+];
+
+let node = render_pipeline_node(
+    r#"Db.Stream("posts") |> layout.Grid(2) |> Card()"#,
+    &records,
+)?;
+```
+
+This first bridge keeps the model simple:
+
+- source metadata becomes a root container
+- transforms wrap the rendered record views
+- `Card()` uses the first-party `card` and `copy` primitives
+- named views such as `ProfileCard()` preserve their identity with `data-view`
+
 ## Repo Layout
 
 ```text

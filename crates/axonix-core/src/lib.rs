@@ -1,4 +1,5 @@
 pub mod layout;
+pub mod pipeline_render;
 pub mod reactive;
 pub mod ui;
 
@@ -7,6 +8,7 @@ use thiserror::Error;
 
 pub use axonix_macros::component;
 pub use layout::prelude as layout_prelude;
+pub use pipeline_render::prelude as pipeline_prelude;
 pub use reactive::prelude;
 pub use ui::prelude as ui_prelude;
 
