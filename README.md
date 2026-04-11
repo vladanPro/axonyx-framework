@@ -76,6 +76,64 @@ fn CounterCard() -> AxNode {
 }
 ```
 
+Props work with the same component shape:
+
+```rust
+#[derive(Clone)]
+struct GreetingCardProps {
+    title: String,
+    count: i32,
+}
+
+#[component]
+fn GreetingCard(props: GreetingCardProps) -> AxNode {
+    view(|| {
+        element("article", vec![
+            element("h2", vec![text(props.title)]),
+            element("p", vec![text(format!("Count: {}", props.count))]),
+        ])
+    })
+}
+```
+
+Children can stay explicit and simple through props:
+
+```rust
+#[derive(Clone)]
+struct PanelProps {
+    title: String,
+    children: Children,
+}
+
+#[component]
+fn Panel(props: PanelProps) -> AxNode {
+    let mut body = vec![element("h2", vec![text(props.title)])];
+    body.extend(props.children);
+
+    view(|| element("section", body))
+}
+```
+
+And for cleaner tree authoring, there is now a first `ax!` draft:
+
+```rust
+use axonix_core::ax;
+
+let node = ax!(article[
+    h2["Counter"],
+    p["Ready"],
+    p[format!("Count: {}", 2)],
+]);
+```
+
+Attributes are supported too:
+
+```rust
+let node = ax!(button(class="primary", data_state="ready")[
+    "Launch",
+]);
+```
+
 ## Repo Layout
 
 ```text

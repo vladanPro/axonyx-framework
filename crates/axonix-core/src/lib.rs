@@ -6,6 +6,56 @@ use thiserror::Error;
 pub use axonix_macros::component;
 pub use reactive::prelude;
 
+#[macro_export]
+macro_rules! ax {
+    ($tag:ident ( $($attrs:tt)* ) [ $($children:tt)* ]) => {
+        $crate::reactive::element_with_attrs(
+            stringify!($tag),
+            $crate::ax!(@attrs [] $($attrs)*),
+            $crate::ax!(@children [] $($children)*),
+        )
+    };
+    ($tag:ident [ $($children:tt)* ]) => {
+        $crate::reactive::element(
+            stringify!($tag),
+            $crate::ax!(@children [] $($children)*),
+        )
+    };
+    (@attrs [$($acc:expr,)*]) => {
+        vec![$($acc,)*]
+    };
+    (@attrs [$($acc:expr,)*] , $($rest:tt)*) => {
+        $crate::ax!(@attrs [$($acc,)*] $($rest)*)
+    };
+    (@attrs [$($acc:expr,)*] $name:ident = $value:expr $(, $($rest:tt)*)? ) => {
+        $crate::ax!(@attrs [
+            $($acc,)*
+            $crate::reactive::attr(stringify!($name), $value),
+        ] $($($rest)*)? )
+    };
+    (@children [$($acc:expr,)*]) => {
+        vec![$($acc,)*]
+    };
+    (@children [$($acc:expr,)*] , $($rest:tt)*) => {
+        $crate::ax!(@children [$($acc,)*] $($rest)*)
+    };
+    (@children [$($acc:expr,)*] @node $node:expr $(, $($rest:tt)*)? ) => {
+        $crate::ax!(@children [$($acc,)* $node,] $($($rest)*)? )
+    };
+    (@children [$($acc:expr,)*] $tag:ident [ $($inner:tt)* ] $(, $($rest:tt)*)? ) => {
+        $crate::ax!(@children [$($acc,)* $crate::ax!($tag [ $($inner)* ]),] $($($rest)*)? )
+    };
+    (@children [$($acc:expr,)*] $text:expr $(, $($rest:tt)*)? ) => {
+        $crate::ax!(@children [$($acc,)* $crate::reactive::text($text),] $($($rest)*)? )
+    };
+    (@node $node:expr) => {
+        $node
+    };
+    ($text:expr) => {
+        $crate::reactive::text($text)
+    };
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pipeline {
     pub stages: Vec<Call>,

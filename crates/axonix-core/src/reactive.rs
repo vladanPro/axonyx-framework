@@ -2,6 +2,19 @@ use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
 
+pub trait Props: Clone + 'static {}
+
+impl<T> Props for T where T: Clone + 'static {}
+
+pub type Children = Vec<AxNode>;
+pub type Attributes = Vec<Attribute>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attribute {
+    pub name: &'static str,
+    pub value: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Signal<T> {
     value: Rc<RefCell<T>>,
@@ -116,6 +129,7 @@ where
 pub enum AxNode {
     Element {
         tag: &'static str,
+        attrs: Attributes,
         children: Vec<AxNode>,
     },
     Text(String),
@@ -125,19 +139,53 @@ pub fn text(content: impl Into<String>) -> AxNode {
     AxNode::Text(content.into())
 }
 
+pub fn children(nodes: impl IntoIterator<Item = AxNode>) -> Children {
+    nodes.into_iter().collect()
+}
+
+pub fn attr(name: &'static str, value: impl Into<String>) -> Attribute {
+    Attribute {
+        name,
+        value: value.into(),
+    }
+}
+
 pub fn element(tag: &'static str, children: Vec<AxNode>) -> AxNode {
-    AxNode::Element { tag, children }
+    element_with_attrs(tag, vec![], children)
+}
+
+pub fn element_with_attrs(tag: &'static str, attrs: Attributes, children: Vec<AxNode>) -> AxNode {
+    AxNode::Element {
+        tag,
+        attrs,
+        children,
+    }
 }
 
 pub fn view(build: impl FnOnce() -> AxNode) -> AxNode {
     build()
 }
 
+pub fn render_component<P>(component: impl FnOnce(P) -> AxNode, props: P) -> AxNode
+where
+    P: Props,
+{
+    component(props)
+}
+
 pub mod prelude {
+    pub use super::attr;
+    pub use super::children;
     pub use super::element;
+    pub use super::element_with_attrs;
     pub use super::effect;
     pub use super::mem;
+    pub use super::Attribute;
+    pub use super::Attributes;
+    pub use super::Children;
+    pub use super::Props;
     pub use super::resource;
+    pub use super::render_component;
     pub use super::signal;
     pub use super::text;
     pub use super::view;
@@ -180,5 +228,50 @@ mod tests {
     fn resource_from_result_tracks_ready_state() {
         let posts = Resource::<u32, &'static str>::from_result(Ok(3));
         assert_eq!(posts.state(), ResourceState::Ready(3));
+    }
+
+    #[test]
+    fn render_component_passes_props_into_component() {
+        #[derive(Clone)]
+        struct LabelProps {
+            value: String,
+        }
+
+        fn label(props: LabelProps) -> AxNode {
+            text(props.value)
+        }
+
+        let node = render_component(
+            label,
+            LabelProps {
+                value: "Axonix".to_string(),
+            },
+        );
+
+        assert_eq!(node, AxNode::Text("Axonix".to_string()));
+    }
+
+    #[test]
+    fn children_helper_collects_nodes() {
+        let nodes = children([text("one"), text("two")]);
+
+        assert_eq!(
+            nodes,
+            vec![
+                AxNode::Text("one".to_string()),
+                AxNode::Text("two".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn attr_helper_builds_attribute() {
+        assert_eq!(
+            attr("class", "primary"),
+            Attribute {
+                name: "class",
+                value: "primary".to_string(),
+            }
+        );
     }
 }
