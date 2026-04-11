@@ -269,6 +269,19 @@ Current lowering sketch handles:
 - lowering `Container`, `Grid`, `Card`, `Copy`, and `Button`
 - preserving `recipe` and `class` as style-level attributes
 
+## Backend AST Draft
+
+Axonix now also has a first backend AST draft for full-stack authoring layers that lower into Rust.
+
+Current backend model includes:
+
+- `route`
+- `loader`
+- `action`
+- `job`
+
+The draft is intentionally small and focused on framework-shaped patterns rather than replacing all of Rust.
+
 ## Repo Layout
 
 ```text

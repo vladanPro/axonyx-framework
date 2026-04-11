@@ -369,3 +369,26 @@ What the lowering sketch currently targets:
 
 This is intentionally still a sketch.
 The goal is to validate the data flow from `.ax` source shape to AST and then into a render tree before we build the full parser and compiler pipeline.
+
+## Backend AST draft
+
+Axonix now also has a first backend AST draft that mirrors the full-stack direction described in the notes.
+
+Current backend blocks:
+
+- `AxRoute`
+- `AxLoader`
+- `AxAction`
+- `AxJob`
+
+Current backend statements:
+
+- `data`
+- `insert`
+- `update`
+- `revalidate`
+- `return`
+- `send`
+
+This draft is deliberately limited.
+It is meant to capture framework-native backend authoring shapes that can lower into Rust, not to become a new general-purpose language.
