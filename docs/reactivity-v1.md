@@ -346,3 +346,26 @@ Important design choices in this draft:
 - inline child syntax such as `Copy -> post.excerpt` maps to `AxBody::Inline`
 - nested indentation maps to `AxBody::Block(Vec<AxStatement>)`
 - pipeline expressions have their own AST layer instead of being flattened too early
+
+## `.ax` parser and lowering sketch
+
+Axonix now also has a first parser sketch and lowering layer for the `.ax` direction.
+
+What the parser sketch currently targets:
+
+- the indentation-first page style
+- `data` bindings
+- `each` blocks
+- compact `->` inline children
+- style fields like `recipe` and `class`
+- a minimal `|>` pipeline form
+
+What the lowering sketch currently targets:
+
+- resolving `Db.Stream(...)`-style calls through an injected resolver
+- turning `AxDocument` into a renderable `AxNode`
+- mapping common components such as `Container`, `Grid`, `Card`, `Copy`, and `Button`
+- preserving style layering as concrete output attributes
+
+This is intentionally still a sketch.
+The goal is to validate the data flow from `.ax` source shape to AST and then into a render tree before we build the full parser and compiler pipeline.

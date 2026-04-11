@@ -248,6 +248,27 @@ This draft intentionally models:
 - pipeline stages
 - styling layers through semantic props, `recipe`, and `class`
 
+## `.ax` Parser And Lowering Sketch
+
+Axonix now also has a first parser sketch for the indentation-based `.ax` style and a first lowering pass into `AxNode`.
+
+Current parser sketch handles:
+
+- `page`
+- `data`
+- `each`
+- indentation-based component nesting
+- inline `->` children
+- styling fields such as `recipe` and `class`
+- a minimal `|>` pipeline sketch
+
+Current lowering sketch handles:
+
+- evaluating `data` bindings through a resolver
+- iterating `each` blocks over lists
+- lowering `Container`, `Grid`, `Card`, `Copy`, and `Button`
+- preserving `recipe` and `class` as style-level attributes
+
 ## Repo Layout
 
 ```text
