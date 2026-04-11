@@ -1,8 +1,7 @@
 fn main() {
-    let pipeline = r#"Db.Stream("posts") |> layout.Grid(3) |> Card()"#;
-
-    println!("Axonix app '{{APP_NAME}}' is running.");
-    println!("Default Algebraic UI pipeline:");
-    println!("{pipeline}");
+    println!("Axonix app '{{APP_NAME}}' is ready.");
+    println!("UI entry: app/page.ax");
+    println!("Posts loader: app/posts/loader.ax");
+    println!("Posts actions: app/posts/actions.ax");
+    println!("API route: routes/api/posts.ax");
 }
-

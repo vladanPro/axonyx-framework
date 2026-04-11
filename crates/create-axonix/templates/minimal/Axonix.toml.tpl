@@ -3,6 +3,11 @@ name = "{{APP_NAME}}"
 runtime = "native"
 
 [ui]
-entry = "app/pipeline.ax"
-render_mode = "database-to-dom"
+entry = "app/page.ax"
+layout = "app/layout.ax"
+render_mode = "server"
 
+[server]
+generated_dir = "src/generated"
+routes_dir = "routes"
+jobs_dir = "jobs"
