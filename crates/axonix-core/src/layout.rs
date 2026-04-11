@@ -111,16 +111,59 @@ pub fn center(props: CenterProps) -> AxNode {
     )
 }
 
+#[derive(Clone)]
+pub struct BoxProps {
+    pub tag: &'static str,
+    pub attrs: Attributes,
+    pub children: Children,
+}
+
+#[component]
+pub fn r#box(props: BoxProps) -> AxNode {
+    let mut attrs = vec![attr("data-layout", "box")];
+    attrs.extend(props.attrs);
+
+    element_with_attrs(props.tag, attrs, props.children)
+}
+
+#[derive(Clone)]
+pub struct SpacerProps {
+    pub axis: Axis,
+    pub size: Gap,
+}
+
+#[component]
+pub fn spacer(props: SpacerProps) -> AxNode {
+    let axis = match props.axis {
+        Axis::Horizontal => "horizontal",
+        Axis::Vertical => "vertical",
+    };
+
+    element_with_attrs(
+        "div",
+        vec![
+            attr("data-layout", "spacer"),
+            attr("data-axis", axis),
+            attr("data-size", props.size.to_attr_value()),
+        ],
+        vec![],
+    )
+}
+
 pub mod prelude {
+    pub use super::r#box;
     pub use super::center;
     pub use super::container;
     pub use super::grid;
+    pub use super::spacer;
     pub use super::stack;
     pub use super::Axis;
+    pub use super::BoxProps;
     pub use super::CenterProps;
     pub use super::ContainerProps;
     pub use super::Gap;
     pub use super::GridProps;
+    pub use super::SpacerProps;
     pub use super::StackProps;
 }
 
@@ -256,6 +299,69 @@ mod tests {
                     },
                 ],
                 children: vec![AxNode::Text("content".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn box_component_preserves_custom_tag_and_attrs() {
+        let node = render_component(
+            r#box,
+            BoxProps {
+                tag: "section",
+                attrs: vec![attr("class", "hero-shell")],
+                children: children([text("boxed")]),
+            },
+        );
+
+        assert_eq!(
+            node,
+            AxNode::Element {
+                tag: "section",
+                attrs: vec![
+                    Attribute {
+                        name: "data-layout",
+                        value: "box".to_string(),
+                    },
+                    Attribute {
+                        name: "class",
+                        value: "hero-shell".to_string(),
+                    },
+                ],
+                children: vec![AxNode::Text("boxed".to_string())],
+            }
+        );
+    }
+
+    #[test]
+    fn spacer_component_emits_layout_attributes() {
+        let node = render_component(
+            spacer,
+            SpacerProps {
+                axis: Axis::Vertical,
+                size: Gap::Px(24),
+            },
+        );
+
+        assert_eq!(
+            node,
+            AxNode::Element {
+                tag: "div",
+                attrs: vec![
+                    Attribute {
+                        name: "data-layout",
+                        value: "spacer".to_string(),
+                    },
+                    Attribute {
+                        name: "data-axis",
+                        value: "vertical".to_string(),
+                    },
+                    Attribute {
+                        name: "data-size",
+                        value: "24px".to_string(),
+                    },
+                ],
+                children: vec![],
             }
         );
     }

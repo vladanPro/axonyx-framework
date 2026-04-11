@@ -229,9 +229,59 @@ Current layout primitives:
 - `grid`
 - `container`
 - `center`
+- `box`
+- `spacer`
 
 Current design choice:
 
 - layout is modeled first as ordinary components
 - later it can be exposed as pipe-friendly sugar as well
 - the stable base stays simple and composable
+
+## UI primitives draft
+
+Axonix now also has a first UI primitive layer through ordinary components:
+
+- `button`
+- `card`
+- `input`
+- `copy`
+
+Example:
+
+```rust
+use axonix_core::layout_prelude::*;
+use axonix_core::prelude::*;
+use axonix_core::ui_prelude::*;
+
+let node = render_component(
+    container,
+    ContainerProps {
+        max_width: "xl",
+        children: children([render_component(
+            card,
+            CardProps {
+                title: Some("Axonix".into()),
+                children: children([
+                    render_component(
+                        copy,
+                        CopyProps {
+                            tag: "p",
+                            tone: Tone::Neutral,
+                            children: children([text("Single-binary UI framework")]),
+                        },
+                    ),
+                    render_component(
+                        button,
+                        ButtonProps {
+                            tone: Tone::Primary,
+                            disabled: false,
+                            children: children([text("Launch")]),
+                        },
+                    ),
+                ]),
+            },
+        )]),
+    },
+);
+```

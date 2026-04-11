@@ -1,5 +1,6 @@
 pub mod layout;
 pub mod reactive;
+pub mod ui;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -7,6 +8,7 @@ use thiserror::Error;
 pub use axonix_macros::component;
 pub use layout::prelude as layout_prelude;
 pub use reactive::prelude;
+pub use ui::prelude as ui_prelude;
 
 #[macro_export]
 macro_rules! ax {

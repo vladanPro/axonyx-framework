@@ -2,6 +2,7 @@ use axonix_core::ax;
 use axonix_core::component;
 use axonix_core::layout_prelude::*;
 use axonix_core::prelude::*;
+use axonix_core::ui_prelude::*;
 
 #[component]
 fn counter_card() -> AxNode {
@@ -325,6 +326,241 @@ fn container_and_center_compose_with_layout_tree() {
                     },
                 ],
                 children: vec![AxNode::Text("Hello Axonix".to_string())],
+            }],
+        }
+    );
+}
+
+#[test]
+fn box_and_spacer_compose_inside_stack() {
+    let node = render_component(
+        stack,
+        StackProps {
+            axis: Axis::Vertical,
+            gap: Gap::Token("sm"),
+            children: children([
+                render_component(
+                    r#box,
+                    BoxProps {
+                        tag: "section",
+                        attrs: vec![attr("class", "hero")],
+                        children: children([text("Header")]),
+                    },
+                ),
+                render_component(
+                    spacer,
+                    SpacerProps {
+                        axis: Axis::Vertical,
+                        size: Gap::Px(12),
+                    },
+                ),
+                render_component(
+                    r#box,
+                    BoxProps {
+                        tag: "section",
+                        attrs: vec![attr("class", "content")],
+                        children: children([text("Body")]),
+                    },
+                ),
+            ]),
+        },
+    );
+
+    assert_eq!(
+        node,
+        AxNode::Element {
+            tag: "div",
+            attrs: vec![
+                Attribute {
+                    name: "data-layout",
+                    value: "stack".to_string(),
+                },
+                Attribute {
+                    name: "data-axis",
+                    value: "column".to_string(),
+                },
+                Attribute {
+                    name: "data-gap",
+                    value: "sm".to_string(),
+                },
+            ],
+            children: vec![
+                AxNode::Element {
+                    tag: "section",
+                    attrs: vec![
+                        Attribute {
+                            name: "data-layout",
+                            value: "box".to_string(),
+                        },
+                        Attribute {
+                            name: "class",
+                            value: "hero".to_string(),
+                        },
+                    ],
+                    children: vec![AxNode::Text("Header".to_string())],
+                },
+                AxNode::Element {
+                    tag: "div",
+                    attrs: vec![
+                        Attribute {
+                            name: "data-layout",
+                            value: "spacer".to_string(),
+                        },
+                        Attribute {
+                            name: "data-axis",
+                            value: "vertical".to_string(),
+                        },
+                        Attribute {
+                            name: "data-size",
+                            value: "12px".to_string(),
+                        },
+                    ],
+                    children: vec![],
+                },
+                AxNode::Element {
+                    tag: "section",
+                    attrs: vec![
+                        Attribute {
+                            name: "data-layout",
+                            value: "box".to_string(),
+                        },
+                        Attribute {
+                            name: "class",
+                            value: "content".to_string(),
+                        },
+                    ],
+                    children: vec![AxNode::Text("Body".to_string())],
+                },
+            ],
+        }
+    );
+}
+
+#[test]
+fn ui_primitives_compose_inside_layout() {
+    let node = render_component(
+        container,
+        ContainerProps {
+            max_width: "xl",
+            children: children([render_component(
+                card,
+                CardProps {
+                    title: Some("Axonix".to_string()),
+                    children: children([
+                        render_component(
+                            copy,
+                            CopyProps {
+                                tag: "p",
+                                tone: Tone::Neutral,
+                                children: children([text("Single-binary UI framework")]),
+                            },
+                        ),
+                        render_component(
+                            input,
+                            InputProps {
+                                value: String::new(),
+                                placeholder: Some("Search docs".to_string()),
+                                input_type: "text",
+                            },
+                        ),
+                        render_component(
+                            button,
+                            ButtonProps {
+                                tone: Tone::Primary,
+                                disabled: false,
+                                children: children([text("Launch")]),
+                            },
+                        ),
+                    ]),
+                },
+            )]),
+        },
+    );
+
+    assert_eq!(
+        node,
+        AxNode::Element {
+            tag: "div",
+            attrs: vec![
+                Attribute {
+                    name: "data-layout",
+                    value: "container".to_string(),
+                },
+                Attribute {
+                    name: "data-max-width",
+                    value: "xl".to_string(),
+                },
+            ],
+            children: vec![AxNode::Element {
+                tag: "article",
+                attrs: vec![Attribute {
+                    name: "data-ui",
+                    value: "card".to_string(),
+                }],
+                children: vec![
+                    AxNode::Element {
+                        tag: "header",
+                        attrs: vec![Attribute {
+                            name: "data-ui",
+                            value: "card-header".to_string(),
+                        }],
+                        children: vec![AxNode::Text("Axonix".to_string())],
+                    },
+                    AxNode::Element {
+                        tag: "p",
+                        attrs: vec![
+                            Attribute {
+                                name: "data-ui",
+                                value: "copy".to_string(),
+                            },
+                            Attribute {
+                                name: "data-tone",
+                                value: "neutral".to_string(),
+                            },
+                        ],
+                        children: vec![AxNode::Text("Single-binary UI framework".to_string())],
+                    },
+                    AxNode::Element {
+                        tag: "input",
+                        attrs: vec![
+                            Attribute {
+                                name: "data-ui",
+                                value: "input".to_string(),
+                            },
+                            Attribute {
+                                name: "type",
+                                value: "text".to_string(),
+                            },
+                            Attribute {
+                                name: "value",
+                                value: String::new(),
+                            },
+                            Attribute {
+                                name: "placeholder",
+                                value: "Search docs".to_string(),
+                            },
+                        ],
+                        children: vec![],
+                    },
+                    AxNode::Element {
+                        tag: "button",
+                        attrs: vec![
+                            Attribute {
+                                name: "data-ui",
+                                value: "button".to_string(),
+                            },
+                            Attribute {
+                                name: "data-tone",
+                                value: "primary".to_string(),
+                            },
+                            Attribute {
+                                name: "data-disabled",
+                                value: "false".to_string(),
+                            },
+                        ],
+                        children: vec![AxNode::Text("Launch".to_string())],
+                    },
+                ],
             }],
         }
     );
