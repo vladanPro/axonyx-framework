@@ -1,7 +1,6 @@
 [workspace]
 members = [
   "crates/axonix-core",
-  "crates/axonix-adapter-blokbite",
   "crates/create-axonix",
 ]
 resolver = "2"
@@ -23,4 +22,3 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
-

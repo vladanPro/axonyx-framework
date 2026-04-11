@@ -9,7 +9,6 @@ Axonix is a Rust-first framework focused on:
 This repository includes:
 
 - `axonix-core`: pipeline parser and core types
-- `axonix-adapter-blokbite`: adapter contract for BlokBite-style block systems
 - `create-axonix`: project scaffolding CLI (similar to `create-next-app`)
 
 ## Quick Start
@@ -41,7 +40,5 @@ create-axonix my-app --yes
 ```text
 crates/
   axonix-core/
-  axonix-adapter-blokbite/
   create-axonix/
 ```
-
