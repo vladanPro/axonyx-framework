@@ -306,20 +306,30 @@ impl Parser {
         }
 
         self.pos += 1;
-        let fields = self.parse_assignments(indent + 2)?;
+        let (fields, filters) = self.parse_mutation_body(indent + 2)?;
 
         if is_insert {
-            Ok(AxBackendStmt::insert(trim_quotes(collection), fields))
+            let mut mutation = AxMutation::new(trim_quotes(collection), fields);
+            for filter in filters {
+                mutation = mutation.filter(filter);
+            }
+            Ok(AxBackendStmt::Insert(mutation))
         } else {
-            Ok(AxBackendStmt::update(trim_quotes(collection), fields))
+            let mut mutation = AxMutation::new(trim_quotes(collection), fields);
+            for filter in filters {
+                mutation = mutation.filter(filter);
+            }
+            Ok(AxBackendStmt::Update(mutation))
         }
     }
 
-    fn parse_assignments(
+    fn parse_mutation_body(
         &mut self,
         indent: usize,
-    ) -> Result<Vec<AxAssignment>, AxBackendParseError> {
+    ) -> Result<(Vec<AxAssignment>, Vec<AxQueryFilter>), AxBackendParseError> {
         let mut fields = Vec::new();
+        let mut filters = Vec::new();
+        let mut parsing_filters = false;
 
         while let Some(line) = self.current() {
             if line.indent < indent {
@@ -328,6 +338,31 @@ impl Parser {
 
             if line.indent > indent {
                 return Err(AxBackendParseError::UnexpectedIndentation { line: line.line });
+            }
+
+            if let Some(rest) = line.text.strip_prefix("where ") {
+                parsing_filters = true;
+                let Some((field, value)) = rest.split_once('=') else {
+                    return Err(AxBackendParseError::InvalidQueryClause { line: line.line });
+                };
+
+                let field = field.trim();
+                let value = value.trim();
+                if field.is_empty() || value.is_empty() {
+                    return Err(AxBackendParseError::InvalidQueryClause { line: line.line });
+                }
+
+                filters.push(AxQueryFilter::new(
+                    field,
+                    AxQueryFilterOp::Eq,
+                    parse_expr(value, line.line)?,
+                ));
+                self.pos += 1;
+                continue;
+            }
+
+            if parsing_filters {
+                return Err(AxBackendParseError::InvalidQueryClause { line: line.line });
             }
 
             let Some((name, value)) = line.text.split_once(':') else {
@@ -352,7 +387,7 @@ impl Parser {
             return Err(AxBackendParseError::InvalidMutation { line });
         }
 
-        Ok(fields)
+        Ok((fields, filters))
     }
 
     fn current(&self) -> Option<&BackendLine> {
@@ -745,6 +780,37 @@ action CreatePost
         assert_eq!(action.name, "CreatePost");
         assert_eq!(action.input.len(), 2);
         assert_eq!(action.body.len(), 3);
+    }
+
+    #[test]
+    fn parses_update_mutation_with_where_clause() {
+        let input = r#"
+action PublishPost
+  input:
+    id: i64
+    title: string
+
+  update "posts"
+    title: input.title
+    where id = input.id
+
+  return ok
+"#;
+
+        let document = parse_backend_ax(input).expect("document should parse");
+
+        let AxBackendBlock::Action(action) = &document.blocks[0] else {
+            panic!("expected action block");
+        };
+
+        let AxBackendStmt::Update(mutation) = &action.body[0] else {
+            panic!("expected update statement");
+        };
+
+        assert_eq!(mutation.collection, "posts");
+        assert_eq!(mutation.fields.len(), 1);
+        assert_eq!(mutation.filters.len(), 1);
+        assert_eq!(mutation.filters[0].field, "id");
     }
 
     #[test]

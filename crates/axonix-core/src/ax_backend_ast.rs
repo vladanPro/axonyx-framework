@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ax_ast::prelude::AxExpr;
-use crate::ax_query_ast::prelude::AxQuerySpec;
+use crate::ax_query_ast::prelude::{AxQueryFilter, AxQuerySpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AxBackendDocument {
@@ -175,6 +175,7 @@ impl From<AxQuerySpec> for AxBackendValue {
 pub struct AxMutation {
     pub collection: String,
     pub fields: Vec<AxAssignment>,
+    pub filters: Vec<AxQueryFilter>,
 }
 
 impl AxMutation {
@@ -185,7 +186,13 @@ impl AxMutation {
         Self {
             collection: collection.into(),
             fields: fields.into_iter().collect(),
+            filters: Vec::new(),
         }
+    }
+
+    pub fn filter(mut self, filter: AxQueryFilter) -> Self {
+        self.filters.push(filter);
+        self
     }
 }
 

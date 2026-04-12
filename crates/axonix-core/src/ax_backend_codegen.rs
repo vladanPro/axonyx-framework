@@ -146,10 +146,15 @@ fn render_step(step: &AxStepPlan) -> String {
             collection,
             render_fields_map(fields)
         ),
-        AxStepPlan::Update { collection, fields } => format!(
-            "    runtime.update(&AxUpdateRequest {{\n        collection: {:?}.to_string(),\n        fields: {},\n        filters: Vec::new(),\n    }})?;\n",
+        AxStepPlan::Update {
             collection,
-            render_fields_map(fields)
+            fields,
+            filters,
+        } => format!(
+            "    runtime.update(&AxUpdateRequest {{\n        collection: {:?}.to_string(),\n        fields: {},\n        filters: {},\n    }})?;\n",
+            collection,
+            render_fields_map(fields),
+            render_query_filters(filters)
         ),
         AxStepPlan::Revalidate { target } => {
             format!("    runtime.revalidate({})?;\n", render_borrowed_expr(target))
@@ -240,6 +245,27 @@ fn render_fields_map(fields: &[AxAssignmentPlan]) -> String {
         .join(", ");
 
     format!("BTreeMap::from([{entries}])")
+}
+
+fn render_query_filters(filters: &[AxQueryFilterPlan]) -> String {
+    if filters.is_empty() {
+        return "Vec::new()".to_string();
+    }
+
+    let entries = filters
+        .iter()
+        .map(|filter| {
+            format!(
+                "AxQueryFilterRequest {{ field: {:?}.to_string(), op: {}, value: json!({}) }}",
+                filter.field,
+                render_filter_op(filter.op),
+                render_borrowed_expr(&filter.value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!("vec![{entries}]")
 }
 
 fn render_borrowed_expr(expr: &AxRustExpr) -> String {

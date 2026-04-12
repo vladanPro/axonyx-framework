@@ -52,6 +52,7 @@ pub enum AxStepPlan {
     Update {
         collection: String,
         fields: Vec<AxAssignmentPlan>,
+        filters: Vec<AxQueryFilterPlan>,
     },
     Revalidate {
         target: AxRustExpr,
@@ -269,6 +270,17 @@ fn lower_step(step: &AxBackendStmt) -> AxStepPlan {
         AxBackendStmt::Update(mutation) => AxStepPlan::Update {
             collection: mutation.collection.clone(),
             fields: lower_assignments(&mutation.fields),
+            filters: mutation
+                .filters
+                .iter()
+                .map(|filter| AxQueryFilterPlan {
+                    field: filter.field.clone(),
+                    op: match filter.op {
+                        AxQueryFilterOp::Eq => AxQueryFilterOpPlan::Eq,
+                    },
+                    value: lower_expr(&filter.value),
+                })
+                .collect(),
         },
         AxBackendStmt::Revalidate(expr) => AxStepPlan::Revalidate {
             target: lower_expr(expr),
@@ -577,6 +589,44 @@ action CreatePost
             }
         );
         assert_eq!(handler.steps[2], AxStepPlan::Return(AxReturnPlan::Ok));
+    }
+
+    #[test]
+    fn lowers_update_where_clause_into_runtime_filters() {
+        let document = parse_backend_ax(
+            r#"
+action PublishPost
+  input:
+    id: i64
+    title: string
+
+  update "posts"
+    title: input.title
+    where id = input.id
+
+  return ok
+"#,
+        )
+        .expect("document should parse");
+
+        let plan = lower_backend_document(&document).expect("document should lower");
+        let handler = &plan.handlers[0];
+
+        assert_eq!(
+            handler.steps[0],
+            AxStepPlan::Update {
+                collection: "posts".to_string(),
+                fields: vec![AxAssignmentPlan {
+                    name: "title".to_string(),
+                    value: AxRustExpr::new("input.title"),
+                }],
+                filters: vec![AxQueryFilterPlan {
+                    field: "id".to_string(),
+                    op: AxQueryFilterOpPlan::Eq,
+                    value: AxRustExpr::new("input.id"),
+                }],
+            }
+        );
     }
 
     #[test]
