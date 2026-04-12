@@ -107,6 +107,7 @@ pub enum AxBackendStmt {
     Data(AxBackendData),
     Insert(AxMutation),
     Update(AxMutation),
+    Delete(AxMutation),
     Revalidate(AxExpr),
     Return(AxReturn),
     Send(AxSend),
@@ -123,6 +124,10 @@ impl AxBackendStmt {
 
     pub fn update(collection: impl Into<String>, fields: impl IntoIterator<Item = AxAssignment>) -> Self {
         Self::Update(AxMutation::new(collection, fields))
+    }
+
+    pub fn delete(collection: impl Into<String>) -> Self {
+        Self::Delete(AxMutation::new(collection, []))
     }
 
     pub fn revalidate(value: impl Into<AxExpr>) -> Self {

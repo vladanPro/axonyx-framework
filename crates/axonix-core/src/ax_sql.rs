@@ -61,6 +61,8 @@ pub enum AxSqlCompileError {
     UnsupportedFilterOperator,
     #[error("mutation must contain at least one field")]
     EmptyMutationFields,
+    #[error("delete mutation must contain at least one filter")]
+    EmptyDeleteFilters,
 }
 
 pub fn compile_query_plan_to_sql(
@@ -228,6 +230,48 @@ pub fn compile_update_plan_to_sql(
     })
 }
 
+pub fn compile_delete_plan_to_sql(
+    collection: &str,
+    filters: &[AxQueryFilterPlan],
+    dialect: AxSqlDialect,
+) -> Result<AxSqlMutation, AxSqlCompileError> {
+    validate_ident(collection)?;
+    if filters.is_empty() {
+        return Err(AxSqlCompileError::EmptyDeleteFilters);
+    }
+
+    let mut clauses = Vec::with_capacity(filters.len());
+    let mut params = Vec::with_capacity(filters.len());
+
+    for filter in filters {
+        validate_ident(&filter.field)?;
+        let placeholder = dialect.placeholder(params.len() + 1);
+        let op = match filter.op {
+            AxQueryFilterOpPlan::Eq => "=",
+        };
+
+        clauses.push(format!(
+            "{} {} {}",
+            dialect.quote_ident(&filter.field),
+            op,
+            placeholder
+        ));
+        params.push(AxSqlParam {
+            index: params.len() + 1,
+            value: filter.value.clone(),
+        });
+    }
+
+    Ok(AxSqlMutation {
+        sql: format!(
+            "delete from {} where {}",
+            dialect.quote_ident(collection),
+            clauses.join(" and ")
+        ),
+        params,
+    })
+}
+
 fn validate_ident(ident: &str) -> Result<(), AxSqlCompileError> {
     let trimmed = ident.trim();
     if trimmed.is_empty() {
@@ -254,6 +298,7 @@ fn order_direction_name(direction: AxQueryOrderDirectionPlan) -> &'static str {
 }
 
 pub mod prelude {
+    pub use super::compile_delete_plan_to_sql;
     pub use super::compile_insert_plan_to_sql;
     pub use super::compile_query_plan_to_sql;
     pub use super::compile_update_plan_to_sql;
@@ -472,5 +517,30 @@ mod tests {
             .expect_err("empty insert should fail");
 
         assert_eq!(error, AxSqlCompileError::EmptyMutationFields);
+    }
+
+    #[test]
+    fn compiles_delete_plan_with_where_clause() {
+        let mutation = compile_delete_plan_to_sql(
+            "posts",
+            &[AxQueryFilterPlan {
+                field: "id".to_string(),
+                op: AxQueryFilterOpPlan::Eq,
+                value: AxRustExpr::new("input.id"),
+            }],
+            AxSqlDialect::Postgres,
+        )
+        .expect("delete should compile");
+
+        assert_eq!(mutation.sql, r#"delete from "posts" where "id" = $1"#);
+        assert_eq!(mutation.params.len(), 1);
+    }
+
+    #[test]
+    fn rejects_delete_without_filters() {
+        let error = compile_delete_plan_to_sql("posts", &[], AxSqlDialect::Postgres)
+            .expect_err("delete without filters should fail");
+
+        assert_eq!(error, AxSqlCompileError::EmptyDeleteFilters);
     }
 }

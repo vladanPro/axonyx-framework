@@ -232,6 +232,10 @@ impl Parser {
             return self.parse_mutation(indent, false);
         }
 
+        if text.starts_with("delete ") {
+            return self.parse_delete(indent);
+        }
+
         if let Some(value) = text.strip_prefix("revalidate ") {
             self.pos += 1;
             return Ok(AxBackendStmt::revalidate(parse_expr(value.trim(), line.line)?));
@@ -323,6 +327,22 @@ impl Parser {
         }
     }
 
+    fn parse_delete(&mut self, indent: usize) -> Result<AxBackendStmt, AxBackendParseError> {
+        let line = self.current().expect("delete line exists").clone();
+        let collection = line.text["delete ".len()..].trim();
+        if collection.is_empty() {
+            return Err(AxBackendParseError::InvalidMutation { line: line.line });
+        }
+
+        self.pos += 1;
+        let (_fields, filters) = self.parse_mutation_body(indent + 2)?;
+        let mut mutation = AxMutation::new(trim_quotes(collection), []);
+        for filter in filters {
+            mutation = mutation.filter(filter);
+        }
+        Ok(AxBackendStmt::Delete(mutation))
+    }
+
     fn parse_mutation_body(
         &mut self,
         indent: usize,
@@ -379,7 +399,7 @@ impl Parser {
             self.pos += 1;
         }
 
-        if fields.is_empty() {
+        if fields.is_empty() && filters.is_empty() {
             let line = self
                 .current()
                 .map(|line| line.line)
@@ -829,5 +849,33 @@ job PublishDailyDigest
 
         assert_eq!(job.name, "PublishDailyDigest");
         assert_eq!(job.body.len(), 2);
+    }
+
+    #[test]
+    fn parses_delete_mutation_with_where_clause() {
+        let input = r#"
+action RemovePost
+  input:
+    id: i64
+
+  delete "posts"
+    where id = input.id
+
+  return ok
+"#;
+
+        let document = parse_backend_ax(input).expect("document should parse");
+
+        let AxBackendBlock::Action(action) = &document.blocks[0] else {
+            panic!("expected action block");
+        };
+
+        let AxBackendStmt::Delete(mutation) = &action.body[0] else {
+            panic!("expected delete statement");
+        };
+
+        assert_eq!(mutation.collection, "posts");
+        assert!(mutation.fields.is_empty());
+        assert_eq!(mutation.filters.len(), 1);
     }
 }

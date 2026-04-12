@@ -156,6 +156,11 @@ fn render_step(step: &AxStepPlan) -> String {
             render_fields_map(fields),
             render_query_filters(filters)
         ),
+        AxStepPlan::Delete { collection, filters } => format!(
+            "    runtime.delete(&AxDeleteRequest {{\n        collection: {:?}.to_string(),\n        filters: {},\n    }})?;\n",
+            collection,
+            render_query_filters(filters)
+        ),
         AxStepPlan::Revalidate { target } => {
             format!("    runtime.revalidate({})?;\n", render_borrowed_expr(target))
         }
@@ -434,5 +439,26 @@ route GET "/api/posts"
 
         assert!(module.contains("pub fn loader_posts_list(runtime: &impl AxBackendRuntime)"));
         assert!(module.contains("pub fn route_get_api_posts(runtime: &impl AxBackendRuntime)"));
+    }
+
+    #[test]
+    fn compiles_delete_where_into_runtime_delete_request() {
+        let module = compile_backend_ax_to_module(
+            r#"
+action RemovePost
+  input:
+    id: i64
+
+  delete "posts"
+    where id = input.id
+
+  return ok
+"#,
+        )
+        .expect("source should compile");
+
+        assert!(module.contains("runtime.delete(&AxDeleteRequest"));
+        assert!(module.contains("filters: vec![AxQueryFilterRequest"));
+        assert!(module.contains("field: \"id\".to_string()"));
     }
 }

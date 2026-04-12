@@ -5,7 +5,8 @@ use axonix_core::ax_backend_lowering_prelude::{
     AxQueryOrderPlan, AxQueryPlan, AxQuerySourcePlan, AxRustExpr,
 };
 use axonix_core::ax_sql_prelude::{
-    compile_insert_plan_to_sql, compile_query_plan_to_sql, compile_update_plan_to_sql,
+    compile_delete_plan_to_sql, compile_insert_plan_to_sql, compile_query_plan_to_sql,
+    compile_update_plan_to_sql,
     AxSqlDialect,
 };
 use serde::{Deserialize, Serialize};
@@ -71,6 +72,12 @@ pub struct AxInsertRequest {
 pub struct AxUpdateRequest {
     pub collection: String,
     pub fields: BTreeMap<String, Value>,
+    pub filters: Vec<AxQueryFilterRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AxDeleteRequest {
+    pub collection: String,
     pub filters: Vec<AxQueryFilterRequest>,
 }
 
@@ -311,6 +318,7 @@ pub trait AxDatabaseAdapter {
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value>;
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value>;
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value>;
+    fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value>;
 }
 
 impl<T> AxDatabaseAdapter for Box<T>
@@ -332,6 +340,10 @@ where
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
         (**self).update(request)
     }
+
+    fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
+        (**self).delete(request)
+    }
 }
 
 pub trait AxQueryExecutor {
@@ -341,6 +353,7 @@ pub trait AxQueryExecutor {
 pub trait AxMutationExecutor {
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value>;
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value>;
+    fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value>;
 }
 
 pub trait AxRevalidator {
@@ -398,6 +411,10 @@ where
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
         self.adapter.update(request)
     }
+
+    fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
+        self.adapter.delete(request)
+    }
 }
 
 impl<A> AxRevalidator for AxDatabaseRuntime<A> {
@@ -452,6 +469,10 @@ impl AxDatabaseAdapter for PostgresAdapter {
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
         dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
+
+    fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
+        dispatch_delete(self.driver(), self.transport, &self.url, &self.api_url, request)
+    }
 }
 
 impl AxDatabaseAdapter for MySqlAdapter {
@@ -470,6 +491,10 @@ impl AxDatabaseAdapter for MySqlAdapter {
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
         dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
+
+    fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
+        dispatch_delete(self.driver(), self.transport, &self.url, &self.api_url, request)
+    }
 }
 
 impl AxDatabaseAdapter for SqliteAdapter {
@@ -487,6 +512,10 @@ impl AxDatabaseAdapter for SqliteAdapter {
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
         dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
+    }
+
+    fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
+        dispatch_delete(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 }
 
@@ -510,6 +539,16 @@ impl AxDatabaseAdapter for MemoryAdapter {
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
         Ok(mutation_payload(self.driver(), AxDataTransport::Direct, &None, &None, "update", &request.collection, &request.fields))
+    }
+
+    fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
+        Ok(json!({
+            "driver": self.driver().as_str(),
+            "transport": "direct",
+            "action": "delete",
+            "collection": request.collection,
+            "filters": request.filters,
+        }))
     }
 }
 
@@ -631,6 +670,19 @@ fn dispatch_update(
     }
 }
 
+fn dispatch_delete(
+    driver: AxDatabaseDriver,
+    transport: AxDataTransport,
+    url: &Option<String>,
+    api_url: &Option<String>,
+    request: &AxDeleteRequest,
+) -> AxRuntimeResult<Value> {
+    match transport {
+        AxDataTransport::Direct => direct_delete_plan(driver, url, request),
+        AxDataTransport::Api => api_delete_plan(driver, api_url, request),
+    }
+}
+
 fn direct_load_plan(
     driver: AxDatabaseDriver,
     url: &Option<String>,
@@ -721,6 +773,39 @@ fn direct_update_plan(
     }))
 }
 
+fn direct_delete_plan(
+    driver: AxDatabaseDriver,
+    url: &Option<String>,
+    request: &AxDeleteRequest,
+) -> AxRuntimeResult<Value> {
+    let Some(dialect) = driver.sql_dialect() else {
+        return Ok(json!({
+            "driver": driver.as_str(),
+            "transport": "direct",
+            "action": "delete",
+            "collection": request.collection,
+            "filters": request.filters,
+        }));
+    };
+
+    let filters = query_filters_to_plan(&request.filters);
+    let plan = compile_delete_plan_to_sql(&request.collection, &filters, dialect)
+        .map_err(|error| AxRuntimeError::message(error.to_string()))?;
+    let execution = AxDirectSqlPlan {
+        dialect: dialect.name().to_string(),
+        sql: plan.sql,
+        params: request.filters.iter().map(|filter| filter.value.clone()).collect(),
+        url: url.clone(),
+    };
+
+    Ok(json!({
+        "driver": driver.as_str(),
+        "transport": "direct",
+        "action": "delete",
+        "execution": execution,
+    }))
+}
+
 fn api_load_plan(
     driver: AxDatabaseDriver,
     api_url: &Option<String>,
@@ -770,6 +855,32 @@ fn api_mutation_plan(
         payload: json!({
             "fields": fields,
             "filters": request_filters_payload(filters),
+        }),
+    };
+
+    Ok(json!({
+        "driver": driver.as_str(),
+        "transport": "api",
+        "request": plan,
+    }))
+}
+
+fn api_delete_plan(
+    driver: AxDatabaseDriver,
+    api_url: &Option<String>,
+    request: &AxDeleteRequest,
+) -> AxRuntimeResult<Value> {
+    let plan = AxApiRequestPlan {
+        dialect: driver
+            .sql_dialect()
+            .map(|dialect| dialect.name().to_string())
+            .unwrap_or_else(|| driver.as_str().to_string()),
+        base_url: api_url.clone().unwrap_or_default(),
+        token: "<redacted-by-runtime-config>".to_string(),
+        action: "delete".to_string(),
+        resource: request.collection.clone(),
+        payload: json!({
+            "filters": request.filters,
         }),
     };
 
@@ -842,6 +953,7 @@ pub mod prelude {
     pub use super::AxDatabaseDriver;
     pub use super::AxDatabaseRuntime;
     pub use super::AxDataTransport;
+    pub use super::AxDeleteRequest;
     pub use super::AxEnv;
     pub use super::AxInsertRequest;
     pub use super::AxMessenger;
@@ -901,6 +1013,13 @@ mod tests {
             Ok(json!({
                 "updated": request.collection,
                 "fields": request.fields,
+            }))
+        }
+
+        fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
+            Ok(json!({
+                "deleted": request.collection,
+                "filters": request.filters,
             }))
         }
     }
@@ -1131,6 +1250,31 @@ mod tests {
         );
         assert_eq!(value["execution"]["params"][0], json!("Hello"));
         assert_eq!(value["execution"]["params"][1], json!(7));
+    }
+
+    #[test]
+    fn direct_delete_emits_where_clause_when_filters_exist() {
+        let env = AxEnv::new()
+            .with_secret("db_dialect", "postgres")
+            .with_secret("db_url", "postgres://local/axonix");
+        let runtime = runtime_from_env(env).expect("runtime should initialize");
+
+        let value = runtime
+            .delete(&AxDeleteRequest {
+                collection: "posts".to_string(),
+                filters: vec![AxQueryFilterRequest {
+                    field: "id".to_string(),
+                    op: AxQueryFilterOp::Eq,
+                    value: json!(7),
+                }],
+            })
+            .expect("delete should execute");
+
+        assert_eq!(
+            value["execution"]["sql"],
+            r#"delete from "posts" where "id" = $1"#
+        );
+        assert_eq!(value["execution"]["params"][0], json!(7));
     }
 
     #[test]
