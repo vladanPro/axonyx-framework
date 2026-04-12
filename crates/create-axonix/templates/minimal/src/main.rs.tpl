@@ -3,7 +3,6 @@ mod generated;
 mod runtime;
 
 use db::db_url;
-use generated::backend::describe_backend;
 use runtime::AxEnv;
 
 fn main() {
@@ -19,7 +18,7 @@ fn main() {
         env.secret("db_url").map(|_| "yes").unwrap_or("no")
     );
     println!("DB helper sees URL: {}", db_url(&env).map(|_| "yes").unwrap_or("no"));
-    println!("Generated backend: {}", describe_backend(&env));
+    println!("Generated backend file: src/generated/backend.rs");
     println!("UI entry: app/page.ax");
     println!("Posts loader: app/posts/loader.ax");
     println!("Posts actions: app/posts/actions.ax");

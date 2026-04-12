@@ -8,4 +8,4 @@ description = "Scaffold a new Axonix app"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-
+axonix-core = { path = "../axonix-core" }

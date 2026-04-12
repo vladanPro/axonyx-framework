@@ -6,3 +6,4 @@ edition = "2021"
 [workspace]
 
 [dependencies]
+serde_json = "1"
