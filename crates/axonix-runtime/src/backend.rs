@@ -71,6 +71,7 @@ pub struct AxInsertRequest {
 pub struct AxUpdateRequest {
     pub collection: String,
     pub fields: BTreeMap<String, Value>,
+    pub filters: Vec<AxQueryFilterRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -604,7 +605,9 @@ fn dispatch_insert(
 ) -> AxRuntimeResult<Value> {
     match transport {
         AxDataTransport::Direct => direct_insert_plan(driver, url, request),
-        AxDataTransport::Api => api_mutation_plan(driver, api_url, "insert", &request.collection, &request.fields),
+        AxDataTransport::Api => {
+            api_mutation_plan(driver, api_url, "insert", &request.collection, &request.fields, &[])
+        }
     }
 }
 
@@ -617,7 +620,14 @@ fn dispatch_update(
 ) -> AxRuntimeResult<Value> {
     match transport {
         AxDataTransport::Direct => direct_update_plan(driver, url, request),
-        AxDataTransport::Api => api_mutation_plan(driver, api_url, "update", &request.collection, &request.fields),
+        AxDataTransport::Api => api_mutation_plan(
+            driver,
+            api_url,
+            "update",
+            &request.collection,
+            &request.fields,
+            &request.filters,
+        ),
     }
 }
 
@@ -688,12 +698,18 @@ fn direct_update_plan(
     };
 
     let fields = fields_to_assignment_plans(&request.fields);
-    let plan = compile_update_plan_to_sql(&request.collection, &fields, dialect)
+    let filters = query_filters_to_plan(&request.filters);
+    let plan = compile_update_plan_to_sql(&request.collection, &fields, &filters, dialect)
         .map_err(|error| AxRuntimeError::message(error.to_string()))?;
     let execution = AxDirectSqlPlan {
         dialect: dialect.name().to_string(),
         sql: plan.sql,
-        params: request.fields.values().cloned().collect(),
+        params: request
+            .fields
+            .values()
+            .cloned()
+            .chain(request.filters.iter().map(|filter| filter.value.clone()))
+            .collect(),
         url: url.clone(),
     };
 
@@ -740,6 +756,7 @@ fn api_mutation_plan(
     action: &str,
     collection: &str,
     fields: &BTreeMap<String, Value>,
+    filters: &[AxQueryFilterRequest],
 ) -> AxRuntimeResult<Value> {
     let plan = AxApiRequestPlan {
         dialect: driver
@@ -752,6 +769,7 @@ fn api_mutation_plan(
         resource: collection.to_string(),
         payload: json!({
             "fields": fields,
+            "filters": request_filters_payload(filters),
         }),
     };
 
@@ -767,17 +785,7 @@ fn query_request_to_plan(request: &AxQueryRequest) -> AxQueryPlan {
         source: AxQuerySourcePlan::Stream {
             collection: request.collection.clone(),
         },
-        filters: request
-            .filters
-            .iter()
-            .map(|filter| AxQueryFilterPlan {
-                field: filter.field.clone(),
-                op: match filter.op {
-                    AxQueryFilterOp::Eq => AxQueryFilterOpPlan::Eq,
-                },
-                value: json_value_to_expr(&filter.value),
-            })
-            .collect(),
+        filters: query_filters_to_plan(&request.filters),
         orders: request
             .orders
             .iter()
@@ -794,6 +802,19 @@ fn query_request_to_plan(request: &AxQueryRequest) -> AxQueryPlan {
     }
 }
 
+fn query_filters_to_plan(filters: &[AxQueryFilterRequest]) -> Vec<AxQueryFilterPlan> {
+    filters
+        .iter()
+        .map(|filter| AxQueryFilterPlan {
+            field: filter.field.clone(),
+            op: match filter.op {
+                AxQueryFilterOp::Eq => AxQueryFilterOpPlan::Eq,
+            },
+            value: json_value_to_expr(&filter.value),
+        })
+        .collect()
+}
+
 fn fields_to_assignment_plans(fields: &BTreeMap<String, Value>) -> Vec<AxAssignmentPlan> {
     fields
         .iter()
@@ -806,6 +827,10 @@ fn fields_to_assignment_plans(fields: &BTreeMap<String, Value>) -> Vec<AxAssignm
 
 fn json_value_to_expr(value: &Value) -> AxRustExpr {
     AxRustExpr::new(value.to_string())
+}
+
+fn request_filters_payload(filters: &[AxQueryFilterRequest]) -> Value {
+    json!(filters)
 }
 
 pub mod prelude {
@@ -1079,6 +1104,33 @@ mod tests {
         assert_eq!(value["request"]["action"], "insert");
         assert_eq!(value["request"]["resource"], "posts");
         assert_eq!(value["request"]["payload"]["fields"]["title"], json!("Hello"));
+    }
+
+    #[test]
+    fn direct_update_emits_where_clause_when_filters_exist() {
+        let env = AxEnv::new()
+            .with_secret("db_dialect", "postgres")
+            .with_secret("db_url", "postgres://local/axonix");
+        let runtime = runtime_from_env(env).expect("runtime should initialize");
+
+        let value = runtime
+            .update(&AxUpdateRequest {
+                collection: "posts".to_string(),
+                fields: BTreeMap::from([("title".to_string(), json!("Hello"))]),
+                filters: vec![AxQueryFilterRequest {
+                    field: "id".to_string(),
+                    op: AxQueryFilterOp::Eq,
+                    value: json!(7),
+                }],
+            })
+            .expect("update should execute");
+
+        assert_eq!(
+            value["execution"]["sql"],
+            r#"update "posts" set "title" = $1 where "id" = $2"#
+        );
+        assert_eq!(value["execution"]["params"][0], json!("Hello"));
+        assert_eq!(value["execution"]["params"][1], json!(7));
     }
 
     #[test]

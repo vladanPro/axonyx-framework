@@ -147,7 +147,7 @@ fn render_step(step: &AxStepPlan) -> String {
             render_fields_map(fields)
         ),
         AxStepPlan::Update { collection, fields } => format!(
-            "    runtime.update(&AxUpdateRequest {{\n        collection: {:?}.to_string(),\n        fields: {},\n    }})?;\n",
+            "    runtime.update(&AxUpdateRequest {{\n        collection: {:?}.to_string(),\n        fields: {},\n        filters: Vec::new(),\n    }})?;\n",
             collection,
             render_fields_map(fields)
         ),

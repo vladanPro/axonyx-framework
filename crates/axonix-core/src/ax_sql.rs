@@ -166,6 +166,7 @@ pub fn compile_insert_plan_to_sql(
 pub fn compile_update_plan_to_sql(
     collection: &str,
     fields: &[AxAssignmentPlan],
+    filters: &[AxQueryFilterPlan],
     dialect: AxSqlDialect,
 ) -> Result<AxSqlMutation, AxSqlCompileError> {
     validate_ident(collection)?;
@@ -189,11 +190,39 @@ pub fn compile_update_plan_to_sql(
         });
     }
 
+    let where_clause = if filters.is_empty() {
+        String::new()
+    } else {
+        let mut clauses = Vec::with_capacity(filters.len());
+
+        for filter in filters {
+            validate_ident(&filter.field)?;
+            let placeholder = dialect.placeholder(params.len() + 1);
+            let op = match filter.op {
+                AxQueryFilterOpPlan::Eq => "=",
+            };
+
+            clauses.push(format!(
+                "{} {} {}",
+                dialect.quote_ident(&filter.field),
+                op,
+                placeholder
+            ));
+            params.push(AxSqlParam {
+                index: params.len() + 1,
+                value: filter.value.clone(),
+            });
+        }
+
+        format!(" where {}", clauses.join(" and "))
+    };
+
     Ok(AxSqlMutation {
         sql: format!(
-            "update {} set {}",
+            "update {} set {}{}",
             dialect.quote_ident(collection),
-            assignments.join(", ")
+            assignments.join(", "),
+            where_clause
         ),
         params,
     })
@@ -401,6 +430,7 @@ mod tests {
                     value: AxRustExpr::new("input.featured"),
                 },
             ],
+            &[],
             AxSqlDialect::MySql,
         )
         .expect("update should compile");
@@ -408,6 +438,30 @@ mod tests {
         assert_eq!(
             mutation.sql,
             "update `posts` set `title` = ?, `featured` = ?"
+        );
+        assert_eq!(mutation.params.len(), 2);
+    }
+
+    #[test]
+    fn compiles_postgres_update_plan_with_where_clause() {
+        let mutation = compile_update_plan_to_sql(
+            "posts",
+            &[AxAssignmentPlan {
+                name: "title".to_string(),
+                value: AxRustExpr::new("input.title"),
+            }],
+            &[AxQueryFilterPlan {
+                field: "id".to_string(),
+                op: AxQueryFilterOpPlan::Eq,
+                value: AxRustExpr::new("input.id"),
+            }],
+            AxSqlDialect::Postgres,
+        )
+        .expect("update should compile");
+
+        assert_eq!(
+            mutation.sql,
+            r#"update "posts" set "title" = $1 where "id" = $2"#
         );
         assert_eq!(mutation.params.len(), 2);
     }
