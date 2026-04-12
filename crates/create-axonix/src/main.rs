@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use axonix_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonix-runtime";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonix")]
@@ -26,6 +28,20 @@ struct Cli {
     /// Initialize a git repository in the generated app
     #[arg(long)]
     git: bool,
+
+    /// Where the generated app should load axonix-runtime from
+    #[arg(long, value_enum, default_value_t = RuntimeSource::Path)]
+    runtime_source: RuntimeSource,
+
+    /// Git URL used when --runtime-source git is selected
+    #[arg(long, default_value = DEFAULT_RUNTIME_GIT_URL)]
+    runtime_git_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RuntimeSource {
+    Path,
+    Git,
 }
 
 fn main() {
@@ -70,7 +86,7 @@ fn run() -> Result<()> {
         }
     }
 
-    create_app(&target_dir, &cli.project_name)?;
+    create_app(&target_dir, &cli)?;
 
     if cli.git {
         init_git(&target_dir)?;
@@ -97,8 +113,9 @@ fn validate_project_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_app(target_dir: &PathBuf, project_name: &str) -> Result<()> {
-    let runtime_dependency = runtime_dependency_spec()?;
+fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
+    let runtime_dependency = runtime_dependency_spec(cli)?;
+    let runtime_source_note = runtime_source_note(cli);
 
     fs::create_dir_all(target_dir).with_context(|| {
         format!(
@@ -107,7 +124,11 @@ fn create_app(target_dir: &PathBuf, project_name: &str) -> Result<()> {
         )
     })?;
 
-    for file in template::minimal_template_files(project_name, &runtime_dependency) {
+    for file in template::minimal_template_files(
+        &cli.project_name,
+        &runtime_dependency,
+        &runtime_source_note,
+    ) {
         let full_path = target_dir.join(file.relative_path);
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent)
@@ -260,15 +281,33 @@ fn init_git(target_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn runtime_dependency_spec() -> Result<String> {
-    let runtime_crate = workspace_root()
-        .join("crates")
-        .join("axonix-runtime")
-        .canonicalize()
-        .context("failed to resolve axonix-runtime crate path")?;
+fn runtime_dependency_spec(cli: &Cli) -> Result<String> {
+    match cli.runtime_source {
+        RuntimeSource::Path => {
+            let runtime_crate = workspace_root()
+                .join("crates")
+                .join("axonix-runtime")
+                .canonicalize()
+                .context("failed to resolve axonix-runtime crate path")?;
 
-    let runtime_path = cargo_toml_path(&runtime_crate);
-    Ok(format!("axonix-runtime = {{ path = \"{runtime_path}\" }}"))
+            let runtime_path = cargo_toml_path(&runtime_crate);
+            Ok(format!("axonix-runtime = {{ path = \"{runtime_path}\" }}"))
+        }
+        RuntimeSource::Git => Ok(format!(
+            "axonix-runtime = {{ git = \"{}\" }}",
+            cli.runtime_git_url.trim()
+        )),
+    }
+}
+
+fn runtime_source_note(cli: &Cli) -> String {
+    match cli.runtime_source {
+        RuntimeSource::Path => "This scaffold links against a local `axonix-runtime` path dependency so monorepo development stays fast while the framework is evolving.".to_string(),
+        RuntimeSource::Git => format!(
+            "This scaffold links against the shared `axonix-runtime` Git repository at `{}` so the app can track the standalone runtime workspace outside the local monorepo.",
+            cli.runtime_git_url.trim()
+        ),
+    }
 }
 
 fn workspace_root() -> PathBuf {

@@ -22,10 +22,15 @@ const APP_README: &str = include_str!("../templates/minimal/README.md.tpl");
 const APP_GITIGNORE: &str = include_str!("../templates/minimal/.gitignore.tpl");
 const APP_ENV_EXAMPLE: &str = include_str!("../templates/minimal/.env.example.tpl");
 
-pub fn minimal_template_files(project_name: &str, runtime_dependency: &str) -> Vec<TemplateFile> {
+pub fn minimal_template_files(
+    project_name: &str,
+    runtime_dependency: &str,
+    runtime_source_note: &str,
+) -> Vec<TemplateFile> {
     let vars = [
         ("{{APP_NAME}}", project_name),
         ("{{AXONIX_RUNTIME_DEPENDENCY}}", runtime_dependency),
+        ("{{AXONIX_RUNTIME_SOURCE_NOTE}}", runtime_source_note),
     ];
     vec![
         TemplateFile {

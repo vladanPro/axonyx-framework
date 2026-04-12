@@ -22,7 +22,12 @@ Current package roles inside the monorepo:
 - `axonix-runtime`: execution/runtime contract used by generated apps
 - `axonix-macros`: ergonomics layer for component authoring
 
-During monorepo development, generated apps point to `axonix-runtime` through a local Cargo `path` dependency. After publish, the same scaffold can move to a normal versioned dependency flow such as `axonix-runtime = "0.x"`.
+Generated apps can now target either:
+
+- a local Cargo `path` dependency during monorepo development
+- the standalone Git repo at `https://github.com/vladanPro/axonix-runtime`
+
+Current local flow:
 
 ## Quick Start
 
@@ -30,6 +35,12 @@ During monorepo development, generated apps point to `axonix-runtime` through a 
 
 ```bash
 cargo run -p create-axonix -- my-app --yes
+```
+
+### 1b) Create a new Axonix app against the standalone runtime repo
+
+```bash
+cargo run -p create-axonix -- my-app --yes --runtime-source git
 ```
 
 ### 2) Run the generated app

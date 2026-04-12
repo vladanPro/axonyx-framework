@@ -2,7 +2,7 @@
 
 Generated with `create-axonix`.
 
-This scaffold links against the local `axonix-runtime` crate while Axonix is still in monorepo development mode. Once the runtime is published, the generated `Cargo.toml` can switch from a local `path` dependency to a versioned crate dependency.
+{{AXONIX_RUNTIME_SOURCE_NOTE}}
 
 ## Run
 
