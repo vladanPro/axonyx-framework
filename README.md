@@ -40,15 +40,7 @@ create-axonix my-app --yes
 
 ## IR Demo Flow
 
-1. TypeScript builder emits IR:
-
-```ts
-import { from } from "@axonix/ts";
-
-const ir = from("posts").grid(3).card().toIR();
-```
-
-2. Rust runtime executes the same IR:
+Rust runtime executes compiled IR directly:
 
 ```bash
 cargo run -p axonix-runtime --example execute_json
@@ -385,6 +377,4 @@ crates/
   axonix-macros/
   axonix-runtime/
   create-axonix/
-packages/
-  axonix-ts/
 ```
