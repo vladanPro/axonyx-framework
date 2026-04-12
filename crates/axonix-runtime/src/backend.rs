@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use axonix_core::ax_sql_prelude::AxSqlDialect;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -100,12 +101,27 @@ impl AxDatabaseDriver {
             Self::Memory => "memory",
         }
     }
+
+    pub fn sql_dialect(&self) -> Option<AxSqlDialect> {
+        match self {
+            Self::Postgres => Some(AxSqlDialect::Postgres),
+            Self::MySql => Some(AxSqlDialect::MySql),
+            Self::Sqlite => Some(AxSqlDialect::Sqlite),
+            Self::Memory => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxDatabaseConfig {
     pub driver: AxDatabaseDriver,
     pub url: Option<String>,
+}
+
+impl AxDatabaseConfig {
+    pub fn sql_dialect(&self) -> Option<AxSqlDialect> {
+        self.driver.sql_dialect()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +188,10 @@ impl AxEnv {
             driver: self.database_driver()?,
             url: self.secret.get("db_url").cloned(),
         })
+    }
+
+    pub fn sql_dialect(&self) -> AxRuntimeResult<Option<AxSqlDialect>> {
+        Ok(self.database_driver()?.sql_dialect())
     }
 }
 
@@ -671,5 +691,32 @@ mod tests {
         let config = env.database_config().expect("config should resolve");
 
         assert_eq!(config.driver, AxDatabaseDriver::Postgres);
+    }
+
+    #[test]
+    fn database_driver_maps_to_sql_dialect() {
+        assert_eq!(
+            AxDatabaseDriver::Postgres.sql_dialect(),
+            Some(AxSqlDialect::Postgres)
+        );
+        assert_eq!(
+            AxDatabaseDriver::MySql.sql_dialect(),
+            Some(AxSqlDialect::MySql)
+        );
+        assert_eq!(
+            AxDatabaseDriver::Sqlite.sql_dialect(),
+            Some(AxSqlDialect::Sqlite)
+        );
+        assert_eq!(AxDatabaseDriver::Memory.sql_dialect(), None);
+    }
+
+    #[test]
+    fn env_can_resolve_sql_dialect_from_driver() {
+        let env = AxEnv::new().with_secret("db_driver", "sqlite");
+
+        assert_eq!(
+            env.sql_dialect().expect("sql dialect should resolve"),
+            Some(AxSqlDialect::Sqlite)
+        );
     }
 }
