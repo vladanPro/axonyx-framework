@@ -112,10 +112,38 @@ impl AxDatabaseDriver {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxDataTransport {
+    Direct,
+    Api,
+}
+
+impl AxDataTransport {
+    pub fn parse(input: &str) -> AxRuntimeResult<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "" | "direct" => Ok(Self::Direct),
+            "api" => Ok(Self::Api),
+            other => Err(AxRuntimeError::message(format!(
+                "unsupported data transport `{other}`"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Api => "api",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxDatabaseConfig {
     pub driver: AxDatabaseDriver,
+    pub transport: AxDataTransport,
     pub url: Option<String>,
+    pub api_url: Option<String>,
+    pub api_key: Option<String>,
 }
 
 impl AxDatabaseConfig {
@@ -177,16 +205,34 @@ impl AxEnv {
     }
 
     pub fn database_driver(&self) -> AxRuntimeResult<AxDatabaseDriver> {
-        match self.secret.get("db_driver") {
+        match self.secret.get("db_dialect").or_else(|| self.secret.get("db_driver")) {
             Some(driver) => AxDatabaseDriver::parse(driver),
             None => Ok(AxDatabaseDriver::Postgres),
+        }
+    }
+
+    pub fn data_transport(&self) -> AxRuntimeResult<AxDataTransport> {
+        match self.secret.get("db_transport") {
+            Some(transport) => AxDataTransport::parse(transport),
+            None => Ok(AxDataTransport::Direct),
         }
     }
 
     pub fn database_config(&self) -> AxRuntimeResult<AxDatabaseConfig> {
         Ok(AxDatabaseConfig {
             driver: self.database_driver()?,
+            transport: self.data_transport()?,
             url: self.secret.get("db_url").cloned(),
+            api_url: self
+                .public
+                .get("data_api_url")
+                .cloned()
+                .or_else(|| self.public.get("supabase_url").cloned()),
+            api_key: self
+                .secret
+                .get("data_api_key")
+                .cloned()
+                .or_else(|| self.secret.get("supabase_service_role_key").cloned()),
         })
     }
 
@@ -312,16 +358,22 @@ impl<A> AxMessenger for AxDatabaseRuntime<A> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresAdapter {
     pub url: Option<String>,
+    pub transport: AxDataTransport,
+    pub api_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MySqlAdapter {
     pub url: Option<String>,
+    pub transport: AxDataTransport,
+    pub api_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteAdapter {
     pub url: Option<String>,
+    pub transport: AxDataTransport,
+    pub api_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -333,7 +385,7 @@ impl AxDatabaseAdapter for PostgresAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), json!({
+        Ok(adapter_payload(self.driver(), self.transport, &self.url, &self.api_url, request.collection.clone(), json!({
             "filters": request.filters,
             "orders": request.orders,
             "limit": request.limit,
@@ -342,11 +394,11 @@ impl AxDatabaseAdapter for PostgresAdapter {
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
     }
 }
 
@@ -356,7 +408,7 @@ impl AxDatabaseAdapter for MySqlAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), json!({
+        Ok(adapter_payload(self.driver(), self.transport, &self.url, &self.api_url, request.collection.clone(), json!({
             "filters": request.filters,
             "orders": request.orders,
             "limit": request.limit,
@@ -365,11 +417,11 @@ impl AxDatabaseAdapter for MySqlAdapter {
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
     }
 }
 
@@ -379,7 +431,7 @@ impl AxDatabaseAdapter for SqliteAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), json!({
+        Ok(adapter_payload(self.driver(), self.transport, &self.url, &self.api_url, request.collection.clone(), json!({
             "filters": request.filters,
             "orders": request.orders,
             "limit": request.limit,
@@ -388,11 +440,11 @@ impl AxDatabaseAdapter for SqliteAdapter {
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
     }
 }
 
@@ -402,7 +454,7 @@ impl AxDatabaseAdapter for MemoryAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), &None, request.collection.clone(), json!({
+        Ok(adapter_payload(self.driver(), AxDataTransport::Direct, &None, &None, request.collection.clone(), json!({
             "filters": request.filters,
             "orders": request.orders,
             "limit": request.limit,
@@ -411,11 +463,11 @@ impl AxDatabaseAdapter for MemoryAdapter {
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &None, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), AxDataTransport::Direct, &None, &None, "insert", &request.collection, &request.fields))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &None, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), AxDataTransport::Direct, &None, &None, "update", &request.collection, &request.fields))
     }
 }
 
@@ -423,12 +475,18 @@ pub fn adapter_from_config(config: &AxDatabaseConfig) -> Box<dyn AxDatabaseAdapt
     match config.driver {
         AxDatabaseDriver::Postgres => Box::new(PostgresAdapter {
             url: config.url.clone(),
+            transport: config.transport,
+            api_url: config.api_url.clone(),
         }),
         AxDatabaseDriver::MySql => Box::new(MySqlAdapter {
             url: config.url.clone(),
+            transport: config.transport,
+            api_url: config.api_url.clone(),
         }),
         AxDatabaseDriver::Sqlite => Box::new(SqliteAdapter {
             url: config.url.clone(),
+            transport: config.transport,
+            api_url: config.api_url.clone(),
         }),
         AxDatabaseDriver::Memory => Box::new(MemoryAdapter),
     }
@@ -446,13 +504,17 @@ pub fn ok_payload() -> Value {
 
 fn adapter_payload(
     driver: AxDatabaseDriver,
+    transport: AxDataTransport,
     url: &Option<String>,
+    api_url: &Option<String>,
     collection: String,
     details: Value,
 ) -> Value {
     json!({
         "driver": driver.as_str(),
+        "transport": transport.as_str(),
         "url": url,
+        "api_url": api_url,
         "collection": collection,
         "details": details,
     })
@@ -460,14 +522,18 @@ fn adapter_payload(
 
 fn mutation_payload(
     driver: AxDatabaseDriver,
+    transport: AxDataTransport,
     url: &Option<String>,
+    api_url: &Option<String>,
     action: &str,
     collection: &str,
     fields: &BTreeMap<String, Value>,
 ) -> Value {
     json!({
         "driver": driver.as_str(),
+        "transport": transport.as_str(),
         "url": url,
+        "api_url": api_url,
         "action": action,
         "collection": collection,
         "fields": fields,
@@ -482,6 +548,7 @@ pub mod prelude {
     pub use super::AxDatabaseConfig;
     pub use super::AxDatabaseDriver;
     pub use super::AxDatabaseRuntime;
+    pub use super::AxDataTransport;
     pub use super::AxEnv;
     pub use super::AxInsertRequest;
     pub use super::AxMessenger;
@@ -650,7 +717,7 @@ mod tests {
     #[test]
     fn env_can_resolve_database_config_for_mysql() {
         let env = AxEnv::new()
-            .with_secret("db_driver", "mysql")
+            .with_secret("db_dialect", "mysql")
             .with_secret("db_url", "mysql://root:root@localhost:3306/axonix");
 
         let config = env.database_config().expect("config should resolve");
@@ -659,7 +726,10 @@ mod tests {
             config,
             AxDatabaseConfig {
                 driver: AxDatabaseDriver::MySql,
+                transport: AxDataTransport::Direct,
                 url: Some("mysql://root:root@localhost:3306/axonix".to_string()),
+                api_url: None,
+                api_key: None,
             }
         );
     }
@@ -667,7 +737,7 @@ mod tests {
     #[test]
     fn runtime_from_env_can_select_mysql_adapter() {
         let env = AxEnv::new()
-            .with_secret("db_driver", "mysql")
+            .with_secret("db_dialect", "mysql")
             .with_secret("db_url", "mysql://root:root@localhost:3306/axonix");
         let runtime = runtime_from_env(env).expect("runtime should initialize");
 
@@ -691,6 +761,7 @@ mod tests {
         let config = env.database_config().expect("config should resolve");
 
         assert_eq!(config.driver, AxDatabaseDriver::Postgres);
+        assert_eq!(config.transport, AxDataTransport::Direct);
     }
 
     #[test]
@@ -718,5 +789,31 @@ mod tests {
             env.sql_dialect().expect("sql dialect should resolve"),
             Some(AxSqlDialect::Sqlite)
         );
+    }
+
+    #[test]
+    fn env_defaults_transport_to_direct() {
+        let env = AxEnv::new().with_secret("db_url", "postgres://local/axonix");
+
+        assert_eq!(
+            env.data_transport().expect("transport should resolve"),
+            AxDataTransport::Direct
+        );
+    }
+
+    #[test]
+    fn env_can_resolve_api_transport_config() {
+        let env = AxEnv::new()
+            .with_secret("db_dialect", "postgres")
+            .with_secret("db_transport", "api")
+            .with_secret("data_api_key", "secret-token")
+            .with_public("data_api_url", "https://data.example.com");
+
+        let config = env.database_config().expect("config should resolve");
+
+        assert_eq!(config.driver, AxDatabaseDriver::Postgres);
+        assert_eq!(config.transport, AxDataTransport::Api);
+        assert_eq!(config.api_url.as_deref(), Some("https://data.example.com"));
+        assert_eq!(config.api_key.as_deref(), Some("secret-token"));
     }
 }

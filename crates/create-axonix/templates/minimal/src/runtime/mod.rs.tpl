@@ -38,11 +38,27 @@ impl AxEnv {
     }
 
     pub fn database_driver(&self) -> &str {
-        self.secret("db_driver").unwrap_or("postgres")
+        self.secret("db_dialect")
+            .or_else(|| self.secret("db_driver"))
+            .unwrap_or("postgres")
+    }
+
+    pub fn data_transport(&self) -> &str {
+        self.secret("db_transport").unwrap_or("direct")
     }
 
     pub fn database_url(&self) -> Option<&str> {
         self.secret("db_url")
+    }
+
+    pub fn data_api_url(&self) -> Option<&str> {
+        self.public("data_api_url")
+            .or_else(|| self.public("supabase_url"))
+    }
+
+    pub fn data_api_key(&self) -> Option<&str> {
+        self.secret("data_api_key")
+            .or_else(|| self.secret("supabase_service_role_key"))
     }
 }
 
@@ -266,16 +282,22 @@ impl<A> AxMessenger for AxDatabaseRuntime<A> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostgresAdapter {
     pub url: Option<String>,
+    pub transport: String,
+    pub api_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MySqlAdapter {
     pub url: Option<String>,
+    pub transport: String,
+    pub api_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqliteAdapter {
     pub url: Option<String>,
+    pub transport: String,
+    pub api_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -287,7 +309,7 @@ impl AxDatabaseAdapter for PostgresAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), serde_json::json!({
+        Ok(adapter_payload(self.driver(), &self.transport, &self.url, &self.api_url, request.collection.clone(), serde_json::json!({
             "filters": request.filters.iter().map(query_filter_payload).collect::<Vec<_>>(),
             "orders": request.orders.iter().map(query_order_payload).collect::<Vec<_>>(),
             "limit": request.limit,
@@ -296,11 +318,11 @@ impl AxDatabaseAdapter for PostgresAdapter {
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), &self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), &self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
     }
 }
 
@@ -310,7 +332,7 @@ impl AxDatabaseAdapter for MySqlAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), serde_json::json!({
+        Ok(adapter_payload(self.driver(), &self.transport, &self.url, &self.api_url, request.collection.clone(), serde_json::json!({
             "filters": request.filters.iter().map(query_filter_payload).collect::<Vec<_>>(),
             "orders": request.orders.iter().map(query_order_payload).collect::<Vec<_>>(),
             "limit": request.limit,
@@ -319,11 +341,11 @@ impl AxDatabaseAdapter for MySqlAdapter {
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), &self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), &self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
     }
 }
 
@@ -333,7 +355,7 @@ impl AxDatabaseAdapter for SqliteAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), serde_json::json!({
+        Ok(adapter_payload(self.driver(), &self.transport, &self.url, &self.api_url, request.collection.clone(), serde_json::json!({
             "filters": request.filters.iter().map(query_filter_payload).collect::<Vec<_>>(),
             "orders": request.orders.iter().map(query_order_payload).collect::<Vec<_>>(),
             "limit": request.limit,
@@ -342,11 +364,11 @@ impl AxDatabaseAdapter for SqliteAdapter {
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), &self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), &self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
     }
 }
 
@@ -356,7 +378,7 @@ impl AxDatabaseAdapter for MemoryAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), &None, request.collection.clone(), serde_json::json!({
+        Ok(adapter_payload(self.driver(), "direct", &None, &None, request.collection.clone(), serde_json::json!({
             "filters": request.filters.iter().map(query_filter_payload).collect::<Vec<_>>(),
             "orders": request.orders.iter().map(query_order_payload).collect::<Vec<_>>(),
             "limit": request.limit,
@@ -365,20 +387,22 @@ impl AxDatabaseAdapter for MemoryAdapter {
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &None, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), "direct", &None, &None, "insert", &request.collection, &request.fields))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), &None, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(self.driver(), "direct", &None, &None, "update", &request.collection, &request.fields))
     }
 }
 
 pub fn adapter_from_env(env: &AxEnv) -> AxRuntimeResult<Box<dyn AxDatabaseAdapter>> {
     let url = env.database_url().map(str::to_owned);
+    let transport = env.data_transport().trim().to_ascii_lowercase();
+    let api_url = env.data_api_url().map(str::to_owned);
     match env.database_driver().trim().to_ascii_lowercase().as_str() {
-        "" | "postgres" | "postgresql" => Ok(Box::new(PostgresAdapter { url })),
-        "mysql" => Ok(Box::new(MySqlAdapter { url })),
-        "sqlite" => Ok(Box::new(SqliteAdapter { url })),
+        "" | "postgres" | "postgresql" => Ok(Box::new(PostgresAdapter { url, transport, api_url })),
+        "mysql" => Ok(Box::new(MySqlAdapter { url, transport, api_url })),
+        "sqlite" => Ok(Box::new(SqliteAdapter { url, transport, api_url })),
         "memory" | "inmemory" | "in-memory" => Ok(Box::new(MemoryAdapter)),
         other => Err(AxRuntimeError::message(format!(
             "unsupported database driver `{other}`"
@@ -395,10 +419,12 @@ pub fn ok_payload() -> Value {
     serde_json::json!({ "ok": true })
 }
 
-fn adapter_payload(driver: &str, url: &Option<String>, collection: String, details: Value) -> Value {
+fn adapter_payload(driver: &str, transport: &str, url: &Option<String>, api_url: &Option<String>, collection: String, details: Value) -> Value {
     serde_json::json!({
         "driver": driver,
+        "transport": transport,
         "url": url,
+        "api_url": api_url,
         "collection": collection,
         "details": details,
     })
@@ -406,14 +432,18 @@ fn adapter_payload(driver: &str, url: &Option<String>, collection: String, detai
 
 fn mutation_payload(
     driver: &str,
+    transport: &str,
     url: &Option<String>,
+    api_url: &Option<String>,
     action: &str,
     collection: &str,
     fields: &BTreeMap<String, Value>,
 ) -> Value {
     serde_json::json!({
         "driver": driver,
+        "transport": transport,
         "url": url,
+        "api_url": api_url,
         "action": action,
         "collection": collection,
         "fields": fields,

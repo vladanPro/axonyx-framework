@@ -352,14 +352,23 @@ Current env convention covers:
 - `.ax`: `Runtime.Env.secret.db_url`
 - `.env`: `AX_SECRET_DB_URL`
 - `.ax`: `Runtime.Env.secret.db_driver`
-- `.env`: `AX_SECRET_DB_DRIVER`
+- `.env`: `AX_SECRET_DB_DIALECT` with fallback to `AX_SECRET_DB_DRIVER`
+- `.env`: `AX_SECRET_DB_TRANSPORT` with default `direct`
 
 Current database adapter draft covers:
 
 - keeping `.ax` query authoring database-agnostic
 - selecting `postgres`, `mysql`, `sqlite`, or `memory` at runtime
-- resolving the active adapter from `AX_SECRET_DB_DRIVER`
+- resolving the active dialect from `AX_SECRET_DB_DIALECT`
+- resolving the active transport from `AX_SECRET_DB_TRANSPORT`
 - keeping one backend authoring shape while adapters translate into concrete driver behavior
+
+Current transport draft covers:
+
+- `direct` as the default runtime mode for normal SQL connections
+- `api` as an explicit mode for API-key-backed data providers
+- provider-specific env values such as `AX_PUBLIC_DATA_API_URL` and `AX_SECRET_DATA_API_KEY`
+- backward compatibility with the earlier `AX_SECRET_DB_DRIVER` draft
 
 Axonix now also has a first SQL dialect draft in `axonix-core`:
 
