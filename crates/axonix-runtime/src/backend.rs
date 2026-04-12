@@ -150,6 +150,37 @@ impl AxDatabaseConfig {
     pub fn sql_dialect(&self) -> Option<AxSqlDialect> {
         self.driver.sql_dialect()
     }
+
+    pub fn validate(&self) -> AxRuntimeResult<()> {
+        match self.transport {
+            AxDataTransport::Direct => {
+                if matches!(self.driver, AxDatabaseDriver::Memory) {
+                    return Ok(());
+                }
+
+                if self.url.is_none() {
+                    return Err(AxRuntimeError::message(
+                        "missing AX_SECRET_DB_URL for direct data transport",
+                    ));
+                }
+            }
+            AxDataTransport::Api => {
+                if self.api_url.is_none() {
+                    return Err(AxRuntimeError::message(
+                        "missing AX_PUBLIC_DATA_API_URL for api data transport",
+                    ));
+                }
+
+                if self.api_key.is_none() {
+                    return Err(AxRuntimeError::message(
+                        "missing AX_SECRET_DATA_API_KEY for api data transport",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -494,6 +525,7 @@ pub fn adapter_from_config(config: &AxDatabaseConfig) -> Box<dyn AxDatabaseAdapt
 
 pub fn runtime_from_env(env: AxEnv) -> AxRuntimeResult<AxDatabaseRuntime<Box<dyn AxDatabaseAdapter>>> {
     let config = env.database_config()?;
+    config.validate()?;
     let adapter = adapter_from_config(&config);
     Ok(AxDatabaseRuntime::new(env, adapter))
 }
@@ -815,5 +847,56 @@ mod tests {
         assert_eq!(config.transport, AxDataTransport::Api);
         assert_eq!(config.api_url.as_deref(), Some("https://data.example.com"));
         assert_eq!(config.api_key.as_deref(), Some("secret-token"));
+    }
+
+    #[test]
+    fn direct_transport_requires_db_url() {
+        let config = AxDatabaseConfig {
+            driver: AxDatabaseDriver::Postgres,
+            transport: AxDataTransport::Direct,
+            url: None,
+            api_url: None,
+            api_key: None,
+        };
+
+        let error = config.validate().expect_err("direct transport should require db url");
+        assert_eq!(
+            error,
+            AxRuntimeError::message("missing AX_SECRET_DB_URL for direct data transport")
+        );
+    }
+
+    #[test]
+    fn api_transport_requires_api_fields() {
+        let config = AxDatabaseConfig {
+            driver: AxDatabaseDriver::Postgres,
+            transport: AxDataTransport::Api,
+            url: None,
+            api_url: None,
+            api_key: None,
+        };
+
+        let error = config.validate().expect_err("api transport should require api url");
+        assert_eq!(
+            error,
+            AxRuntimeError::message("missing AX_PUBLIC_DATA_API_URL for api data transport")
+        );
+    }
+
+    #[test]
+    fn runtime_from_env_validates_api_transport_requirements() {
+        let env = AxEnv::new()
+            .with_secret("db_dialect", "postgres")
+            .with_secret("db_transport", "api")
+            .with_public("data_api_url", "https://data.example.com");
+
+        let error = match runtime_from_env(env) {
+            Ok(_) => panic!("missing api key should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            AxRuntimeError::message("missing AX_SECRET_DATA_API_KEY for api data transport")
+        );
     }
 }
