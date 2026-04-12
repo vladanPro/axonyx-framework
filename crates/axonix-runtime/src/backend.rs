@@ -1,6 +1,13 @@
 use std::collections::BTreeMap;
 
-use axonix_core::ax_sql_prelude::AxSqlDialect;
+use axonix_core::ax_backend_lowering_prelude::{
+    AxAssignmentPlan, AxQueryFilterOpPlan, AxQueryFilterPlan, AxQueryOrderDirectionPlan,
+    AxQueryOrderPlan, AxQueryPlan, AxQuerySourcePlan, AxRustExpr,
+};
+use axonix_core::ax_sql_prelude::{
+    compile_insert_plan_to_sql, compile_query_plan_to_sql, compile_update_plan_to_sql,
+    AxSqlDialect,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -69,6 +76,24 @@ pub struct AxUpdateRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AxSendRequest {
     pub target: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AxDirectSqlPlan {
+    pub dialect: String,
+    pub sql: String,
+    pub params: Vec<Value>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AxApiRequestPlan {
+    pub dialect: String,
+    pub base_url: String,
+    pub token: String,
+    pub action: String,
+    pub resource: String,
     pub payload: Value,
 }
 
@@ -416,20 +441,15 @@ impl AxDatabaseAdapter for PostgresAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), self.transport, &self.url, &self.api_url, request.collection.clone(), json!({
-            "filters": request.filters,
-            "orders": request.orders,
-            "limit": request.limit,
-            "offset": request.offset,
-        })))
+        dispatch_load(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
+        dispatch_insert(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
+        dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 }
 
@@ -439,20 +459,15 @@ impl AxDatabaseAdapter for MySqlAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), self.transport, &self.url, &self.api_url, request.collection.clone(), json!({
-            "filters": request.filters,
-            "orders": request.orders,
-            "limit": request.limit,
-            "offset": request.offset,
-        })))
+        dispatch_load(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
+        dispatch_insert(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
+        dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 }
 
@@ -462,20 +477,15 @@ impl AxDatabaseAdapter for SqliteAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), self.transport, &self.url, &self.api_url, request.collection.clone(), json!({
-            "filters": request.filters,
-            "orders": request.orders,
-            "limit": request.limit,
-            "offset": request.offset,
-        })))
+        dispatch_load(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "insert", &request.collection, &request.fields))
+        dispatch_insert(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), self.transport, &self.url, &self.api_url, "update", &request.collection, &request.fields))
+        dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
     }
 }
 
@@ -570,6 +580,232 @@ fn mutation_payload(
         "collection": collection,
         "fields": fields,
     })
+}
+
+fn dispatch_load(
+    driver: AxDatabaseDriver,
+    transport: AxDataTransport,
+    url: &Option<String>,
+    api_url: &Option<String>,
+    request: &AxQueryRequest,
+) -> AxRuntimeResult<Value> {
+    match transport {
+        AxDataTransport::Direct => direct_load_plan(driver, url, request),
+        AxDataTransport::Api => api_load_plan(driver, api_url, request),
+    }
+}
+
+fn dispatch_insert(
+    driver: AxDatabaseDriver,
+    transport: AxDataTransport,
+    url: &Option<String>,
+    api_url: &Option<String>,
+    request: &AxInsertRequest,
+) -> AxRuntimeResult<Value> {
+    match transport {
+        AxDataTransport::Direct => direct_insert_plan(driver, url, request),
+        AxDataTransport::Api => api_mutation_plan(driver, api_url, "insert", &request.collection, &request.fields),
+    }
+}
+
+fn dispatch_update(
+    driver: AxDatabaseDriver,
+    transport: AxDataTransport,
+    url: &Option<String>,
+    api_url: &Option<String>,
+    request: &AxUpdateRequest,
+) -> AxRuntimeResult<Value> {
+    match transport {
+        AxDataTransport::Direct => direct_update_plan(driver, url, request),
+        AxDataTransport::Api => api_mutation_plan(driver, api_url, "update", &request.collection, &request.fields),
+    }
+}
+
+fn direct_load_plan(
+    driver: AxDatabaseDriver,
+    url: &Option<String>,
+    request: &AxQueryRequest,
+) -> AxRuntimeResult<Value> {
+    let Some(dialect) = driver.sql_dialect() else {
+        return Ok(adapter_payload(driver, AxDataTransport::Direct, url, &None, request.collection.clone(), json!({
+            "filters": request.filters,
+            "orders": request.orders,
+            "limit": request.limit,
+            "offset": request.offset,
+        })));
+    };
+
+    let plan = compile_query_plan_to_sql(&query_request_to_plan(request), dialect)
+        .map_err(|error| AxRuntimeError::message(error.to_string()))?;
+    let execution = AxDirectSqlPlan {
+        dialect: dialect.name().to_string(),
+        sql: plan.sql,
+        params: request.filters.iter().map(|filter| filter.value.clone()).collect(),
+        url: url.clone(),
+    };
+
+    Ok(json!({
+        "driver": driver.as_str(),
+        "transport": "direct",
+        "execution": execution,
+    }))
+}
+
+fn direct_insert_plan(
+    driver: AxDatabaseDriver,
+    url: &Option<String>,
+    request: &AxInsertRequest,
+) -> AxRuntimeResult<Value> {
+    let Some(dialect) = driver.sql_dialect() else {
+        return Ok(mutation_payload(driver, AxDataTransport::Direct, url, &None, "insert", &request.collection, &request.fields));
+    };
+
+    let fields = fields_to_assignment_plans(&request.fields);
+    let plan = compile_insert_plan_to_sql(&request.collection, &fields, dialect)
+        .map_err(|error| AxRuntimeError::message(error.to_string()))?;
+    let execution = AxDirectSqlPlan {
+        dialect: dialect.name().to_string(),
+        sql: plan.sql,
+        params: request.fields.values().cloned().collect(),
+        url: url.clone(),
+    };
+
+    Ok(json!({
+        "driver": driver.as_str(),
+        "transport": "direct",
+        "action": "insert",
+        "execution": execution,
+    }))
+}
+
+fn direct_update_plan(
+    driver: AxDatabaseDriver,
+    url: &Option<String>,
+    request: &AxUpdateRequest,
+) -> AxRuntimeResult<Value> {
+    let Some(dialect) = driver.sql_dialect() else {
+        return Ok(mutation_payload(driver, AxDataTransport::Direct, url, &None, "update", &request.collection, &request.fields));
+    };
+
+    let fields = fields_to_assignment_plans(&request.fields);
+    let plan = compile_update_plan_to_sql(&request.collection, &fields, dialect)
+        .map_err(|error| AxRuntimeError::message(error.to_string()))?;
+    let execution = AxDirectSqlPlan {
+        dialect: dialect.name().to_string(),
+        sql: plan.sql,
+        params: request.fields.values().cloned().collect(),
+        url: url.clone(),
+    };
+
+    Ok(json!({
+        "driver": driver.as_str(),
+        "transport": "direct",
+        "action": "update",
+        "execution": execution,
+    }))
+}
+
+fn api_load_plan(
+    driver: AxDatabaseDriver,
+    api_url: &Option<String>,
+    request: &AxQueryRequest,
+) -> AxRuntimeResult<Value> {
+    let plan = AxApiRequestPlan {
+        dialect: driver
+            .sql_dialect()
+            .map(|dialect| dialect.name().to_string())
+            .unwrap_or_else(|| driver.as_str().to_string()),
+        base_url: api_url.clone().unwrap_or_default(),
+        token: "<redacted-by-runtime-config>".to_string(),
+        action: "load".to_string(),
+        resource: request.collection.clone(),
+        payload: json!({
+            "filters": request.filters,
+            "orders": request.orders,
+            "limit": request.limit,
+            "offset": request.offset,
+        }),
+    };
+
+    Ok(json!({
+        "driver": driver.as_str(),
+        "transport": "api",
+        "request": plan,
+    }))
+}
+
+fn api_mutation_plan(
+    driver: AxDatabaseDriver,
+    api_url: &Option<String>,
+    action: &str,
+    collection: &str,
+    fields: &BTreeMap<String, Value>,
+) -> AxRuntimeResult<Value> {
+    let plan = AxApiRequestPlan {
+        dialect: driver
+            .sql_dialect()
+            .map(|dialect| dialect.name().to_string())
+            .unwrap_or_else(|| driver.as_str().to_string()),
+        base_url: api_url.clone().unwrap_or_default(),
+        token: "<redacted-by-runtime-config>".to_string(),
+        action: action.to_string(),
+        resource: collection.to_string(),
+        payload: json!({
+            "fields": fields,
+        }),
+    };
+
+    Ok(json!({
+        "driver": driver.as_str(),
+        "transport": "api",
+        "request": plan,
+    }))
+}
+
+fn query_request_to_plan(request: &AxQueryRequest) -> AxQueryPlan {
+    AxQueryPlan {
+        source: AxQuerySourcePlan::Stream {
+            collection: request.collection.clone(),
+        },
+        filters: request
+            .filters
+            .iter()
+            .map(|filter| AxQueryFilterPlan {
+                field: filter.field.clone(),
+                op: match filter.op {
+                    AxQueryFilterOp::Eq => AxQueryFilterOpPlan::Eq,
+                },
+                value: json_value_to_expr(&filter.value),
+            })
+            .collect(),
+        orders: request
+            .orders
+            .iter()
+            .map(|order| AxQueryOrderPlan {
+                field: order.field.clone(),
+                direction: match order.direction {
+                    AxQueryOrderDirection::Asc => AxQueryOrderDirectionPlan::Asc,
+                    AxQueryOrderDirection::Desc => AxQueryOrderDirectionPlan::Desc,
+                },
+            })
+            .collect(),
+        limit: request.limit,
+        offset: request.offset,
+    }
+}
+
+fn fields_to_assignment_plans(fields: &BTreeMap<String, Value>) -> Vec<AxAssignmentPlan> {
+    fields
+        .iter()
+        .map(|(name, value)| AxAssignmentPlan {
+            name: name.clone(),
+            value: json_value_to_expr(value),
+        })
+        .collect()
+}
+
+fn json_value_to_expr(value: &Value) -> AxRustExpr {
+    AxRustExpr::new(value.to_string())
 }
 
 pub mod prelude {
@@ -784,7 +1020,65 @@ mod tests {
             .expect("query should execute");
 
         assert_eq!(value["driver"], "mysql");
-        assert_eq!(value["collection"], "posts");
+        assert_eq!(value["transport"], "direct");
+        assert_eq!(value["execution"]["dialect"], "mysql");
+        assert_eq!(value["execution"]["params"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn direct_transport_emits_sql_execution_plan() {
+        let env = AxEnv::new()
+            .with_secret("db_dialect", "postgres")
+            .with_secret("db_url", "postgres://local/axonix");
+        let runtime = runtime_from_env(env).expect("runtime should initialize");
+
+        let value = runtime
+            .load(&AxQueryRequest {
+                collection: "posts".to_string(),
+                filters: vec![AxQueryFilterRequest {
+                    field: "status".to_string(),
+                    op: AxQueryFilterOp::Eq,
+                    value: json!("published"),
+                }],
+                orders: vec![AxQueryOrderRequest {
+                    field: "created_at".to_string(),
+                    direction: AxQueryOrderDirection::Desc,
+                }],
+                limit: Some(12),
+                offset: None,
+            })
+            .expect("query should execute");
+
+        assert_eq!(value["transport"], "direct");
+        assert_eq!(value["execution"]["dialect"], "postgres");
+        assert_eq!(
+            value["execution"]["sql"],
+            r#"select * from "posts" where "status" = $1 order by "created_at" desc limit 12"#
+        );
+        assert_eq!(value["execution"]["params"][0], json!("published"));
+    }
+
+    #[test]
+    fn api_transport_emits_request_plan() {
+        let env = AxEnv::new()
+            .with_secret("db_dialect", "postgres")
+            .with_secret("db_transport", "api")
+            .with_secret("data_api_key", "secret-token")
+            .with_public("data_api_url", "https://data.example.com");
+        let runtime = runtime_from_env(env).expect("runtime should initialize");
+
+        let value = runtime
+            .insert(&AxInsertRequest {
+                collection: "posts".to_string(),
+                fields: BTreeMap::from([("title".to_string(), json!("Hello"))]),
+            })
+            .expect("insert should execute");
+
+        assert_eq!(value["transport"], "api");
+        assert_eq!(value["request"]["base_url"], "https://data.example.com");
+        assert_eq!(value["request"]["action"], "insert");
+        assert_eq!(value["request"]["resource"], "posts");
+        assert_eq!(value["request"]["payload"]["fields"]["title"], json!("Hello"));
     }
 
     #[test]
