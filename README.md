@@ -87,6 +87,14 @@ Rust runtime executes compiled IR directly:
 cargo run -p axonix-runtime --example execute_json
 ```
 
+## Docs
+
+The first structured docs index now lives in:
+
+```text
+docs/README.md
+```
+
 ## Reactive Component Draft
 
 ```rust
