@@ -49,6 +49,16 @@ Example:
 cargo run -p create-axonix -- my-site --yes --template site --runtime-source git
 ```
 
+### 1a) Add a docs module into an existing Axonix app
+
+From an app root:
+
+```bash
+cargo run -p cargo-axonix --manifest-path H:/CODE/axonix/axonix-framework/Cargo.toml -- add docs
+```
+
+This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonix.toml`.
+
 ### 1b) Create a new Axonix app against the standalone runtime repo
 
 ```bash

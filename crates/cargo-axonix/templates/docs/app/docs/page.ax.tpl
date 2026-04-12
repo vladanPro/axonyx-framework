@@ -1,0 +1,11 @@
+page DocsHome
+  Container max: "xl"
+    Card title: "Documentation"
+      Copy -> "Welcome to the Axonix docs module scaffold."
+    Grid cols: 3, gap: "lg"
+      Card title: "Getting Started"
+        Copy -> "Start with the installation and first app flow."
+      Card title: "Reference"
+        Copy -> "Document runtime, modules, and backend contracts."
+      Card title: "Examples"
+        Copy -> "Show practical patterns and small focused demos."
