@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppTemplate {
+    Minimal,
+    Site,
+}
+
 pub struct TemplateFile {
     pub relative_path: &'static str,
     pub contents: String,
@@ -22,7 +28,17 @@ const APP_README: &str = include_str!("../templates/minimal/README.md.tpl");
 const APP_GITIGNORE: &str = include_str!("../templates/minimal/.gitignore.tpl");
 const APP_ENV_EXAMPLE: &str = include_str!("../templates/minimal/.env.example.tpl");
 
-pub fn minimal_template_files(
+const SITE_APP_LAYOUT_AX: &str = include_str!("../templates/site/app/layout.ax.tpl");
+const SITE_APP_PAGE_AX: &str = include_str!("../templates/site/app/page.ax.tpl");
+const SITE_APP_POSTS_PAGE_AX: &str = include_str!("../templates/site/app/posts/page.ax.tpl");
+const SITE_APP_POSTS_LOADER_AX: &str = include_str!("../templates/site/app/posts/loader.ax.tpl");
+const SITE_APP_POSTS_ACTIONS_AX: &str = include_str!("../templates/site/app/posts/actions.ax.tpl");
+const SITE_APP_ROUTE_POSTS_AX: &str = include_str!("../templates/site/routes/api/posts.ax.tpl");
+const SITE_APP_JOB_DIGEST_AX: &str = include_str!("../templates/site/jobs/digest.ax.tpl");
+const SITE_APP_README: &str = include_str!("../templates/site/README.md.tpl");
+
+pub fn template_files(
+    template: AppTemplate,
     project_name: &str,
     runtime_dependency: &str,
     runtime_source_note: &str,
@@ -32,6 +48,39 @@ pub fn minimal_template_files(
         ("{{AXONIX_RUNTIME_DEPENDENCY}}", runtime_dependency),
         ("{{AXONIX_RUNTIME_SOURCE_NOTE}}", runtime_source_note),
     ];
+
+    let (
+        readme,
+        layout_ax,
+        page_ax,
+        posts_page_ax,
+        posts_loader_ax,
+        posts_actions_ax,
+        route_posts_ax,
+        job_digest_ax,
+    ) = match template {
+        AppTemplate::Minimal => (
+            APP_README,
+            APP_LAYOUT_AX,
+            APP_PAGE_AX,
+            APP_POSTS_PAGE_AX,
+            APP_POSTS_LOADER_AX,
+            APP_POSTS_ACTIONS_AX,
+            APP_ROUTE_POSTS_AX,
+            APP_JOB_DIGEST_AX,
+        ),
+        AppTemplate::Site => (
+            SITE_APP_README,
+            SITE_APP_LAYOUT_AX,
+            SITE_APP_PAGE_AX,
+            SITE_APP_POSTS_PAGE_AX,
+            SITE_APP_POSTS_LOADER_AX,
+            SITE_APP_POSTS_ACTIONS_AX,
+            SITE_APP_ROUTE_POSTS_AX,
+            SITE_APP_JOB_DIGEST_AX,
+        ),
+    };
+
     vec![
         TemplateFile {
             relative_path: "Cargo.toml",
@@ -63,35 +112,35 @@ pub fn minimal_template_files(
         },
         TemplateFile {
             relative_path: "app/layout.ax",
-            contents: apply_vars(APP_LAYOUT_AX, &vars),
+            contents: apply_vars(layout_ax, &vars),
         },
         TemplateFile {
             relative_path: "app/page.ax",
-            contents: apply_vars(APP_PAGE_AX, &vars),
+            contents: apply_vars(page_ax, &vars),
         },
         TemplateFile {
             relative_path: "app/posts/page.ax",
-            contents: apply_vars(APP_POSTS_PAGE_AX, &vars),
+            contents: apply_vars(posts_page_ax, &vars),
         },
         TemplateFile {
             relative_path: "app/posts/loader.ax",
-            contents: apply_vars(APP_POSTS_LOADER_AX, &vars),
+            contents: apply_vars(posts_loader_ax, &vars),
         },
         TemplateFile {
             relative_path: "app/posts/actions.ax",
-            contents: apply_vars(APP_POSTS_ACTIONS_AX, &vars),
+            contents: apply_vars(posts_actions_ax, &vars),
         },
         TemplateFile {
             relative_path: "routes/api/posts.ax",
-            contents: apply_vars(APP_ROUTE_POSTS_AX, &vars),
+            contents: apply_vars(route_posts_ax, &vars),
         },
         TemplateFile {
             relative_path: "jobs/digest.ax",
-            contents: apply_vars(APP_JOB_DIGEST_AX, &vars),
+            contents: apply_vars(job_digest_ax, &vars),
         },
         TemplateFile {
             relative_path: "README.md",
-            contents: apply_vars(APP_README, &vars),
+            contents: apply_vars(readme, &vars),
         },
         TemplateFile {
             relative_path: ".env.example",

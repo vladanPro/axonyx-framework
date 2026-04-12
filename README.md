@@ -38,6 +38,17 @@ Current local flow:
 cargo run -p create-axonix -- my-app --yes
 ```
 
+Available templates today:
+
+- `minimal`
+- `site`
+
+Example:
+
+```bash
+cargo run -p create-axonix -- my-site --yes --template site --runtime-source git
+```
+
 ### 1b) Create a new Axonix app against the standalone runtime repo
 
 ```bash

@@ -31,6 +31,10 @@ struct Cli {
     #[arg(long)]
     git: bool,
 
+    /// Starter template to use for the generated app
+    #[arg(long, value_enum, default_value_t = AppTemplate::Minimal)]
+    template: AppTemplate,
+
     /// Where the generated app should load axonix-runtime from
     #[arg(long, value_enum, default_value_t = RuntimeSource::Path)]
     runtime_source: RuntimeSource,
@@ -53,6 +57,12 @@ enum RuntimeSource {
     Path,
     Git,
     Registry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum AppTemplate {
+    Minimal,
+    Site,
 }
 
 fn main() {
@@ -108,6 +118,7 @@ fn run() -> Result<()> {
     println!("Next steps:");
     println!("  cd {}", cli.project_name);
     println!("  cargo run");
+    println!("Template: {:?}", cli.template);
     Ok(())
 }
 
@@ -127,6 +138,10 @@ fn validate_project_name(name: &str) -> Result<()> {
 fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
     let runtime_dependency = runtime_dependency_spec(cli)?;
     let runtime_source_note = runtime_source_note(cli);
+    let template = match cli.template {
+        AppTemplate::Minimal => template::AppTemplate::Minimal,
+        AppTemplate::Site => template::AppTemplate::Site,
+    };
 
     fs::create_dir_all(target_dir).with_context(|| {
         format!(
@@ -135,7 +150,8 @@ fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
         )
     })?;
 
-    for file in template::minimal_template_files(
+    for file in template::template_files(
+        template,
         &cli.project_name,
         &runtime_dependency,
         &runtime_source_note,
