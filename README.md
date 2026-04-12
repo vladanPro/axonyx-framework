@@ -361,6 +361,13 @@ Current database adapter draft covers:
 - resolving the active adapter from `AX_SECRET_DB_DRIVER`
 - keeping one backend authoring shape while adapters translate into concrete driver behavior
 
+Axonix now also has a first SQL dialect draft in `axonix-core`:
+
+- lowers `AxQueryPlan` into SQL text plus bound parameter slots
+- supports `postgres`, `mysql`, and `sqlite`
+- keeps placeholder rules dialect-aware such as `$1` for Postgres and `?` for MySQL/SQLite
+- gives the runtime adapter layer a clean seam for future real driver execution
+
 ## Repo Layout
 
 ```text
