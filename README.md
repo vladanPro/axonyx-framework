@@ -12,7 +12,17 @@ This repository includes:
 - `axonix-macros`: attribute macros such as `#[component]`
 - `axonix-runtime`: runtime stub that executes Axonix IR into a render plan
 - `create-axonix`: project scaffolding CLI (similar to `create-next-app`)
-- `packages/axonix-ts`: TypeScript builder API that emits Axonix IR JSON
+
+## Package Model
+
+Current package roles inside the monorepo:
+
+- `create-axonix`: CLI that scaffolds a new Axonix app
+- `axonix-core`: parser, lowering, SQL draft compiler, and authoring ASTs
+- `axonix-runtime`: execution/runtime contract used by generated apps
+- `axonix-macros`: ergonomics layer for component authoring
+
+During monorepo development, generated apps point to `axonix-runtime` through a local Cargo `path` dependency. After publish, the same scaffold can move to a normal versioned dependency flow such as `axonix-runtime = "0.x"`.
 
 ## Quick Start
 

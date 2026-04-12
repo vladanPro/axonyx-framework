@@ -1,5 +1,5 @@
-use crate::runtime::AxEnv;
+use axonix_runtime::backend_prelude::{AxEnv, AxRuntimeResult};
 
-pub fn db_url(env: &AxEnv) -> Option<&str> {
+pub fn db_url(env: &AxEnv) -> AxRuntimeResult<String> {
     env.secret("db_url")
 }

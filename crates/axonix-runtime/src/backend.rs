@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
 use axonix_core::ax_backend_lowering_prelude::{
     AxAssignmentPlan, AxQueryFilterOpPlan, AxQueryFilterPlan, AxQueryOrderDirectionPlan,
@@ -6,8 +8,7 @@ use axonix_core::ax_backend_lowering_prelude::{
 };
 use axonix_core::ax_sql_prelude::{
     compile_delete_plan_to_sql, compile_insert_plan_to_sql, compile_query_plan_to_sql,
-    compile_update_plan_to_sql,
-    AxSqlDialect,
+    compile_update_plan_to_sql, AxSqlDialect,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -228,6 +229,8 @@ impl AxEnv {
     }
 
     pub fn from_env() -> Self {
+        load_dotenv_file(".env");
+
         let mut env = Self::new();
 
         for (key, value) in std::env::vars() {
@@ -269,7 +272,11 @@ impl AxEnv {
     }
 
     pub fn database_driver(&self) -> AxRuntimeResult<AxDatabaseDriver> {
-        match self.secret.get("db_dialect").or_else(|| self.secret.get("db_driver")) {
+        match self
+            .secret
+            .get("db_dialect")
+            .or_else(|| self.secret.get("db_driver"))
+        {
             Some(driver) => AxDatabaseDriver::parse(driver),
             None => Ok(AxDatabaseDriver::Postgres),
         }
@@ -307,6 +314,35 @@ impl AxEnv {
 
 fn normalize_env_key(key: &str) -> String {
     key.trim().to_ascii_lowercase()
+}
+
+fn load_dotenv_file(path: impl AsRef<Path>) {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return;
+    };
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+
+        let key = key.trim();
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if key.is_empty() {
+            continue;
+        }
+
+        if std::env::var_os(key).is_none() {
+            unsafe {
+                std::env::set_var(key, value);
+            }
+        }
+    }
 }
 
 pub trait AxRuntimeEnvAccess {
@@ -459,19 +495,43 @@ impl AxDatabaseAdapter for PostgresAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        dispatch_load(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_load(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        dispatch_insert(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_insert(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_update(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
-        dispatch_delete(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_delete(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 }
 
@@ -481,19 +541,43 @@ impl AxDatabaseAdapter for MySqlAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        dispatch_load(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_load(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        dispatch_insert(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_insert(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_update(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
-        dispatch_delete(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_delete(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 }
 
@@ -503,19 +587,43 @@ impl AxDatabaseAdapter for SqliteAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        dispatch_load(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_load(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        dispatch_insert(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_insert(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        dispatch_update(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_update(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 
     fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
-        dispatch_delete(self.driver(), self.transport, &self.url, &self.api_url, request)
+        dispatch_delete(
+            self.driver(),
+            self.transport,
+            &self.url,
+            &self.api_url,
+            request,
+        )
     }
 }
 
@@ -525,20 +633,43 @@ impl AxDatabaseAdapter for MemoryAdapter {
     }
 
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
-        Ok(adapter_payload(self.driver(), AxDataTransport::Direct, &None, &None, request.collection.clone(), json!({
-            "filters": request.filters,
-            "orders": request.orders,
-            "limit": request.limit,
-            "offset": request.offset,
-        })))
+        Ok(adapter_payload(
+            self.driver(),
+            AxDataTransport::Direct,
+            &None,
+            &None,
+            request.collection.clone(),
+            json!({
+                "filters": request.filters,
+                "orders": request.orders,
+                "limit": request.limit,
+                "offset": request.offset,
+            }),
+        ))
     }
 
     fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), AxDataTransport::Direct, &None, &None, "insert", &request.collection, &request.fields))
+        Ok(mutation_payload(
+            self.driver(),
+            AxDataTransport::Direct,
+            &None,
+            &None,
+            "insert",
+            &request.collection,
+            &request.fields,
+        ))
     }
 
     fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
-        Ok(mutation_payload(self.driver(), AxDataTransport::Direct, &None, &None, "update", &request.collection, &request.fields))
+        Ok(mutation_payload(
+            self.driver(),
+            AxDataTransport::Direct,
+            &None,
+            &None,
+            "update",
+            &request.collection,
+            &request.fields,
+        ))
     }
 
     fn delete(&self, request: &AxDeleteRequest) -> AxRuntimeResult<Value> {
@@ -573,7 +704,9 @@ pub fn adapter_from_config(config: &AxDatabaseConfig) -> Box<dyn AxDatabaseAdapt
     }
 }
 
-pub fn runtime_from_env(env: AxEnv) -> AxRuntimeResult<AxDatabaseRuntime<Box<dyn AxDatabaseAdapter>>> {
+pub fn runtime_from_env(
+    env: AxEnv,
+) -> AxRuntimeResult<AxDatabaseRuntime<Box<dyn AxDatabaseAdapter>>> {
     let config = env.database_config()?;
     config.validate()?;
     let adapter = adapter_from_config(&config);
@@ -644,9 +777,14 @@ fn dispatch_insert(
 ) -> AxRuntimeResult<Value> {
     match transport {
         AxDataTransport::Direct => direct_insert_plan(driver, url, request),
-        AxDataTransport::Api => {
-            api_mutation_plan(driver, api_url, "insert", &request.collection, &request.fields, &[])
-        }
+        AxDataTransport::Api => api_mutation_plan(
+            driver,
+            api_url,
+            "insert",
+            &request.collection,
+            &request.fields,
+            &[],
+        ),
     }
 }
 
@@ -689,12 +827,19 @@ fn direct_load_plan(
     request: &AxQueryRequest,
 ) -> AxRuntimeResult<Value> {
     let Some(dialect) = driver.sql_dialect() else {
-        return Ok(adapter_payload(driver, AxDataTransport::Direct, url, &None, request.collection.clone(), json!({
-            "filters": request.filters,
-            "orders": request.orders,
-            "limit": request.limit,
-            "offset": request.offset,
-        })));
+        return Ok(adapter_payload(
+            driver,
+            AxDataTransport::Direct,
+            url,
+            &None,
+            request.collection.clone(),
+            json!({
+                "filters": request.filters,
+                "orders": request.orders,
+                "limit": request.limit,
+                "offset": request.offset,
+            }),
+        ));
     };
 
     let plan = compile_query_plan_to_sql(&query_request_to_plan(request), dialect)
@@ -702,7 +847,11 @@ fn direct_load_plan(
     let execution = AxDirectSqlPlan {
         dialect: dialect.name().to_string(),
         sql: plan.sql,
-        params: request.filters.iter().map(|filter| filter.value.clone()).collect(),
+        params: request
+            .filters
+            .iter()
+            .map(|filter| filter.value.clone())
+            .collect(),
         url: url.clone(),
     };
 
@@ -719,7 +868,15 @@ fn direct_insert_plan(
     request: &AxInsertRequest,
 ) -> AxRuntimeResult<Value> {
     let Some(dialect) = driver.sql_dialect() else {
-        return Ok(mutation_payload(driver, AxDataTransport::Direct, url, &None, "insert", &request.collection, &request.fields));
+        return Ok(mutation_payload(
+            driver,
+            AxDataTransport::Direct,
+            url,
+            &None,
+            "insert",
+            &request.collection,
+            &request.fields,
+        ));
     };
 
     let fields = fields_to_assignment_plans(&request.fields);
@@ -746,7 +903,15 @@ fn direct_update_plan(
     request: &AxUpdateRequest,
 ) -> AxRuntimeResult<Value> {
     let Some(dialect) = driver.sql_dialect() else {
-        return Ok(mutation_payload(driver, AxDataTransport::Direct, url, &None, "update", &request.collection, &request.fields));
+        return Ok(mutation_payload(
+            driver,
+            AxDataTransport::Direct,
+            url,
+            &None,
+            "update",
+            &request.collection,
+            &request.fields,
+        ));
     };
 
     let fields = fields_to_assignment_plans(&request.fields);
@@ -794,7 +959,11 @@ fn direct_delete_plan(
     let execution = AxDirectSqlPlan {
         dialect: dialect.name().to_string(),
         sql: plan.sql,
-        params: request.filters.iter().map(|filter| filter.value.clone()).collect(),
+        params: request
+            .filters
+            .iter()
+            .map(|filter| filter.value.clone())
+            .collect(),
         url: url.clone(),
     };
 
@@ -945,14 +1114,15 @@ fn request_filters_payload(filters: &[AxQueryFilterRequest]) -> Value {
 }
 
 pub mod prelude {
-    pub use super::ok_payload;
     pub use super::adapter_from_config;
+    pub use super::ok_payload;
+    pub use super::runtime_from_env;
     pub use super::AxBackendRuntime;
+    pub use super::AxDataTransport;
     pub use super::AxDatabaseAdapter;
     pub use super::AxDatabaseConfig;
     pub use super::AxDatabaseDriver;
     pub use super::AxDatabaseRuntime;
-    pub use super::AxDataTransport;
     pub use super::AxDeleteRequest;
     pub use super::AxEnv;
     pub use super::AxInsertRequest;
@@ -965,15 +1135,14 @@ pub mod prelude {
     pub use super::AxQueryOrderRequest;
     pub use super::AxQueryRequest;
     pub use super::AxRevalidator;
-    pub use super::AxRuntimeError;
     pub use super::AxRuntimeEnvAccess;
+    pub use super::AxRuntimeError;
     pub use super::AxRuntimeResult;
     pub use super::AxSendRequest;
     pub use super::AxUpdateRequest;
     pub use super::MemoryAdapter;
     pub use super::MySqlAdapter;
     pub use super::PostgresAdapter;
-    pub use super::runtime_from_env;
     pub use super::SqliteAdapter;
 }
 
@@ -1085,11 +1254,17 @@ mod tests {
         };
 
         assert_eq!(
-            runtime.env().public("app_name").expect("public key should exist"),
+            runtime
+                .env()
+                .public("app_name")
+                .expect("public key should exist"),
             "Axonix".to_string()
         );
         assert_eq!(
-            runtime.env().secret("db_url").expect("secret key should exist"),
+            runtime
+                .env()
+                .secret("db_url")
+                .expect("secret key should exist"),
             "postgres://local/axonix".to_string()
         );
     }
@@ -1166,7 +1341,10 @@ mod tests {
         assert_eq!(value["driver"], "mysql");
         assert_eq!(value["transport"], "direct");
         assert_eq!(value["execution"]["dialect"], "mysql");
-        assert_eq!(value["execution"]["params"].as_array().map(Vec::len), Some(0));
+        assert_eq!(
+            value["execution"]["params"].as_array().map(Vec::len),
+            Some(0)
+        );
     }
 
     #[test]
@@ -1222,7 +1400,10 @@ mod tests {
         assert_eq!(value["request"]["base_url"], "https://data.example.com");
         assert_eq!(value["request"]["action"], "insert");
         assert_eq!(value["request"]["resource"], "posts");
-        assert_eq!(value["request"]["payload"]["fields"]["title"], json!("Hello"));
+        assert_eq!(
+            value["request"]["payload"]["fields"]["title"],
+            json!("Hello")
+        );
     }
 
     #[test]
@@ -1349,7 +1530,9 @@ mod tests {
             api_key: None,
         };
 
-        let error = config.validate().expect_err("direct transport should require db url");
+        let error = config
+            .validate()
+            .expect_err("direct transport should require db url");
         assert_eq!(
             error,
             AxRuntimeError::message("missing AX_SECRET_DB_URL for direct data transport")
@@ -1366,7 +1549,9 @@ mod tests {
             api_key: None,
         };
 
-        let error = config.validate().expect_err("api transport should require api url");
+        let error = config
+            .validate()
+            .expect_err("api transport should require api url");
         assert_eq!(
             error,
             AxRuntimeError::message("missing AX_PUBLIC_DATA_API_URL for api data transport")

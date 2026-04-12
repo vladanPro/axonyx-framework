@@ -2,7 +2,7 @@ mod template;
 
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use axonix_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
@@ -60,7 +60,10 @@ fn run() -> Result<()> {
     }
 
     if !cli.yes {
-        println!("This will create a new Axonix app in '{}'.", target_dir.display());
+        println!(
+            "This will create a new Axonix app in '{}'.",
+            target_dir.display()
+        );
         if !confirm("Continue? [y/N]: ")? {
             println!("Canceled.");
             return Ok(());
@@ -95,6 +98,8 @@ fn validate_project_name(name: &str) -> Result<()> {
 }
 
 fn create_app(target_dir: &PathBuf, project_name: &str) -> Result<()> {
+    let runtime_dependency = runtime_dependency_spec()?;
+
     fs::create_dir_all(target_dir).with_context(|| {
         format!(
             "failed to create project directory '{}'",
@@ -102,12 +107,11 @@ fn create_app(target_dir: &PathBuf, project_name: &str) -> Result<()> {
         )
     })?;
 
-    for file in template::minimal_template_files(project_name) {
+    for file in template::minimal_template_files(project_name, &runtime_dependency) {
         let full_path = target_dir.join(file.relative_path);
         if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create directory '{}'", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory '{}'", parent.display()))?;
         }
         fs::write(&full_path, file.contents)
             .with_context(|| format!("failed to write '{}'", full_path.display()))?;
@@ -133,10 +137,6 @@ fn compile_initial_backend(target_dir: &PathBuf) -> Result<()> {
 
     let module = compile_backend_sources_to_module(&source_refs)
         .with_context(|| "failed to compile initial backend .ax sources")?;
-    let module = module.replace(
-        "use axonix_runtime::backend_prelude::*;",
-        "use crate::runtime::backend_prelude::*;",
-    );
 
     let generated_backend = target_dir.join("src").join("generated").join("backend.rs");
     fs::write(&generated_backend, module).with_context(|| {
@@ -149,10 +149,7 @@ fn compile_initial_backend(target_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn collect_backend_sources(
-    target_dir: &PathBuf,
-    out: &mut Vec<(String, String)>,
-) -> Result<()> {
+fn collect_backend_sources(target_dir: &PathBuf, out: &mut Vec<(String, String)>) -> Result<()> {
     let routes_root = target_dir.join("routes");
     let jobs_root = target_dir.join("jobs");
     let app_root = target_dir.join("app");
@@ -176,7 +173,8 @@ fn collect_backend_sources_in_dir(
     for entry in fs::read_dir(dir)
         .with_context(|| format!("failed to read directory '{}'", dir.display()))?
     {
-        let entry = entry.with_context(|| format!("failed to read entry in '{}'", dir.display()))?;
+        let entry =
+            entry.with_context(|| format!("failed to read entry in '{}'", dir.display()))?;
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -215,7 +213,8 @@ fn collect_named_backend_files(
     for entry in fs::read_dir(dir)
         .with_context(|| format!("failed to read directory '{}'", dir.display()))?
     {
-        let entry = entry.with_context(|| format!("failed to read entry in '{}'", dir.display()))?;
+        let entry =
+            entry.with_context(|| format!("failed to read entry in '{}'", dir.display()))?;
         let path = entry.path();
         let file_type = entry
             .file_type()
@@ -259,6 +258,33 @@ fn init_git(target_dir: &PathBuf) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn runtime_dependency_spec() -> Result<String> {
+    let runtime_crate = workspace_root()
+        .join("crates")
+        .join("axonix-runtime")
+        .canonicalize()
+        .context("failed to resolve axonix-runtime crate path")?;
+
+    let runtime_path = cargo_toml_path(&runtime_crate);
+    Ok(format!("axonix-runtime = {{ path = \"{runtime_path}\" }}"))
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("create-axonix should live under <workspace>/crates/create-axonix")
+        .to_path_buf()
+}
+
+fn cargo_toml_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 fn confirm(prompt: &str) -> Result<bool> {

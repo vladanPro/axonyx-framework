@@ -1,9 +1,8 @@
 mod db;
 mod generated;
-mod runtime;
 
+use axonix_runtime::backend_prelude::AxEnv;
 use db::db_url;
-use runtime::AxEnv;
 
 fn main() {
     let env = AxEnv::from_env();
@@ -11,7 +10,8 @@ fn main() {
     println!("Axonix app '{{APP_NAME}}' is ready.");
     println!(
         "Public app name: {}",
-        env.public("app_name").unwrap_or("{{APP_NAME}}")
+        env.public("app_name")
+            .unwrap_or_else(|_| "{{APP_NAME}}".to_string())
     );
     println!(
         "Database configured: {}",

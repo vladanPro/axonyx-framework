@@ -117,7 +117,9 @@ impl Parser {
 
             self.pos += 1;
             let (input, body) = self.parse_action_sections(2)?;
-            return Ok(AxBackendBlock::Action(AxAction::new(name).input(input).body(body)));
+            return Ok(AxBackendBlock::Action(
+                AxAction::new(name).input(input).body(body),
+            ));
         }
 
         if let Some(name) = text.strip_prefix("job ") {
@@ -238,7 +240,10 @@ impl Parser {
 
         if let Some(value) = text.strip_prefix("revalidate ") {
             self.pos += 1;
-            return Ok(AxBackendStmt::revalidate(parse_expr(value.trim(), line.line)?));
+            return Ok(AxBackendStmt::revalidate(parse_expr(
+                value.trim(),
+                line.line,
+            )?));
         }
 
         if let Some(value) = text.strip_prefix("return ") {
@@ -292,6 +297,10 @@ impl Parser {
                 let query = self.parse_query_spec(expr, line.line, line.indent + 2)?;
                 return Ok(AxBackendStmt::data(name, query));
             }
+        }
+
+        if let Ok(source) = query_source_from_expr(expr.clone(), line.line) {
+            return Ok(AxBackendStmt::data(name, AxQuerySpec::new(source)));
         }
 
         Ok(AxBackendStmt::data(name, expr))
@@ -487,24 +496,22 @@ impl Parser {
             }
 
             if let Some(rest) = text.strip_prefix("limit ") {
-                let value = rest
-                    .trim()
-                    .parse::<u32>()
-                    .map_err(|_| AxBackendParseError::InvalidQueryNumber {
+                let value = rest.trim().parse::<u32>().map_err(|_| {
+                    AxBackendParseError::InvalidQueryNumber {
                         line: clause_line.line,
-                    })?;
+                    }
+                })?;
                 query = query.limit(value);
                 self.pos += 1;
                 continue;
             }
 
             if let Some(rest) = text.strip_prefix("offset ") {
-                let value = rest
-                    .trim()
-                    .parse::<u32>()
-                    .map_err(|_| AxBackendParseError::InvalidQueryNumber {
+                let value = rest.trim().parse::<u32>().map_err(|_| {
+                    AxBackendParseError::InvalidQueryNumber {
                         line: clause_line.line,
-                    })?;
+                    }
+                })?;
                 query = query.offset(value);
                 self.pos += 1;
                 continue;
@@ -554,10 +561,7 @@ fn is_query_clause(text: &str) -> bool {
         || text.starts_with("offset ")
 }
 
-fn query_source_from_expr(
-    expr: AxExpr,
-    line: usize,
-) -> Result<AxQuerySource, AxBackendParseError> {
+fn query_source_from_expr(expr: AxExpr, line: usize) -> Result<AxQuerySource, AxBackendParseError> {
     match expr {
         AxExpr::Call { path, args }
             if path == vec!["Db".to_string(), "Stream".to_string()] && args.len() == 1 =>
@@ -760,10 +764,7 @@ route GET "/api/posts"
                     AxQueryFilterOp::Eq,
                     AxExpr::string("published"),
                 ))
-                .order(AxQueryOrder::new(
-                    "created_at",
-                    AxQueryOrderDirection::Desc,
-                ))
+                .order(AxQueryOrder::new("created_at", AxQueryOrderDirection::Desc,))
                 .limit(20)
             )
         );
@@ -773,6 +774,31 @@ route GET "/api/posts"
         };
         assert_eq!(route.method, "GET");
         assert_eq!(route.path, "/api/posts");
+    }
+
+    #[test]
+    fn parses_plain_stream_binding_as_query_without_extra_clauses() {
+        let input = r#"
+loader PostsList
+  data posts = Db.Stream("posts")
+  return posts
+"#;
+
+        let document = parse_backend_ax(input).expect("document should parse");
+
+        let AxBackendBlock::Loader(loader) = &document.blocks[0] else {
+            panic!("expected loader block");
+        };
+        let AxBackendStmt::Data(posts) = &loader.body[0] else {
+            panic!("expected data statement");
+        };
+
+        assert_eq!(
+            posts.value,
+            AxBackendValue::Query(AxQuerySpec::new(AxQuerySource::Stream {
+                collection: "posts".to_string(),
+            }))
+        );
     }
 
     #[test]

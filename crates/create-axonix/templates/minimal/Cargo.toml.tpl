@@ -6,4 +6,5 @@ edition = "2021"
 [workspace]
 
 [dependencies]
+{{AXONIX_RUNTIME_DEPENDENCY}}
 serde_json = "1"

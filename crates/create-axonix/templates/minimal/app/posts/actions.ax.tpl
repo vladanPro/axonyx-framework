@@ -16,6 +16,7 @@ action PublishPost
 
   update "posts"
     status: "published"
+    where id = input.id
 
   revalidate "/posts"
   return ok
