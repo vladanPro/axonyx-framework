@@ -26,6 +26,7 @@ Generated apps can now target either:
 
 - a local Cargo `path` dependency during monorepo development
 - the standalone Git repo at `https://github.com/vladanPro/axonix-runtime`
+- a future crates.io package release such as `axonix-runtime = "0.1.0"`
 
 Current local flow:
 
@@ -42,6 +43,14 @@ cargo run -p create-axonix -- my-app --yes
 ```bash
 cargo run -p create-axonix -- my-app --yes --runtime-source git
 ```
+
+### 1c) Create a new Axonix app against the future registry release
+
+```bash
+cargo run -p create-axonix -- my-app --yes --runtime-source registry
+```
+
+Use the registry mode once `axonix-runtime` is published. Until then, prefer `path` or `git`.
 
 ### 2) Run the generated app
 

@@ -4,6 +4,8 @@ Generated with `create-axonix`.
 
 {{AXONIX_RUNTIME_SOURCE_NOTE}}
 
+If you selected the registry runtime source before the package is published, switch to `--runtime-source git` or `--runtime-source path` until the first public release is available.
+
 ## Run
 
 ```bash

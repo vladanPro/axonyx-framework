@@ -9,6 +9,8 @@ use axonix_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use clap::{Parser, ValueEnum};
 
 const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonix-runtime";
+const DEFAULT_RUNTIME_PACKAGE: &str = "axonix-runtime";
+const DEFAULT_RUNTIME_VERSION: &str = "0.1.0";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonix")]
@@ -36,12 +38,21 @@ struct Cli {
     /// Git URL used when --runtime-source git is selected
     #[arg(long, default_value = DEFAULT_RUNTIME_GIT_URL)]
     runtime_git_url: String,
+
+    /// Package name used when --runtime-source registry is selected
+    #[arg(long, default_value = DEFAULT_RUNTIME_PACKAGE)]
+    runtime_package: String,
+
+    /// Package version used when --runtime-source registry is selected
+    #[arg(long, default_value = DEFAULT_RUNTIME_VERSION)]
+    runtime_version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum RuntimeSource {
     Path,
     Git,
+    Registry,
 }
 
 fn main() {
@@ -297,6 +308,11 @@ fn runtime_dependency_spec(cli: &Cli) -> Result<String> {
             "axonix-runtime = {{ git = \"{}\" }}",
             cli.runtime_git_url.trim()
         )),
+        RuntimeSource::Registry => Ok(format!(
+            "{} = \"{}\"",
+            cli.runtime_package.trim(),
+            cli.runtime_version.trim()
+        )),
     }
 }
 
@@ -306,6 +322,11 @@ fn runtime_source_note(cli: &Cli) -> String {
         RuntimeSource::Git => format!(
             "This scaffold links against the shared `axonix-runtime` Git repository at `{}` so the app can track the standalone runtime workspace outside the local monorepo.",
             cli.runtime_git_url.trim()
+        ),
+        RuntimeSource::Registry => format!(
+            "This scaffold is prepared for the crates.io flow and expects the runtime package `{}` at version `{}` to be available in the Cargo registry.",
+            cli.runtime_package.trim(),
+            cli.runtime_version.trim()
         ),
     }
 }
