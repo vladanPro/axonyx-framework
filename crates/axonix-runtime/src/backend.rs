@@ -71,6 +71,43 @@ pub struct AxSendRequest {
     pub payload: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AxDatabaseDriver {
+    Postgres,
+    MySql,
+    Sqlite,
+    Memory,
+}
+
+impl AxDatabaseDriver {
+    pub fn parse(input: &str) -> AxRuntimeResult<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "" | "postgres" | "postgresql" => Ok(Self::Postgres),
+            "mysql" => Ok(Self::MySql),
+            "sqlite" => Ok(Self::Sqlite),
+            "memory" | "inmemory" | "in-memory" => Ok(Self::Memory),
+            other => Err(AxRuntimeError::message(format!(
+                "unsupported database driver `{other}`"
+            ))),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::MySql => "mysql",
+            Self::Sqlite => "sqlite",
+            Self::Memory => "memory",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxDatabaseConfig {
+    pub driver: AxDatabaseDriver,
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AxEnv {
     pub public: BTreeMap<String, String>,
@@ -122,6 +159,20 @@ impl AxEnv {
             .cloned()
             .ok_or_else(|| AxRuntimeError::message(format!("missing secret env key `{key}`")))
     }
+
+    pub fn database_driver(&self) -> AxRuntimeResult<AxDatabaseDriver> {
+        match self.secret.get("db_driver") {
+            Some(driver) => AxDatabaseDriver::parse(driver),
+            None => Ok(AxDatabaseDriver::Postgres),
+        }
+    }
+
+    pub fn database_config(&self) -> AxRuntimeResult<AxDatabaseConfig> {
+        Ok(AxDatabaseConfig {
+            driver: self.database_driver()?,
+            url: self.secret.get("db_url").cloned(),
+        })
+    }
 }
 
 fn normalize_env_key(key: &str) -> String {
@@ -130,6 +181,34 @@ fn normalize_env_key(key: &str) -> String {
 
 pub trait AxRuntimeEnvAccess {
     fn env(&self) -> &AxEnv;
+}
+
+pub trait AxDatabaseAdapter {
+    fn driver(&self) -> AxDatabaseDriver;
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value>;
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value>;
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value>;
+}
+
+impl<T> AxDatabaseAdapter for Box<T>
+where
+    T: AxDatabaseAdapter + ?Sized,
+{
+    fn driver(&self) -> AxDatabaseDriver {
+        (**self).driver()
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        (**self).load(request)
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        (**self).insert(request)
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        (**self).update(request)
+    }
 }
 
 pub trait AxQueryExecutor {
@@ -159,13 +238,230 @@ impl<T> AxBackendRuntime for T where
 {
 }
 
+pub struct AxDatabaseRuntime<A> {
+    env: AxEnv,
+    adapter: A,
+}
+
+impl<A> AxDatabaseRuntime<A> {
+    pub fn new(env: AxEnv, adapter: A) -> Self {
+        Self { env, adapter }
+    }
+}
+
+impl<A> AxRuntimeEnvAccess for AxDatabaseRuntime<A> {
+    fn env(&self) -> &AxEnv {
+        &self.env
+    }
+}
+
+impl<A> AxQueryExecutor for AxDatabaseRuntime<A>
+where
+    A: AxDatabaseAdapter,
+{
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        self.adapter.load(request)
+    }
+}
+
+impl<A> AxMutationExecutor for AxDatabaseRuntime<A>
+where
+    A: AxDatabaseAdapter,
+{
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        self.adapter.insert(request)
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        self.adapter.update(request)
+    }
+}
+
+impl<A> AxRevalidator for AxDatabaseRuntime<A> {
+    fn revalidate(&self, _target: &str) -> AxRuntimeResult<()> {
+        Ok(())
+    }
+}
+
+impl<A> AxMessenger for AxDatabaseRuntime<A> {
+    fn send(&self, _request: &AxSendRequest) -> AxRuntimeResult<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresAdapter {
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MySqlAdapter {
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteAdapter {
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MemoryAdapter;
+
+impl AxDatabaseAdapter for PostgresAdapter {
+    fn driver(&self) -> AxDatabaseDriver {
+        AxDatabaseDriver::Postgres
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), json!({
+            "filters": request.filters,
+            "orders": request.orders,
+            "limit": request.limit,
+            "offset": request.offset,
+        })))
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+    }
+}
+
+impl AxDatabaseAdapter for MySqlAdapter {
+    fn driver(&self) -> AxDatabaseDriver {
+        AxDatabaseDriver::MySql
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), json!({
+            "filters": request.filters,
+            "orders": request.orders,
+            "limit": request.limit,
+            "offset": request.offset,
+        })))
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+    }
+}
+
+impl AxDatabaseAdapter for SqliteAdapter {
+    fn driver(&self) -> AxDatabaseDriver {
+        AxDatabaseDriver::Sqlite
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), json!({
+            "filters": request.filters,
+            "orders": request.orders,
+            "limit": request.limit,
+            "offset": request.offset,
+        })))
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+    }
+}
+
+impl AxDatabaseAdapter for MemoryAdapter {
+    fn driver(&self) -> AxDatabaseDriver {
+        AxDatabaseDriver::Memory
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        Ok(adapter_payload(self.driver(), &None, request.collection.clone(), json!({
+            "filters": request.filters,
+            "orders": request.orders,
+            "limit": request.limit,
+            "offset": request.offset,
+        })))
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &None, "insert", &request.collection, &request.fields))
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &None, "update", &request.collection, &request.fields))
+    }
+}
+
+pub fn adapter_from_config(config: &AxDatabaseConfig) -> Box<dyn AxDatabaseAdapter> {
+    match config.driver {
+        AxDatabaseDriver::Postgres => Box::new(PostgresAdapter {
+            url: config.url.clone(),
+        }),
+        AxDatabaseDriver::MySql => Box::new(MySqlAdapter {
+            url: config.url.clone(),
+        }),
+        AxDatabaseDriver::Sqlite => Box::new(SqliteAdapter {
+            url: config.url.clone(),
+        }),
+        AxDatabaseDriver::Memory => Box::new(MemoryAdapter),
+    }
+}
+
+pub fn runtime_from_env(env: AxEnv) -> AxRuntimeResult<AxDatabaseRuntime<Box<dyn AxDatabaseAdapter>>> {
+    let config = env.database_config()?;
+    let adapter = adapter_from_config(&config);
+    Ok(AxDatabaseRuntime::new(env, adapter))
+}
+
 pub fn ok_payload() -> Value {
     json!({ "ok": true })
 }
 
+fn adapter_payload(
+    driver: AxDatabaseDriver,
+    url: &Option<String>,
+    collection: String,
+    details: Value,
+) -> Value {
+    json!({
+        "driver": driver.as_str(),
+        "url": url,
+        "collection": collection,
+        "details": details,
+    })
+}
+
+fn mutation_payload(
+    driver: AxDatabaseDriver,
+    url: &Option<String>,
+    action: &str,
+    collection: &str,
+    fields: &BTreeMap<String, Value>,
+) -> Value {
+    json!({
+        "driver": driver.as_str(),
+        "url": url,
+        "action": action,
+        "collection": collection,
+        "fields": fields,
+    })
+}
+
 pub mod prelude {
     pub use super::ok_payload;
+    pub use super::adapter_from_config;
     pub use super::AxBackendRuntime;
+    pub use super::AxDatabaseAdapter;
+    pub use super::AxDatabaseConfig;
+    pub use super::AxDatabaseDriver;
+    pub use super::AxDatabaseRuntime;
     pub use super::AxEnv;
     pub use super::AxInsertRequest;
     pub use super::AxMessenger;
@@ -182,6 +478,11 @@ pub mod prelude {
     pub use super::AxRuntimeResult;
     pub use super::AxSendRequest;
     pub use super::AxUpdateRequest;
+    pub use super::MemoryAdapter;
+    pub use super::MySqlAdapter;
+    pub use super::PostgresAdapter;
+    pub use super::runtime_from_env;
+    pub use super::SqliteAdapter;
 }
 
 #[cfg(test)]
@@ -324,5 +625,51 @@ mod tests {
         } else {
             std::env::remove_var("AX_SECRET_DB_URL");
         }
+    }
+
+    #[test]
+    fn env_can_resolve_database_config_for_mysql() {
+        let env = AxEnv::new()
+            .with_secret("db_driver", "mysql")
+            .with_secret("db_url", "mysql://root:root@localhost:3306/axonix");
+
+        let config = env.database_config().expect("config should resolve");
+
+        assert_eq!(
+            config,
+            AxDatabaseConfig {
+                driver: AxDatabaseDriver::MySql,
+                url: Some("mysql://root:root@localhost:3306/axonix".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_from_env_can_select_mysql_adapter() {
+        let env = AxEnv::new()
+            .with_secret("db_driver", "mysql")
+            .with_secret("db_url", "mysql://root:root@localhost:3306/axonix");
+        let runtime = runtime_from_env(env).expect("runtime should initialize");
+
+        let value = runtime
+            .load(&AxQueryRequest {
+                collection: "posts".to_string(),
+                filters: Vec::new(),
+                orders: Vec::new(),
+                limit: Some(10),
+                offset: None,
+            })
+            .expect("query should execute");
+
+        assert_eq!(value["driver"], "mysql");
+        assert_eq!(value["collection"], "posts");
+    }
+
+    #[test]
+    fn runtime_defaults_to_postgres_when_driver_is_missing() {
+        let env = AxEnv::new().with_secret("db_url", "postgres://local/axonix");
+        let config = env.database_config().expect("config should resolve");
+
+        assert_eq!(config.driver, AxDatabaseDriver::Postgres);
     }
 }

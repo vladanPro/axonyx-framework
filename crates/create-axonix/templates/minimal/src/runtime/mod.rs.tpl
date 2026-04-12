@@ -36,6 +36,14 @@ impl AxEnv {
     pub fn secret(&self, key: &str) -> Option<&str> {
         self.secret.get(key).map(String::as_str)
     }
+
+    pub fn database_driver(&self) -> &str {
+        self.secret("db_driver").unwrap_or("postgres")
+    }
+
+    pub fn database_url(&self) -> Option<&str> {
+        self.secret("db_url")
+    }
 }
 
 fn normalize_env_key(key: &str) -> String {
@@ -149,6 +157,34 @@ pub trait AxRuntimeEnvAccess {
     fn env(&self) -> &AxEnv;
 }
 
+pub trait AxDatabaseAdapter {
+    fn driver(&self) -> &'static str;
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value>;
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value>;
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value>;
+}
+
+impl<T> AxDatabaseAdapter for Box<T>
+where
+    T: AxDatabaseAdapter + ?Sized,
+{
+    fn driver(&self) -> &'static str {
+        (**self).driver()
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        (**self).load(request)
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        (**self).insert(request)
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        (**self).update(request)
+    }
+}
+
 pub trait AxQueryExecutor {
     fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value>;
 }
@@ -176,8 +212,240 @@ impl<T> AxBackendRuntime for T where
 {
 }
 
+pub struct AxDatabaseRuntime<A> {
+    env: AxEnv,
+    adapter: A,
+}
+
+impl<A> AxDatabaseRuntime<A> {
+    pub fn new(env: AxEnv, adapter: A) -> Self {
+        Self { env, adapter }
+    }
+}
+
+impl<A> AxRuntimeEnvAccess for AxDatabaseRuntime<A> {
+    fn env(&self) -> &AxEnv {
+        &self.env
+    }
+}
+
+impl<A> AxQueryExecutor for AxDatabaseRuntime<A>
+where
+    A: AxDatabaseAdapter,
+{
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        self.adapter.load(request)
+    }
+}
+
+impl<A> AxMutationExecutor for AxDatabaseRuntime<A>
+where
+    A: AxDatabaseAdapter,
+{
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        self.adapter.insert(request)
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        self.adapter.update(request)
+    }
+}
+
+impl<A> AxRevalidator for AxDatabaseRuntime<A> {
+    fn revalidate(&self, _target: &str) -> AxRuntimeResult<()> {
+        Ok(())
+    }
+}
+
+impl<A> AxMessenger for AxDatabaseRuntime<A> {
+    fn send(&self, _request: &AxSendRequest) -> AxRuntimeResult<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresAdapter {
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MySqlAdapter {
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteAdapter {
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MemoryAdapter;
+
+impl AxDatabaseAdapter for PostgresAdapter {
+    fn driver(&self) -> &'static str {
+        "postgres"
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), serde_json::json!({
+            "filters": request.filters.iter().map(query_filter_payload).collect::<Vec<_>>(),
+            "orders": request.orders.iter().map(query_order_payload).collect::<Vec<_>>(),
+            "limit": request.limit,
+            "offset": request.offset,
+        })))
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+    }
+}
+
+impl AxDatabaseAdapter for MySqlAdapter {
+    fn driver(&self) -> &'static str {
+        "mysql"
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), serde_json::json!({
+            "filters": request.filters.iter().map(query_filter_payload).collect::<Vec<_>>(),
+            "orders": request.orders.iter().map(query_order_payload).collect::<Vec<_>>(),
+            "limit": request.limit,
+            "offset": request.offset,
+        })))
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+    }
+}
+
+impl AxDatabaseAdapter for SqliteAdapter {
+    fn driver(&self) -> &'static str {
+        "sqlite"
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        Ok(adapter_payload(self.driver(), &self.url, request.collection.clone(), serde_json::json!({
+            "filters": request.filters.iter().map(query_filter_payload).collect::<Vec<_>>(),
+            "orders": request.orders.iter().map(query_order_payload).collect::<Vec<_>>(),
+            "limit": request.limit,
+            "offset": request.offset,
+        })))
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "insert", &request.collection, &request.fields))
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &self.url, "update", &request.collection, &request.fields))
+    }
+}
+
+impl AxDatabaseAdapter for MemoryAdapter {
+    fn driver(&self) -> &'static str {
+        "memory"
+    }
+
+    fn load(&self, request: &AxQueryRequest) -> AxRuntimeResult<Value> {
+        Ok(adapter_payload(self.driver(), &None, request.collection.clone(), serde_json::json!({
+            "filters": request.filters.iter().map(query_filter_payload).collect::<Vec<_>>(),
+            "orders": request.orders.iter().map(query_order_payload).collect::<Vec<_>>(),
+            "limit": request.limit,
+            "offset": request.offset,
+        })))
+    }
+
+    fn insert(&self, request: &AxInsertRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &None, "insert", &request.collection, &request.fields))
+    }
+
+    fn update(&self, request: &AxUpdateRequest) -> AxRuntimeResult<Value> {
+        Ok(mutation_payload(self.driver(), &None, "update", &request.collection, &request.fields))
+    }
+}
+
+pub fn adapter_from_env(env: &AxEnv) -> AxRuntimeResult<Box<dyn AxDatabaseAdapter>> {
+    let url = env.database_url().map(str::to_owned);
+    match env.database_driver().trim().to_ascii_lowercase().as_str() {
+        "" | "postgres" | "postgresql" => Ok(Box::new(PostgresAdapter { url })),
+        "mysql" => Ok(Box::new(MySqlAdapter { url })),
+        "sqlite" => Ok(Box::new(SqliteAdapter { url })),
+        "memory" | "inmemory" | "in-memory" => Ok(Box::new(MemoryAdapter)),
+        other => Err(AxRuntimeError::message(format!(
+            "unsupported database driver `{other}`"
+        ))),
+    }
+}
+
+pub fn runtime_from_env(env: AxEnv) -> AxRuntimeResult<AxDatabaseRuntime<Box<dyn AxDatabaseAdapter>>> {
+    let adapter = adapter_from_env(&env)?;
+    Ok(AxDatabaseRuntime::new(env, adapter))
+}
+
 pub fn ok_payload() -> Value {
     serde_json::json!({ "ok": true })
+}
+
+fn adapter_payload(driver: &str, url: &Option<String>, collection: String, details: Value) -> Value {
+    serde_json::json!({
+        "driver": driver,
+        "url": url,
+        "collection": collection,
+        "details": details,
+    })
+}
+
+fn mutation_payload(
+    driver: &str,
+    url: &Option<String>,
+    action: &str,
+    collection: &str,
+    fields: &BTreeMap<String, Value>,
+) -> Value {
+    serde_json::json!({
+        "driver": driver,
+        "url": url,
+        "action": action,
+        "collection": collection,
+        "fields": fields,
+    })
+}
+
+fn query_filter_payload(filter: &AxQueryFilterRequest) -> Value {
+    serde_json::json!({
+        "field": filter.field,
+        "op": query_filter_op_name(filter.op),
+        "value": filter.value,
+    })
+}
+
+fn query_order_payload(order: &AxQueryOrderRequest) -> Value {
+    serde_json::json!({
+        "field": order.field,
+        "direction": query_order_direction_name(order.direction),
+    })
+}
+
+fn query_filter_op_name(op: AxQueryFilterOp) -> &'static str {
+    match op {
+        AxQueryFilterOp::Eq => "eq",
+    }
+}
+
+fn query_order_direction_name(direction: AxQueryOrderDirection) -> &'static str {
+    match direction {
+        AxQueryOrderDirection::Asc => "asc",
+        AxQueryOrderDirection::Desc => "desc",
+    }
 }
 
 pub struct Db;
@@ -205,7 +473,10 @@ impl Query {
 
 pub mod backend_prelude {
     pub use super::ok_payload;
+    pub use super::adapter_from_env;
     pub use super::AxBackendRuntime;
+    pub use super::AxDatabaseAdapter;
+    pub use super::AxDatabaseRuntime;
     pub use super::AxEnv;
     pub use super::AxInsertRequest;
     pub use super::AxMessenger;
@@ -222,6 +493,11 @@ pub mod backend_prelude {
     pub use super::AxRuntimeResult;
     pub use super::AxSendRequest;
     pub use super::AxUpdateRequest;
+    pub use super::MemoryAdapter;
+    pub use super::MySqlAdapter;
+    pub use super::PostgresAdapter;
+    pub use super::runtime_from_env;
+    pub use super::SqliteAdapter;
     pub use super::Db;
     pub use super::Query;
 }

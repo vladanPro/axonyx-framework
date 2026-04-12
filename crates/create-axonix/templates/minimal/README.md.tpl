@@ -16,7 +16,15 @@ Axonix backend env convention:
 
 - `Runtime.Env.public.app_name` -> `AX_PUBLIC_APP_NAME`
 - `Runtime.Env.public.app_env` -> `AX_PUBLIC_APP_ENV`
+- `Runtime.Env.secret.db_driver` -> `AX_SECRET_DB_DRIVER`
 - `Runtime.Env.secret.db_url` -> `AX_SECRET_DB_URL`
+
+Database adapter convention:
+
+- `postgres` -> `postgres://...`
+- `mysql` -> `mysql://...`
+- `sqlite` -> `file:local.db` or a local sqlite path
+- `memory` -> in-memory adapter for local prototyping
 
 ## Axonix Structure
 

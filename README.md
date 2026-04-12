@@ -351,6 +351,15 @@ Current env convention covers:
 - `.env`: `AX_PUBLIC_APP_NAME`
 - `.ax`: `Runtime.Env.secret.db_url`
 - `.env`: `AX_SECRET_DB_URL`
+- `.ax`: `Runtime.Env.secret.db_driver`
+- `.env`: `AX_SECRET_DB_DRIVER`
+
+Current database adapter draft covers:
+
+- keeping `.ax` query authoring database-agnostic
+- selecting `postgres`, `mysql`, `sqlite`, or `memory` at runtime
+- resolving the active adapter from `AX_SECRET_DB_DRIVER`
+- keeping one backend authoring shape while adapters translate into concrete driver behavior
 
 ## Repo Layout
 

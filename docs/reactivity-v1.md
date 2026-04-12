@@ -465,3 +465,12 @@ Current env naming convention:
 - `.env`: `AX_PUBLIC_APP_NAME`
 - `.ax`: `Runtime.Env.secret.db_url`
 - `.env`: `AX_SECRET_DB_URL`
+- `.ax`: `Runtime.Env.secret.db_driver`
+- `.env`: `AX_SECRET_DB_DRIVER`
+
+Current database adapter convention:
+
+- `.ax` loaders and actions stay database-agnostic
+- runtime picks `postgres`, `mysql`, `sqlite`, or `memory`
+- `AX_SECRET_DB_DRIVER` selects the active adapter
+- `AX_SECRET_DB_URL` stays the connection string source for SQL-backed adapters
