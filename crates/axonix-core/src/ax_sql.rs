@@ -40,6 +40,12 @@ pub struct AxSqlQuery {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxSqlMutation {
+    pub sql: String,
+    pub params: Vec<AxSqlParam>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AxSqlParam {
     pub index: usize,
     pub value: AxRustExpr,
@@ -53,6 +59,8 @@ pub enum AxSqlCompileError {
     InvalidIdentifier { ident: String },
     #[error("unsupported query filter operator")]
     UnsupportedFilterOperator,
+    #[error("mutation must contain at least one field")]
+    EmptyMutationFields,
 }
 
 pub fn compile_query_plan_to_sql(
@@ -120,6 +128,77 @@ pub fn compile_query_plan_to_sql(
     Ok(AxSqlQuery { sql, params })
 }
 
+pub fn compile_insert_plan_to_sql(
+    collection: &str,
+    fields: &[AxAssignmentPlan],
+    dialect: AxSqlDialect,
+) -> Result<AxSqlMutation, AxSqlCompileError> {
+    validate_ident(collection)?;
+    if fields.is_empty() {
+        return Err(AxSqlCompileError::EmptyMutationFields);
+    }
+
+    let mut columns = Vec::with_capacity(fields.len());
+    let mut placeholders = Vec::with_capacity(fields.len());
+    let mut params = Vec::with_capacity(fields.len());
+
+    for field in fields {
+        validate_ident(&field.name)?;
+        columns.push(dialect.quote_ident(&field.name));
+        placeholders.push(dialect.placeholder(params.len() + 1));
+        params.push(AxSqlParam {
+            index: params.len() + 1,
+            value: field.value.clone(),
+        });
+    }
+
+    Ok(AxSqlMutation {
+        sql: format!(
+            "insert into {} ({}) values ({})",
+            dialect.quote_ident(collection),
+            columns.join(", "),
+            placeholders.join(", ")
+        ),
+        params,
+    })
+}
+
+pub fn compile_update_plan_to_sql(
+    collection: &str,
+    fields: &[AxAssignmentPlan],
+    dialect: AxSqlDialect,
+) -> Result<AxSqlMutation, AxSqlCompileError> {
+    validate_ident(collection)?;
+    if fields.is_empty() {
+        return Err(AxSqlCompileError::EmptyMutationFields);
+    }
+
+    let mut assignments = Vec::with_capacity(fields.len());
+    let mut params = Vec::with_capacity(fields.len());
+
+    for field in fields {
+        validate_ident(&field.name)?;
+        assignments.push(format!(
+            "{} = {}",
+            dialect.quote_ident(&field.name),
+            dialect.placeholder(params.len() + 1)
+        ));
+        params.push(AxSqlParam {
+            index: params.len() + 1,
+            value: field.value.clone(),
+        });
+    }
+
+    Ok(AxSqlMutation {
+        sql: format!(
+            "update {} set {}",
+            dialect.quote_ident(collection),
+            assignments.join(", ")
+        ),
+        params,
+    })
+}
+
 fn validate_ident(ident: &str) -> Result<(), AxSqlCompileError> {
     let trimmed = ident.trim();
     if trimmed.is_empty() {
@@ -146,9 +225,12 @@ fn order_direction_name(direction: AxQueryOrderDirectionPlan) -> &'static str {
 }
 
 pub mod prelude {
+    pub use super::compile_insert_plan_to_sql;
     pub use super::compile_query_plan_to_sql;
+    pub use super::compile_update_plan_to_sql;
     pub use super::AxSqlCompileError;
     pub use super::AxSqlDialect;
+    pub use super::AxSqlMutation;
     pub use super::AxSqlParam;
     pub use super::AxSqlQuery;
 }
@@ -276,5 +358,65 @@ mod tests {
                 ident: "blog-posts".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn compiles_postgres_insert_plan_into_sql() {
+        let mutation = compile_insert_plan_to_sql(
+            "posts",
+            &[
+                AxAssignmentPlan {
+                    name: "title".to_string(),
+                    value: AxRustExpr::new("input.title"),
+                },
+                AxAssignmentPlan {
+                    name: "featured".to_string(),
+                    value: AxRustExpr::new("input.featured"),
+                },
+            ],
+            AxSqlDialect::Postgres,
+        )
+        .expect("insert should compile");
+
+        assert_eq!(
+            mutation.sql,
+            r#"insert into "posts" ("title", "featured") values ($1, $2)"#
+        );
+        assert_eq!(mutation.params.len(), 2);
+        assert_eq!(mutation.params[0].index, 1);
+        assert_eq!(mutation.params[1].index, 2);
+    }
+
+    #[test]
+    fn compiles_mysql_update_plan_into_sql() {
+        let mutation = compile_update_plan_to_sql(
+            "posts",
+            &[
+                AxAssignmentPlan {
+                    name: "title".to_string(),
+                    value: AxRustExpr::new("input.title"),
+                },
+                AxAssignmentPlan {
+                    name: "featured".to_string(),
+                    value: AxRustExpr::new("input.featured"),
+                },
+            ],
+            AxSqlDialect::MySql,
+        )
+        .expect("update should compile");
+
+        assert_eq!(
+            mutation.sql,
+            "update `posts` set `title` = ?, `featured` = ?"
+        );
+        assert_eq!(mutation.params.len(), 2);
+    }
+
+    #[test]
+    fn rejects_empty_mutation_fields() {
+        let error = compile_insert_plan_to_sql("posts", &[], AxSqlDialect::Sqlite)
+            .expect_err("empty insert should fail");
+
+        assert_eq!(error, AxSqlCompileError::EmptyMutationFields);
     }
 }
