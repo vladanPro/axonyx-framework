@@ -420,3 +420,48 @@ What it currently targets:
 
 This is intentionally the backend equivalent of the current frontend parser sketch:
 small, focused, and built around real template examples instead of trying to solve every future language feature immediately.
+
+## Backend lowering draft
+
+Axonix now also has a first backend lowering draft that sits between the backend AST and future Rust code generation.
+
+What it currently targets:
+
+- stable handler plans for `route`, `loader`, `action`, and `job`
+- deterministic Rust function names for generated handlers
+- query lowering into a structured query plan instead of flattening straight into strings
+- action input lowering into Rust-shaped field types
+- statement lowering for `data`, `insert`, `update`, `revalidate`, `return`, and `send`
+
+This matters because it gives Axonix a clean compiler seam:
+
+- parser owns syntax
+- AST owns authoring structure
+- lowering owns execution shape
+- codegen can later focus only on emitting Rust from the stable plan
+
+## Backend runtime and codegen draft
+
+Axonix now also has the first bridge from backend lowering into runtime-facing generated Rust.
+
+What exists now:
+
+- a backend runtime contract in `axonix-runtime`
+- query, mutation, revalidation, and send request types
+- an `AxEnv` layer with `public` and `secret` namespaces
+- a combined `AxBackendRuntime` trait for generated handlers to target
+- a first codegen pass that emits Rust module text from the lowered backend plan
+- a direct `compile_backend_ax_to_module(...)` helper for the full backend compile path
+
+Why this matters:
+
+- the parser and lowering layers stay independent from any one database
+- generated handlers now have a stable contract to call
+- we can swap runtime adapters later without redesigning the authoring syntax
+
+Current env naming convention:
+
+- `.ax`: `Runtime.Env.public.app_name`
+- `.env`: `AX_PUBLIC_APP_NAME`
+- `.ax`: `Runtime.Env.secret.db_url`
+- `.env`: `AX_SECRET_DB_URL`

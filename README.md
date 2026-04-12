@@ -313,6 +313,45 @@ Current parser draft handles:
 - `send ... with ...`
 - query clauses through `where`, `order`, `limit`, and `offset`
 
+## Backend Lowering Draft
+
+Axonix now also has a first backend lowering draft that turns backend AST blocks into a stable Rust-oriented execution plan.
+
+Current lowering draft covers:
+
+- stable handler identities for `route`, `loader`, `action`, and `job`
+- Rust-friendly function names such as `loader_posts_list` and `route_get_api_posts`
+- lowered `data` bindings into either expression values or structured query plans
+- lowered action input fields into Rust types such as `String` and `bool`
+- lowered mutations, `revalidate`, `return`, and `send` steps into codegen-ready plan nodes
+
+## Backend Runtime And Codegen Draft
+
+Axonix now also has a first backend runtime contract and codegen draft.
+
+Current runtime contract covers:
+
+- `AxQueryExecutor`
+- `AxMutationExecutor`
+- `AxRevalidator`
+- `AxMessenger`
+- `AxEnv` with `public` and `secret` namespaces
+- the combined `AxBackendRuntime` trait
+
+Current codegen draft covers:
+
+- generating Rust handlers from the backend lowering plan
+- emitting runtime-facing request types such as `AxQueryRequest` and `AxInsertRequest`
+- generating action input structs
+- direct compile flow from backend `.ax` source into a Rust module string
+
+Current env convention covers:
+
+- `.ax`: `Runtime.Env.public.app_name`
+- `.env`: `AX_PUBLIC_APP_NAME`
+- `.ax`: `Runtime.Env.secret.db_url`
+- `.env`: `AX_SECRET_DB_URL`
+
 ## Repo Layout
 
 ```text

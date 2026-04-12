@@ -8,6 +8,16 @@ Generated with `create-axonix`.
 cargo run
 ```
 
+## Env
+
+Copy `.env.example` to `.env` and set your runtime values.
+
+Axonix backend env convention:
+
+- `Runtime.Env.public.app_name` -> `AX_PUBLIC_APP_NAME`
+- `Runtime.Env.public.app_env` -> `AX_PUBLIC_APP_ENV`
+- `Runtime.Env.secret.db_url` -> `AX_SECRET_DB_URL`
+
 ## Axonix Structure
 
 ```text

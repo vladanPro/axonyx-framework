@@ -3,5 +3,6 @@ name = "{{APP_NAME}}"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[workspace]
 
+[dependencies]

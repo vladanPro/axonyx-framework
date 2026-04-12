@@ -6,8 +6,10 @@ pub struct TemplateFile {
 const APP_CARGO_TOML: &str = include_str!("../templates/minimal/Cargo.toml.tpl");
 const APP_MAIN_RS: &str = include_str!("../templates/minimal/src/main.rs.tpl");
 const APP_GENERATED_MOD_RS: &str = include_str!("../templates/minimal/src/generated/mod.rs.tpl");
+const APP_GENERATED_BACKEND_RS: &str = include_str!("../templates/minimal/src/generated/backend.rs.tpl");
 const APP_DOMAIN_POSTS_RS: &str = include_str!("../templates/minimal/src/domain/posts.rs.tpl");
 const APP_DB_MOD_RS: &str = include_str!("../templates/minimal/src/db/mod.rs.tpl");
+const APP_RUNTIME_MOD_RS: &str = include_str!("../templates/minimal/src/runtime/mod.rs.tpl");
 const APP_AXONIX_TOML: &str = include_str!("../templates/minimal/Axonix.toml.tpl");
 const APP_LAYOUT_AX: &str = include_str!("../templates/minimal/app/layout.ax.tpl");
 const APP_PAGE_AX: &str = include_str!("../templates/minimal/app/page.ax.tpl");
@@ -18,6 +20,7 @@ const APP_ROUTE_POSTS_AX: &str = include_str!("../templates/minimal/routes/api/p
 const APP_JOB_DIGEST_AX: &str = include_str!("../templates/minimal/jobs/digest.ax.tpl");
 const APP_README: &str = include_str!("../templates/minimal/README.md.tpl");
 const APP_GITIGNORE: &str = include_str!("../templates/minimal/.gitignore.tpl");
+const APP_ENV_EXAMPLE: &str = include_str!("../templates/minimal/.env.example.tpl");
 
 pub fn minimal_template_files(project_name: &str) -> Vec<TemplateFile> {
     let vars = [("{{APP_NAME}}", project_name)];
@@ -35,12 +38,20 @@ pub fn minimal_template_files(project_name: &str) -> Vec<TemplateFile> {
             contents: apply_vars(APP_GENERATED_MOD_RS, &vars),
         },
         TemplateFile {
+            relative_path: "src/generated/backend.rs",
+            contents: apply_vars(APP_GENERATED_BACKEND_RS, &vars),
+        },
+        TemplateFile {
             relative_path: "src/domain/posts.rs",
             contents: apply_vars(APP_DOMAIN_POSTS_RS, &vars),
         },
         TemplateFile {
             relative_path: "src/db/mod.rs",
             contents: apply_vars(APP_DB_MOD_RS, &vars),
+        },
+        TemplateFile {
+            relative_path: "src/runtime/mod.rs",
+            contents: apply_vars(APP_RUNTIME_MOD_RS, &vars),
         },
         TemplateFile {
             relative_path: "Axonix.toml",
@@ -77,6 +88,10 @@ pub fn minimal_template_files(project_name: &str) -> Vec<TemplateFile> {
         TemplateFile {
             relative_path: "README.md",
             contents: apply_vars(APP_README, &vars),
+        },
+        TemplateFile {
+            relative_path: ".env.example",
+            contents: apply_vars(APP_ENV_EXAMPLE, &vars),
         },
         TemplateFile {
             relative_path: ".gitignore",
