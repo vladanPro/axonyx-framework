@@ -1,6 +1,6 @@
 # Getting Started
 
-This is the practical starting point for Axonix development today.
+This is the practical starting point for Axonyx development today.
 
 ## Local Scaffold
 

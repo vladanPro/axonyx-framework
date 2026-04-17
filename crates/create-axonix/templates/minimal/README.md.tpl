@@ -16,7 +16,7 @@ cargo run
 
 Copy `.env.example` to `.env` and set your runtime values.
 
-Axonix backend env convention:
+Axonyx backend env convention:
 
 - `Runtime.Env.public.app_name` -> `AX_PUBLIC_APP_NAME`
 - `Runtime.Env.public.app_env` -> `AX_PUBLIC_APP_ENV`
@@ -43,7 +43,7 @@ API transport convention:
 - `AX_SECRET_DATA_API_KEY=...`
 - provider-specific aliases can map into the same config shape
 
-## Axonix Structure
+## Axonyx Structure
 
 ```text
 app/

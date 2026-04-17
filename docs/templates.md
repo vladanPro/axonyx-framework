@@ -23,7 +23,7 @@ Good for:
 - launch pages
 - product sites
 - framework presentations
-- marketing-style Axonix demos
+- marketing-style Axonyx demos
 
 ## Example Commands
 

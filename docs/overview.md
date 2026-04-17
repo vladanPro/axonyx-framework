@@ -1,6 +1,6 @@
-# Axonix Overview
+# Axonyx Overview
 
-Axonix is a Rust-first full-stack framework direction built around a few strong ideas:
+Axonyx is a Rust-first full-stack framework direction built around a few strong ideas:
 
 - single-binary thinking
 - authoring-first UX
@@ -9,7 +9,7 @@ Axonix is a Rust-first full-stack framework direction built around a few strong 
 
 ## Workspace Shape
 
-Today the broader Axonix workspace is split into a few roles:
+Today the broader Axonyx workspace is split into a few roles:
 
 - `axonix-framework`
   - main experimental framework repo
@@ -21,7 +21,7 @@ Today the broader Axonix workspace is split into a few roles:
 ## Main Building Blocks
 
 - `create-axonix`
-  - scaffolds new Axonix applications
+  - scaffolds new Axonyx applications
 - `axonix-core`
   - parser, lowering, SQL draft compiler, and authoring model
 - `axonix-runtime`
@@ -37,4 +37,4 @@ The goal is to make these three developer stories feel real:
 
 1. generate an app
 2. depend on a stable runtime package
-3. author UI and backend behavior in Axonix-native shapes
+3. author UI and backend behavior in Axonyx-native shapes

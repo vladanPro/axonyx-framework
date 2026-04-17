@@ -4,7 +4,7 @@ Generated with `create-axonix` using the `site` template.
 
 {{AXONIX_RUNTIME_SOURCE_NOTE}}
 
-This starter is oriented around a marketing or presentation site shape with a stronger landing page voice while keeping the same Axonix runtime and backend authoring model.
+This starter is oriented around a marketing or presentation site shape with a stronger landing page voice while keeping the same Axonyx runtime and backend authoring model.
 
 ## Run
 

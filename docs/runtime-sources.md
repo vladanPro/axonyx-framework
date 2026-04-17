@@ -1,6 +1,6 @@
 # Runtime Sources
 
-Generated Axonix apps can currently point at the runtime in three different ways.
+Generated Axonyx apps can currently point at the runtime in three different ways.
 
 ## 1. `path`
 

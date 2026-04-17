@@ -1,6 +1,6 @@
-# Axonix Docs
+# Axonyx Docs
 
-This folder is the first structured documentation layer for the Axonix framework workspace.
+This folder is the first structured documentation layer for the Axonyx framework workspace.
 
 ## Start Here
 

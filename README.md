@@ -1,6 +1,6 @@
-# Axonix Framework Monorepo
+# Axonyx Framework Monorepo
 
-Axonix is a Rust-first framework focused on:
+Axonyx is a Rust-first framework focused on:
 
 - Single-binary architecture
 - Algebraic UI pipelines (`|>`)
@@ -13,11 +13,13 @@ This repository includes:
 - `axonix-runtime`: runtime stub that executes Axonix IR into a render plan
 - `create-axonix`: project scaffolding CLI (similar to `create-next-app`)
 
+The public framework name is now `Axonyx`, while the crate, command, and config identifiers still use `axonix-*` names during this compatibility stage.
+
 ## Package Model
 
 Current package roles inside the monorepo:
 
-- `create-axonix`: CLI that scaffolds a new Axonix app
+- `create-axonix`: CLI that scaffolds a new Axonyx app
 - `axonix-core`: parser, lowering, SQL draft compiler, and authoring ASTs
 - `axonix-runtime`: execution/runtime contract used by generated apps
 - `axonix-macros`: ergonomics layer for component authoring
@@ -32,7 +34,7 @@ Current local flow:
 
 ## Quick Start
 
-### 1) Create a new Axonix app locally
+### 1) Create a new Axonyx app locally
 
 ```bash
 cargo run -p create-axonix -- my-app --yes
@@ -49,7 +51,7 @@ Example:
 cargo run -p create-axonix -- my-site --yes --template site --runtime-source git
 ```
 
-### 1a) Add a docs module into an existing Axonix app
+### 1a) Add a docs module into an existing Axonyx app
 
 From an app root:
 
@@ -59,13 +61,13 @@ cargo run -p cargo-axonix --manifest-path H:/CODE/axonix/axonix-framework/Cargo.
 
 This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonix.toml`.
 
-### 1b) Create a new Axonix app against the standalone runtime repo
+### 1b) Create a new Axonyx app against the standalone runtime repo
 
 ```bash
 cargo run -p create-axonix -- my-app --yes --runtime-source git
 ```
 
-### 1c) Create a new Axonix app against the future registry release
+### 1c) Create a new Axonyx app against the future registry release
 
 ```bash
 cargo run -p create-axonix -- my-app --yes --runtime-source registry
@@ -252,7 +254,7 @@ This first bridge keeps the model simple:
 
 ## `.ax` AST Draft
 
-Axonix now also has a first Rust AST draft for `.ax` authoring:
+Axonyx now also has a first Rust AST draft for `.ax` authoring:
 
 ```rust
 use axonix_core::ax_ast_prelude::*;
@@ -301,7 +303,7 @@ This draft intentionally models:
 
 ## `.ax` Parser And Lowering Sketch
 
-Axonix now also has a first parser sketch for the indentation-based `.ax` style and a first lowering pass into `AxNode`.
+Axonyx now also has a first parser sketch for the indentation-based `.ax` style and a first lowering pass into `AxNode`.
 
 Current parser sketch handles:
 
@@ -322,7 +324,7 @@ Current lowering sketch handles:
 
 ## Backend AST Draft
 
-Axonix now also has a first backend AST draft for full-stack authoring layers that lower into Rust.
+Axonyx now also has a first backend AST draft for full-stack authoring layers that lower into Rust.
 
 Current backend model includes:
 
@@ -335,7 +337,7 @@ The draft is intentionally small and focused on framework-shaped patterns rather
 
 ## Query AST Draft
 
-Axonix now also has a first query AST draft for backend data loading.
+Axonyx now also has a first query AST draft for backend data loading.
 
 Current query model covers:
 
@@ -347,7 +349,7 @@ Current query model covers:
 
 ## Backend Parser Draft
 
-Axonix now also has a first backend parser draft that can read indentation-based backend authoring blocks.
+Axonyx now also has a first backend parser draft that can read indentation-based backend authoring blocks.
 
 Current parser draft handles:
 
@@ -366,7 +368,7 @@ Current parser draft handles:
 
 ## Backend Lowering Draft
 
-Axonix now also has a first backend lowering draft that turns backend AST blocks into a stable Rust-oriented execution plan.
+Axonyx now also has a first backend lowering draft that turns backend AST blocks into a stable Rust-oriented execution plan.
 
 Current lowering draft covers:
 
@@ -378,7 +380,7 @@ Current lowering draft covers:
 
 ## Backend Runtime And Codegen Draft
 
-Axonix now also has a first backend runtime contract and codegen draft.
+Axonyx now also has a first backend runtime contract and codegen draft.
 
 Current runtime contract covers:
 
@@ -421,7 +423,7 @@ Current transport draft covers:
 - provider-specific env values such as `AX_PUBLIC_DATA_API_URL` and `AX_SECRET_DATA_API_KEY`
 - backward compatibility with the earlier `AX_SECRET_DB_DRIVER` draft
 
-Axonix now also has a first SQL dialect draft in `axonix-core`:
+Axonyx now also has a first SQL dialect draft in `axonix-core`:
 
 - lowers `AxQueryPlan` into SQL text plus bound parameter slots
 - supports `postgres`, `mysql`, and `sqlite`

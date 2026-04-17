@@ -14,7 +14,7 @@ const DEFAULT_RUNTIME_VERSION: &str = "0.1.0";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonix")]
-#[command(about = "Create a new Axonix app", version)]
+#[command(about = "Create a new Axonyx app", version)]
 struct Cli {
     /// Name of the app directory to create
     project_name: String,
@@ -98,7 +98,7 @@ fn run() -> Result<()> {
 
     if !cli.yes {
         println!(
-            "This will create a new Axonix app in '{}'.",
+            "This will create a new Axonyx app in '{}'.",
             target_dir.display()
         );
         if !confirm("Continue? [y/N]: ")? {
@@ -114,7 +114,7 @@ fn run() -> Result<()> {
     }
 
     println!();
-    println!("Success! Axonix app created at {}", target_dir.display());
+    println!("Success! Axonyx app created at {}", target_dir.display());
     println!("Next steps:");
     println!("  cd {}", cli.project_name);
     println!("  cargo run");

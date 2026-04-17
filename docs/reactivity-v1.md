@@ -1,6 +1,6 @@
-# Axonix Reactivity v1
+# Axonyx Reactivity v1
 
-Axonix should not copy React hook names when we have room to choose clearer or shorter terms.
+Axonyx should not copy React hook names when we have room to choose clearer or shorter terms.
 For that reason, this draft uses:
 
 - `signal`
@@ -17,7 +17,7 @@ For that reason, this draft uses:
 
 ## `ax!` draft
 
-To reduce the amount of manual `element(..., vec![...])` code, Axonix now has a first draft of an `ax!` macro:
+To reduce the amount of manual `element(..., vec![...])` code, Axonyx now has a first draft of an `ax!` macro:
 
 ```rust
 use axonix_core::ax;
@@ -90,7 +90,7 @@ Right now it keeps the function unchanged, but it gives Axonix a stable syntax s
 
 ## Props draft
 
-Axonix components can now follow a direct props shape:
+Axonyx components can now follow a direct props shape:
 
 ```rust
 use axonix_core::component;
@@ -132,7 +132,7 @@ That keeps the API simple while leaving room for stricter compile-time props val
 
 ## Children draft
 
-Axonix can already model `children` explicitly through props:
+Axonyx can already model `children` explicitly through props:
 
 ```rust
 use axonix_core::component;
@@ -155,7 +155,7 @@ fn panel(props: PanelProps) -> AxNode {
 let node = render_component(
     panel,
     PanelProps {
-        title: "Axonix".into(),
+        title: "Axonyx".into(),
         children: children([
             element("p", vec![text("First child")]),
             element("p", vec![text("Second child")]),
@@ -203,7 +203,7 @@ That is enough to stabilize API shape before we build the real scheduler and dep
 
 ## Layout draft
 
-Axonix now has a first layout layer through ordinary components:
+Axonyx now has a first layout layer through ordinary components:
 
 ```rust
 use axonix_core::layout_prelude::*;
@@ -240,7 +240,7 @@ Current design choice:
 
 ## UI primitives draft
 
-Axonix now also has a first UI primitive layer through ordinary components:
+Axonyx now also has a first UI primitive layer through ordinary components:
 
 - `button`
 - `card`
@@ -261,7 +261,7 @@ let node = render_component(
         children: children([render_component(
             card,
             CardProps {
-                title: Some("Axonix".into()),
+                title: Some("Axonyx".into()),
                 children: children([
                     render_component(
                         copy,
@@ -288,7 +288,7 @@ let node = render_component(
 
 ## Pipeline rendering draft
 
-Axonix now has a first bridge from pipeline IR into real `AxNode` output.
+Axonyx now has a first bridge from pipeline IR into real `AxNode` output.
 
 Example:
 
@@ -314,16 +314,16 @@ What this currently gives us:
 
 - a real renderable tree instead of only parsed IR
 - source metadata wrapped into the output tree
-- transforms mapped to Axonix layout components
+- transforms mapped to Axonyx layout components
 - `Card()` mapped to first-party UI primitives
 - named views such as `ProfileCard()` preserved with `data-view`
 
 This is still intentionally modest.
-The goal is to prove the pipeline can become real UI through Axonix-native components before we add a more advanced scheduler, richer transforms, or adapter layers.
+The goal is to prove the pipeline can become real UI through Axonyx-native components before we add a more advanced scheduler, richer transforms, or adapter layers.
 
 ## `.ax` AST draft
 
-Axonix now has a first Rust AST draft for the future `.ax` authoring format.
+Axonyx now has a first Rust AST draft for the future `.ax` authoring format.
 
 The goal is not to freeze parser behavior yet.
 The goal is to stabilize the shape of the syntax model before implementing the real parser.
@@ -349,7 +349,7 @@ Important design choices in this draft:
 
 ## `.ax` parser and lowering sketch
 
-Axonix now also has a first parser sketch and lowering layer for the `.ax` direction.
+Axonyx now also has a first parser sketch and lowering layer for the `.ax` direction.
 
 What the parser sketch currently targets:
 
@@ -372,7 +372,7 @@ The goal is to validate the data flow from `.ax` source shape to AST and then in
 
 ## Backend AST draft
 
-Axonix now also has a first backend AST draft that mirrors the full-stack direction described in the notes.
+Axonyx now also has a first backend AST draft that mirrors the full-stack direction described in the notes.
 
 Current backend blocks:
 
@@ -395,7 +395,7 @@ It is meant to capture framework-native backend authoring shapes that can lower 
 
 ## Query AST draft
 
-Axonix now also has a first query AST draft for backend data loading and database-oriented lowering.
+Axonyx now also has a first query AST draft for backend data loading and database-oriented lowering.
 
 Current query nodes cover:
 
@@ -406,7 +406,7 @@ Current query nodes cover:
 
 ## Backend parser draft
 
-Axonix now also has a first backend parser draft that reads the backend authoring syntax into the backend AST.
+Axonyx now also has a first backend parser draft that reads the backend authoring syntax into the backend AST.
 
 What it currently targets:
 
@@ -423,7 +423,7 @@ small, focused, and built around real template examples instead of trying to sol
 
 ## Backend lowering draft
 
-Axonix now also has a first backend lowering draft that sits between the backend AST and future Rust code generation.
+Axonyx now also has a first backend lowering draft that sits between the backend AST and future Rust code generation.
 
 What it currently targets:
 
@@ -433,7 +433,7 @@ What it currently targets:
 - action input lowering into Rust-shaped field types
 - statement lowering for `data`, `insert`, `update`, `revalidate`, `return`, and `send`
 
-This matters because it gives Axonix a clean compiler seam:
+This matters because it gives Axonyx a clean compiler seam:
 
 - parser owns syntax
 - AST owns authoring structure
@@ -442,7 +442,7 @@ This matters because it gives Axonix a clean compiler seam:
 
 ## Backend runtime and codegen draft
 
-Axonix now also has the first bridge from backend lowering into runtime-facing generated Rust.
+Axonyx now also has the first bridge from backend lowering into runtime-facing generated Rust.
 
 What exists now:
 

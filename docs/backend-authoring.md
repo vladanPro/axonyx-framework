@@ -1,6 +1,6 @@
 # Backend Authoring
 
-Axonix backend authoring is moving toward a framework-native shape instead of a thin copy of another ecosystem.
+Axonyx backend authoring is moving toward a framework-native shape instead of a thin copy of another ecosystem.
 
 ## Current Top-Level Blocks
 

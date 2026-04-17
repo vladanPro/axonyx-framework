@@ -1,13 +1,13 @@
-# Axonix IR v1 (Draft)
+# Axonyx IR v1 (Draft)
 
-Axonix IR is the stable contract between:
+Axonyx IR is the stable contract between:
 
 - developer-facing APIs (TypeScript builder, future DSL, visual editor)
 - Rust execution runtime
 
 ## Why IR-first
 
-Instead of making string DSL the core, Axonix keeps a typed IR as the canonical format.
+Instead of making string DSL the core, Axonyx keeps a typed IR as the canonical format.
 Any API style compiles into IR.
 
 ## IR shape
@@ -73,4 +73,3 @@ This is the base for next steps:
 - real data fetching
 - diff/patch render payload
 - SSR and stream responses
-

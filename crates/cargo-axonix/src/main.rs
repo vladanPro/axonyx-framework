@@ -56,7 +56,7 @@ fn add_module(module: ModuleKind) -> Result<()> {
 
     if !axonix_toml.exists() {
         bail!(
-            "Axonix.toml was not found in '{}'; run this command from an Axonix app root",
+            "Axonix.toml was not found in '{}'; run this command from an Axonyx app root",
             root.display()
         );
     }

@@ -7,7 +7,7 @@ use db::db_url;
 fn main() {
     let env = AxEnv::from_env();
 
-    println!("Axonix app '{{APP_NAME}}' is ready.");
+    println!("Axonyx app '{{APP_NAME}}' is ready.");
     println!(
         "Public app name: {}",
         env.public("app_name")
