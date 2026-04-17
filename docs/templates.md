@@ -1,6 +1,6 @@
 # Templates
 
-`create-axonix` now supports starter templates.
+`create-axonyx` now supports starter templates.
 
 ## Current Templates
 
@@ -28,11 +28,11 @@ Good for:
 ## Example Commands
 
 ```bash
-cargo run -p create-axonix -- demo-minimal --yes --template minimal --runtime-source git
+cargo run -p create-axonyx -- demo-minimal --yes --template minimal --runtime-source git
 ```
 
 ```bash
-cargo run -p create-axonix -- demo-site --yes --template site --runtime-source git
+cargo run -p create-axonyx -- demo-site --yes --template site --runtime-source git
 ```
 
 ## Planned Templates

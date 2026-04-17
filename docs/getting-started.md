@@ -7,7 +7,7 @@ This is the practical starting point for Axonyx development today.
 From the framework repo:
 
 ```bash
-cargo run -p create-axonix -- my-app --yes
+cargo run -p create-axonyx -- my-app --yes
 ```
 
 Then:
@@ -22,7 +22,7 @@ cargo run
 If you want your generated app to track the standalone runtime repository:
 
 ```bash
-cargo run -p create-axonix -- my-app --yes --runtime-source git
+cargo run -p create-axonyx -- my-app --yes --runtime-source git
 ```
 
 ## First Useful Variants
@@ -30,13 +30,13 @@ cargo run -p create-axonix -- my-app --yes --runtime-source git
 Minimal starter:
 
 ```bash
-cargo run -p create-axonix -- my-app --yes --template minimal
+cargo run -p create-axonyx -- my-app --yes --template minimal
 ```
 
 Site starter:
 
 ```bash
-cargo run -p create-axonix -- my-site --yes --template site --runtime-source git
+cargo run -p create-axonyx -- my-site --yes --template site --runtime-source git
 ```
 
 ## What You Get

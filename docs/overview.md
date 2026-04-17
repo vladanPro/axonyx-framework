@@ -14,19 +14,19 @@ Today the broader Axonyx workspace is split into a few roles:
 - `axonix-framework`
   - main experimental framework repo
   - parser, lowering, scaffold CLI, and docs direction
-- `axonix-runtime`
+- `axonyx-runtime`
   - standalone runtime workspace repo
   - intended long-term package story for generated apps
 
 ## Main Building Blocks
 
-- `create-axonix`
+- `create-axonyx`
   - scaffolds new Axonyx applications
-- `axonix-core`
+- `axonyx-core`
   - parser, lowering, SQL draft compiler, and authoring model
-- `axonix-runtime`
+- `axonyx-runtime`
   - runtime contract, env loading, and backend execution planning
-- `axonix-macros`
+- `axonyx-macros`
   - ergonomic procedural macros
 
 ## Current Direction

@@ -8,27 +8,28 @@ Axonyx is a Rust-first framework focused on:
 
 This repository includes:
 
-- `axonix-core`: pipeline parser and core types
-- `axonix-macros`: attribute macros such as `#[component]`
-- `axonix-runtime`: runtime stub that executes Axonix IR into a render plan
-- `create-axonix`: project scaffolding CLI (similar to `create-next-app`)
+- `axonyx-core`: pipeline parser and core types
+- `axonyx-macros`: attribute macros such as `#[component]`
+- `axonyx-runtime`: runtime stub that executes Axonyx IR into a render plan
+- `create-axonyx`: project scaffolding CLI (similar to `create-next-app`)
 
-The public framework name is now `Axonyx`, while the crate, command, and config identifiers still use `axonix-*` names during this compatibility stage.
+The public framework name, crate names, commands, and app config file now use `Axonyx` / `axonyx-*`.
+Repository URLs and local workspace folders may still use older `axonix-*` names until the repo migration is finished.
 
 ## Package Model
 
 Current package roles inside the monorepo:
 
-- `create-axonix`: CLI that scaffolds a new Axonyx app
-- `axonix-core`: parser, lowering, SQL draft compiler, and authoring ASTs
-- `axonix-runtime`: execution/runtime contract used by generated apps
-- `axonix-macros`: ergonomics layer for component authoring
+- `create-axonyx`: CLI that scaffolds a new Axonyx app
+- `axonyx-core`: parser, lowering, SQL draft compiler, and authoring ASTs
+- `axonyx-runtime`: execution/runtime contract used by generated apps
+- `axonyx-macros`: ergonomics layer for component authoring
 
 Generated apps can now target either:
 
 - a local Cargo `path` dependency during monorepo development
 - the standalone Git repo at `https://github.com/vladanPro/axonix-runtime`
-- a future crates.io package release such as `axonix-runtime = "0.1.0"`
+- a future crates.io package release such as `axonyx-runtime = "0.1.0"`
 
 Current local flow:
 
@@ -37,7 +38,7 @@ Current local flow:
 ### 1) Create a new Axonyx app locally
 
 ```bash
-cargo run -p create-axonix -- my-app --yes
+cargo run -p create-axonyx -- my-app --yes
 ```
 
 Available templates today:
@@ -48,7 +49,7 @@ Available templates today:
 Example:
 
 ```bash
-cargo run -p create-axonix -- my-site --yes --template site --runtime-source git
+cargo run -p create-axonyx -- my-site --yes --template site --runtime-source git
 ```
 
 ### 1a) Add a docs module into an existing Axonyx app
@@ -56,24 +57,24 @@ cargo run -p create-axonix -- my-site --yes --template site --runtime-source git
 From an app root:
 
 ```bash
-cargo run -p cargo-axonix --manifest-path H:/CODE/axonix/axonix-framework/Cargo.toml -- add docs
+cargo run -p cargo-axonyx --manifest-path H:/CODE/axonix/axonix-framework/Cargo.toml -- add docs
 ```
 
-This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonix.toml`.
+This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonyx.toml`.
 
 ### 1b) Create a new Axonyx app against the standalone runtime repo
 
 ```bash
-cargo run -p create-axonix -- my-app --yes --runtime-source git
+cargo run -p create-axonyx -- my-app --yes --runtime-source git
 ```
 
 ### 1c) Create a new Axonyx app against the future registry release
 
 ```bash
-cargo run -p create-axonix -- my-app --yes --runtime-source registry
+cargo run -p create-axonyx -- my-app --yes --runtime-source registry
 ```
 
-Use the registry mode once `axonix-runtime` is published. Until then, prefer `path` or `git`.
+Use the registry mode once `axonyx-runtime` is published. Until then, prefer `path` or `git`.
 
 ### 2) Run the generated app
 
@@ -87,8 +88,8 @@ cargo run
 Once published, we target:
 
 ```bash
-cargo install create-axonix
-create-axonix my-app --yes
+cargo install create-axonyx
+create-axonyx my-app --yes
 ```
 
 ## IR Demo Flow
@@ -96,7 +97,7 @@ create-axonix my-app --yes
 Rust runtime executes compiled IR directly:
 
 ```bash
-cargo run -p axonix-runtime --example execute_json
+cargo run -p axonyx-runtime --example execute_json
 ```
 
 ## Docs
@@ -110,8 +111,8 @@ docs/README.md
 ## Reactive Component Draft
 
 ```rust
-use axonix_core::component;
-use axonix_core::prelude::*;
+use axonyx_core::component;
+use axonyx_core::prelude::*;
 
 #[component]
 fn CounterCard() -> AxNode {
@@ -170,7 +171,7 @@ fn Panel(props: PanelProps) -> AxNode {
 And for cleaner tree authoring, there is now a first `ax!` draft:
 
 ```rust
-use axonix_core::ax;
+use axonyx_core::ax;
 
 let node = ax!(article[
     h2["Counter"],
@@ -190,8 +191,8 @@ let node = ax!(button(class="primary", data_state="ready")[
 Layout primitives now exist as normal components too:
 
 ```rust
-use axonix_core::layout_prelude::*;
-use axonix_core::prelude::*;
+use axonyx_core::layout_prelude::*;
+use axonyx_core::prelude::*;
 
 let node = render_component(
     grid,
@@ -228,7 +229,7 @@ The first UI primitive kit now includes:
 Pipelines can now be rendered into real `AxNode` trees through the first pipeline rendering bridge:
 
 ```rust
-use axonix_core::pipeline_prelude::*;
+use axonyx_core::pipeline_prelude::*;
 
 let records = vec![
     PipelineRecord::new("p1")
@@ -257,7 +258,7 @@ This first bridge keeps the model simple:
 Axonyx now also has a first Rust AST draft for `.ax` authoring:
 
 ```rust
-use axonix_core::ax_ast_prelude::*;
+use axonyx_core::ax_ast_prelude::*;
 
 let document = AxDocument::page(
     "Home",
@@ -423,7 +424,7 @@ Current transport draft covers:
 - provider-specific env values such as `AX_PUBLIC_DATA_API_URL` and `AX_SECRET_DATA_API_KEY`
 - backward compatibility with the earlier `AX_SECRET_DB_DRIVER` draft
 
-Axonyx now also has a first SQL dialect draft in `axonix-core`:
+Axonyx now also has a first SQL dialect draft in `axonyx-core`:
 
 - lowers `AxQueryPlan` into SQL text plus bound parameter slots
 - supports `postgres`, `mysql`, and `sqlite`
@@ -434,8 +435,8 @@ Axonyx now also has a first SQL dialect draft in `axonix-core`:
 
 ```text
 crates/
-  axonix-core/
-  axonix-macros/
-  axonix-runtime/
-  create-axonix/
+  axonyx-core/
+  axonyx-macros/
+  axonyx-runtime/
+  create-axonyx/
 ```

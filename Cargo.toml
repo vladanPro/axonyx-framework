@@ -1,10 +1,10 @@
 [workspace]
 members = [
-  "crates/axonix-core",
-  "crates/axonix-macros",
-  "crates/axonix-runtime",
-  "crates/create-axonix",
-  "crates/cargo-axonix",
+  "crates/axonyx-core",
+  "crates/axonyx-macros",
+  "crates/axonyx-runtime",
+  "crates/create-axonyx",
+  "crates/cargo-axonyx",
 ]
 resolver = "2"
 

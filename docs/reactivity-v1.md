@@ -20,8 +20,8 @@ For that reason, this draft uses:
 To reduce the amount of manual `element(..., vec![...])` code, Axonyx now has a first draft of an `ax!` macro:
 
 ```rust
-use axonix_core::ax;
-use axonix_core::prelude::*;
+use axonyx_core::ax;
+use axonyx_core::prelude::*;
 
 let node = ax!(article[
     h2["Counter"],
@@ -51,8 +51,8 @@ let node = ax!(article(class="shell", data_state="ready")[
 ## Draft usage
 
 ```rust
-use axonix_core::prelude::*;
-use axonix_core::component;
+use axonyx_core::prelude::*;
+use axonyx_core::component;
 
 #[component]
 fn counter_card() -> AxNode {
@@ -69,7 +69,7 @@ fn counter_card() -> AxNode {
         element(
             "article",
             vec![
-                element("h2", vec![text("Axonix Counter")]),
+                element("h2", vec![text("Axonyx Counter")]),
                 element("p", vec![text(format!("Count: {}", count.get()))]),
                 element("p", vec![text(format!("Double: {}", doubled.get()))]),
             ],
@@ -81,7 +81,7 @@ fn counter_card() -> AxNode {
 ## Why `#[component]`
 
 The first draft of `#[component]` is intentionally thin.
-Right now it keeps the function unchanged, but it gives Axonix a stable syntax surface for future work:
+Right now it keeps the function unchanged, but it gives Axonyx a stable syntax surface for future work:
 
 - component metadata
 - props validation
@@ -93,8 +93,8 @@ Right now it keeps the function unchanged, but it gives Axonix a stable syntax s
 Axonyx components can now follow a direct props shape:
 
 ```rust
-use axonix_core::component;
-use axonix_core::prelude::*;
+use axonyx_core::component;
+use axonyx_core::prelude::*;
 
 #[derive(Clone)]
 struct GreetingCardProps {
@@ -135,8 +135,8 @@ That keeps the API simple while leaving room for stricter compile-time props val
 Axonyx can already model `children` explicitly through props:
 
 ```rust
-use axonix_core::component;
-use axonix_core::prelude::*;
+use axonyx_core::component;
+use axonyx_core::prelude::*;
 
 #[derive(Clone)]
 struct PanelProps {
@@ -173,7 +173,7 @@ This keeps the model simple:
 ## Resource example
 
 ```rust
-use axonix_core::prelude::*;
+use axonyx_core::prelude::*;
 
 async fn load_posts() -> Result<Vec<String>, String> {
     Ok(vec!["One".into(), "Two".into()])
@@ -192,7 +192,7 @@ fn posts_panel() -> AxNode {
 
 ## Important note
 
-The current implementation in `axonix-core` is intentionally a draft:
+The current implementation in `axonyx-core` is intentionally a draft:
 
 - `signal` is functional and mutable
 - `mem` computes on demand
@@ -206,8 +206,8 @@ That is enough to stabilize API shape before we build the real scheduler and dep
 Axonyx now has a first layout layer through ordinary components:
 
 ```rust
-use axonix_core::layout_prelude::*;
-use axonix_core::prelude::*;
+use axonyx_core::layout_prelude::*;
+use axonyx_core::prelude::*;
 
 let node = render_component(
     grid,
@@ -250,9 +250,9 @@ Axonyx now also has a first UI primitive layer through ordinary components:
 Example:
 
 ```rust
-use axonix_core::layout_prelude::*;
-use axonix_core::prelude::*;
-use axonix_core::ui_prelude::*;
+use axonyx_core::layout_prelude::*;
+use axonyx_core::prelude::*;
+use axonyx_core::ui_prelude::*;
 
 let node = render_component(
     container,
@@ -293,7 +293,7 @@ Axonyx now has a first bridge from pipeline IR into real `AxNode` output.
 Example:
 
 ```rust
-use axonix_core::pipeline_prelude::*;
+use axonyx_core::pipeline_prelude::*;
 
 let records = vec![
     PipelineRecord::new("p1")
@@ -446,7 +446,7 @@ Axonyx now also has the first bridge from backend lowering into runtime-facing g
 
 What exists now:
 
-- a backend runtime contract in `axonix-runtime`
+- a backend runtime contract in `axonyx-runtime`
 - query, mutation, revalidation, and send request types
 - an `AxEnv` layer with `public` and `secret` namespaces
 - a combined `AxBackendRuntime` trait for generated handlers to target

@@ -62,7 +62,7 @@ Both map to the same IR payload shown above.
 
 ## Runtime output
 
-`axonix-runtime` currently returns a `RenderPlan` stub:
+`axonyx-runtime` currently returns a `RenderPlan` stub:
 
 - source collection
 - layout strategy (grid + columns)
