@@ -11,7 +11,7 @@ Axonyx is a Rust-first full-stack framework direction built around a few strong 
 
 Today the broader Axonyx workspace is split into a few roles:
 
-- `axonix-framework`
+- `axonyx-framework`
   - main experimental framework repo
   - parser, lowering, scaffold CLI, and docs direction
 - `axonyx-runtime`

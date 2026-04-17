@@ -23,7 +23,7 @@ cargo run -p create-axonyx -- my-app --yes --runtime-source git
 This points the generated app at:
 
 ```text
-https://github.com/vladanPro/axonix-runtime
+https://github.com/vladanPro/axonyx-runtime
 ```
 
 ## 3. `registry`
@@ -42,4 +42,4 @@ Think of it like this:
 
 - `create-axonyx` creates the app
 - `axonyx-runtime` is the runtime package the app depends on
-- `axonix-framework` is where the framework direction is still being shaped during the repository rename transition
+- `axonyx-framework` is where the framework direction is still being shaped

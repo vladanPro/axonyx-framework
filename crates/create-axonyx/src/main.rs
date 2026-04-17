@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use clap::{Parser, ValueEnum};
 
-const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonix-runtime";
+const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runtime";
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
 const DEFAULT_RUNTIME_VERSION: &str = "0.1.0";
 

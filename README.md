@@ -14,7 +14,7 @@ This repository includes:
 - `create-axonyx`: project scaffolding CLI (similar to `create-next-app`)
 
 The public framework name, crate names, commands, and app config file now use `Axonyx` / `axonyx-*`.
-Repository URLs and local workspace folders may still use older `axonix-*` names until the repo migration is finished.
+Repository URLs and local workspace folders are now aligned to `axonyx-*`.
 
 ## Package Model
 
@@ -28,7 +28,7 @@ Current package roles inside the monorepo:
 Generated apps can now target either:
 
 - a local Cargo `path` dependency during monorepo development
-- the standalone Git repo at `https://github.com/vladanPro/axonix-runtime`
+- the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
 - a future crates.io package release such as `axonyx-runtime = "0.1.0"`
 
 Current local flow:
@@ -57,7 +57,7 @@ cargo run -p create-axonyx -- my-site --yes --template site --runtime-source git
 From an app root:
 
 ```bash
-cargo run -p cargo-axonyx --manifest-path H:/CODE/axonix/axonix-framework/Cargo.toml -- add docs
+cargo run -p cargo-axonyx --manifest-path H:/CODE/axonyx/axonyx-framework/Cargo.toml -- add docs
 ```
 
 This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonyx.toml`.
