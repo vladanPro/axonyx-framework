@@ -49,6 +49,12 @@ Site starter:
 cargo run -p create-axonyx -- my-site --yes --template site
 ```
 
+Docs starter:
+
+```bash
+cargo run -p create-axonyx -- my-docs --yes --template docs
+```
+
 ## What You Get
 
 Generated apps currently include:

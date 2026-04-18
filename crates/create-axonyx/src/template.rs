@@ -2,6 +2,7 @@
 pub enum AppTemplate {
     Minimal,
     Site,
+    Docs,
 }
 
 pub struct TemplateFile {
@@ -41,6 +42,17 @@ const SITE_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/site/public/fav
 const SITE_PUBLIC_BRAND_MARK_SVG: &str =
     include_str!("../templates/site/public/brand-mark.svg.tpl");
 
+const DOCS_APP_LAYOUT_AX: &str = include_str!("../templates/docs/app/layout.ax.tpl");
+const DOCS_APP_PAGE_AX: &str = include_str!("../templates/docs/app/page.ax.tpl");
+const DOCS_APP_GETTING_STARTED_AX: &str =
+    include_str!("../templates/docs/app/getting-started/page.ax.tpl");
+const DOCS_APP_REFERENCE_AX: &str = include_str!("../templates/docs/app/reference/page.ax.tpl");
+const DOCS_APP_EXAMPLES_AX: &str = include_str!("../templates/docs/app/examples/page.ax.tpl");
+const DOCS_APP_README: &str = include_str!("../templates/docs/README.md.tpl");
+const DOCS_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/docs/public/favicon.svg.tpl");
+const DOCS_PUBLIC_BRAND_MARK_SVG: &str =
+    include_str!("../templates/docs/public/brand-mark.svg.tpl");
+
 pub fn template_files(
     template: AppTemplate,
     project_name: &str,
@@ -52,44 +64,6 @@ pub fn template_files(
         ("{{AXONYX_RUNTIME_DEPENDENCY}}", runtime_dependency),
         ("{{AXONYX_RUNTIME_SOURCE_NOTE}}", runtime_source_note),
     ];
-
-    let (
-        readme,
-        layout_ax,
-        page_ax,
-        posts_page_ax,
-        posts_loader_ax,
-        posts_actions_ax,
-        route_posts_ax,
-        job_digest_ax,
-        favicon_svg,
-        brand_mark_svg,
-    ) = match template {
-        AppTemplate::Minimal => (
-            APP_README,
-            APP_LAYOUT_AX,
-            APP_PAGE_AX,
-            APP_POSTS_PAGE_AX,
-            APP_POSTS_LOADER_AX,
-            APP_POSTS_ACTIONS_AX,
-            APP_ROUTE_POSTS_AX,
-            APP_JOB_DIGEST_AX,
-            APP_PUBLIC_FAVICON_SVG,
-            None,
-        ),
-        AppTemplate::Site => (
-            SITE_APP_README,
-            SITE_APP_LAYOUT_AX,
-            SITE_APP_PAGE_AX,
-            SITE_APP_POSTS_PAGE_AX,
-            SITE_APP_POSTS_LOADER_AX,
-            SITE_APP_POSTS_ACTIONS_AX,
-            SITE_APP_ROUTE_POSTS_AX,
-            SITE_APP_JOB_DIGEST_AX,
-            SITE_PUBLIC_FAVICON_SVG,
-            Some(SITE_PUBLIC_BRAND_MARK_SVG),
-        ),
-    };
 
     let mut files = vec![
         TemplateFile {
@@ -121,42 +95,6 @@ pub fn template_files(
             contents: apply_vars(APP_AXONYX_TOML, &vars),
         },
         TemplateFile {
-            relative_path: "app/layout.ax",
-            contents: apply_vars(layout_ax, &vars),
-        },
-        TemplateFile {
-            relative_path: "app/page.ax",
-            contents: apply_vars(page_ax, &vars),
-        },
-        TemplateFile {
-            relative_path: "app/posts/page.ax",
-            contents: apply_vars(posts_page_ax, &vars),
-        },
-        TemplateFile {
-            relative_path: "app/posts/loader.ax",
-            contents: apply_vars(posts_loader_ax, &vars),
-        },
-        TemplateFile {
-            relative_path: "app/posts/actions.ax",
-            contents: apply_vars(posts_actions_ax, &vars),
-        },
-        TemplateFile {
-            relative_path: "routes/api/posts.ax",
-            contents: apply_vars(route_posts_ax, &vars),
-        },
-        TemplateFile {
-            relative_path: "jobs/digest.ax",
-            contents: apply_vars(job_digest_ax, &vars),
-        },
-        TemplateFile {
-            relative_path: "public/favicon.svg",
-            contents: apply_vars(favicon_svg, &vars),
-        },
-        TemplateFile {
-            relative_path: "README.md",
-            contents: apply_vars(readme, &vars),
-        },
-        TemplateFile {
             relative_path: ".env.example",
             contents: apply_vars(APP_ENV_EXAMPLE, &vars),
         },
@@ -166,11 +104,127 @@ pub fn template_files(
         },
     ];
 
-    if let Some(brand_mark_svg) = brand_mark_svg {
-        files.push(TemplateFile {
-            relative_path: "public/brand-mark.svg",
-            contents: apply_vars(brand_mark_svg, &vars),
-        });
+    match template {
+        AppTemplate::Minimal => {
+            files.extend([
+                TemplateFile {
+                    relative_path: "app/layout.ax",
+                    contents: apply_vars(APP_LAYOUT_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/page.ax",
+                    contents: apply_vars(APP_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/posts/page.ax",
+                    contents: apply_vars(APP_POSTS_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/posts/loader.ax",
+                    contents: apply_vars(APP_POSTS_LOADER_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/posts/actions.ax",
+                    contents: apply_vars(APP_POSTS_ACTIONS_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "routes/api/posts.ax",
+                    contents: apply_vars(APP_ROUTE_POSTS_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "jobs/digest.ax",
+                    contents: apply_vars(APP_JOB_DIGEST_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "public/favicon.svg",
+                    contents: apply_vars(APP_PUBLIC_FAVICON_SVG, &vars),
+                },
+                TemplateFile {
+                    relative_path: "README.md",
+                    contents: apply_vars(APP_README, &vars),
+                },
+            ]);
+        }
+        AppTemplate::Site => {
+            files.extend([
+                TemplateFile {
+                    relative_path: "app/layout.ax",
+                    contents: apply_vars(SITE_APP_LAYOUT_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/page.ax",
+                    contents: apply_vars(SITE_APP_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/posts/page.ax",
+                    contents: apply_vars(SITE_APP_POSTS_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/posts/loader.ax",
+                    contents: apply_vars(SITE_APP_POSTS_LOADER_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/posts/actions.ax",
+                    contents: apply_vars(SITE_APP_POSTS_ACTIONS_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "routes/api/posts.ax",
+                    contents: apply_vars(SITE_APP_ROUTE_POSTS_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "jobs/digest.ax",
+                    contents: apply_vars(SITE_APP_JOB_DIGEST_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "public/favicon.svg",
+                    contents: apply_vars(SITE_PUBLIC_FAVICON_SVG, &vars),
+                },
+                TemplateFile {
+                    relative_path: "public/brand-mark.svg",
+                    contents: apply_vars(SITE_PUBLIC_BRAND_MARK_SVG, &vars),
+                },
+                TemplateFile {
+                    relative_path: "README.md",
+                    contents: apply_vars(SITE_APP_README, &vars),
+                },
+            ]);
+        }
+        AppTemplate::Docs => {
+            files.extend([
+                TemplateFile {
+                    relative_path: "app/layout.ax",
+                    contents: apply_vars(DOCS_APP_LAYOUT_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/page.ax",
+                    contents: apply_vars(DOCS_APP_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/getting-started/page.ax",
+                    contents: apply_vars(DOCS_APP_GETTING_STARTED_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/reference/page.ax",
+                    contents: apply_vars(DOCS_APP_REFERENCE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/examples/page.ax",
+                    contents: apply_vars(DOCS_APP_EXAMPLES_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "public/favicon.svg",
+                    contents: apply_vars(DOCS_PUBLIC_FAVICON_SVG, &vars),
+                },
+                TemplateFile {
+                    relative_path: "public/brand-mark.svg",
+                    contents: apply_vars(DOCS_PUBLIC_BRAND_MARK_SVG, &vars),
+                },
+                TemplateFile {
+                    relative_path: "README.md",
+                    contents: apply_vars(DOCS_APP_README, &vars),
+                },
+            ]);
+        }
     }
 
     files

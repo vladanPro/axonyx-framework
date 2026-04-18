@@ -25,6 +25,17 @@ Good for:
 - framework presentations
 - marketing-style Axonyx demos
 
+### `docs`
+
+This is a docs-first starter shaped around reference pages and example sections.
+
+Good for:
+
+- framework docs
+- product documentation
+- internal guides
+- example libraries
+
 ## Example Commands
 
 ```bash
@@ -35,11 +46,14 @@ cargo run -p create-axonyx -- demo-minimal --yes --template minimal
 cargo run -p create-axonyx -- demo-site --yes --template site
 ```
 
+```bash
+cargo run -p create-axonyx -- demo-docs --yes --template docs
+```
+
 ## Planned Templates
 
-The next likely additions are:
+The next likely addition is:
 
-- `docs`
 - `dashboard`
 
 The goal is for templates to express app intent, not just visual variations.

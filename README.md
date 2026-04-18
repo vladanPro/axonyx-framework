@@ -49,11 +49,16 @@ Available templates today:
 
 - `minimal`
 - `site`
+- `docs`
 
 Example:
 
 ```bash
 cargo run -p create-axonyx -- my-site --yes --template site
+```
+
+```bash
+cargo run -p create-axonyx -- my-docs --yes --template docs
 ```
 
 ### 1a) Add a docs module into an existing Axonyx app

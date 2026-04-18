@@ -35,9 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Generated backend file: src/generated/backend.rs");
     println!("UI shell: app/layout.ax");
     println!("UI entry: app/page.ax");
-    println!("Posts loader: app/posts/loader.ax");
-    println!("Posts actions: app/posts/actions.ax");
-    println!("API route: routes/api/posts.ax");
+    println!("Route folders: app/**/page.ax with optional layout.ax layering");
+    println!("Backend folders: routes/ and jobs/ when you need explicit server handlers");
     Ok(())
 }
 

@@ -63,6 +63,7 @@ enum RuntimeSource {
 enum AppTemplate {
     Minimal,
     Site,
+    Docs,
 }
 
 fn main() {
@@ -141,6 +142,7 @@ fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
     let template = match cli.template {
         AppTemplate::Minimal => template::AppTemplate::Minimal,
         AppTemplate::Site => template::AppTemplate::Site,
+        AppTemplate::Docs => template::AppTemplate::Docs,
     };
 
     fs::create_dir_all(target_dir).with_context(|| {

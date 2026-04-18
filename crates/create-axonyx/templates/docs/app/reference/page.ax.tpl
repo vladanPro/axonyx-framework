@@ -1,0 +1,11 @@
+page Reference
+  Container max: "xl"
+    Card title: "Reference"
+      Copy tone: "lead" -> "Document your framework surface here: `.ax` syntax, metadata directives, layout primitives, and dev server behavior."
+    Grid cols: 3, gap: "md"
+      Card title: "Authoring"
+        Copy -> "Explain components, native HTML tags, `title`, `meta`, `link`, and `script` directives."
+      Card title: "Runtime"
+        Copy -> "Describe lowering, preview rendering, and how the runtime package flows into generated apps."
+      Card title: "CLI"
+        Copy -> "Document `create-axonyx`, `cargo ax add ...`, and `cargo ax run dev`."
