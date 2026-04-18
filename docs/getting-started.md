@@ -7,6 +7,7 @@ This is the practical starting point for Axonyx development today.
 From the framework repo:
 
 ```bash
+git submodule update --init --recursive
 cargo run -p create-axonyx -- my-app --yes
 ```
 
@@ -18,6 +19,8 @@ cargo run
 ```
 
 ## Recommended Early-Adopter Flow
+
+The default `path` flow now resolves the checked out submodule workspace at `H:/CODE/axonyx/axonyx-framework/vendor/axonyx-runtime/crates/axonyx-runtime`.
 
 If you want your generated app to track the standalone runtime repository:
 

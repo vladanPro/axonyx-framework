@@ -1,0 +1,3 @@
+[submodule "vendor/axonyx-runtime"]
+	path = vendor/axonyx-runtime
+	url = https://github.com/vladanPro/axonyx-runtime

@@ -311,7 +311,7 @@ fn init_git(target_dir: &PathBuf) -> Result<()> {
 fn runtime_dependency_spec(cli: &Cli) -> Result<String> {
     match cli.runtime_source {
         RuntimeSource::Path => {
-            let runtime_crate = workspace_root()
+            let runtime_crate = runtime_workspace_root()?
                 .join("crates")
                 .join("axonyx-runtime")
                 .canonicalize()
@@ -334,7 +334,7 @@ fn runtime_dependency_spec(cli: &Cli) -> Result<String> {
 
 fn runtime_source_note(cli: &Cli) -> String {
     match cli.runtime_source {
-        RuntimeSource::Path => "This scaffold links against a local `axonyx-runtime` path dependency so monorepo development stays fast while the framework is evolving.".to_string(),
+        RuntimeSource::Path => "This scaffold links against the local `axonyx-runtime` workspace path. By default that comes from the `vendor/axonyx-runtime` git submodule, with a sibling workspace fallback for local migration.".to_string(),
         RuntimeSource::Git => format!(
             "This scaffold links against the shared `axonyx-runtime` Git repository at `{}` so the app can track the standalone runtime workspace outside the local monorepo.",
             cli.runtime_git_url.trim()
@@ -353,6 +353,28 @@ fn workspace_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("create-axonyx should live under <workspace>/crates/create-axonyx")
         .to_path_buf()
+}
+
+fn runtime_workspace_root() -> Result<PathBuf> {
+    let workspace = workspace_root();
+    let submodule = workspace.join("vendor").join("axonyx-runtime");
+    if submodule.exists() {
+        return Ok(submodule);
+    }
+
+    let sibling = workspace.parent().map_or_else(
+        || PathBuf::from("axonyx-runtime"),
+        |parent| parent.join("axonyx-runtime"),
+    );
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+
+    bail!(
+        "could not find axonyx-runtime workspace; expected '{}' or '{}'",
+        submodule.display(),
+        sibling.display()
+    );
 }
 
 fn cargo_toml_path(path: &Path) -> String {

@@ -18,4 +18,4 @@ anyhow.workspace = true
 clap.workspace = true
 toml.workspace = true
 serde.workspace = true
-axonyx-runtime = { path = "../axonyx-runtime" }
+axonyx-runtime.workspace = true

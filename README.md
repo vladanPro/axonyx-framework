@@ -8,30 +8,32 @@ Axonyx is a Rust-first framework focused on:
 
 This repository includes:
 
-- `axonyx-core`: pipeline parser and core types
-- `axonyx-macros`: attribute macros such as `#[component]`
-- `axonyx-runtime`: runtime stub that executes Axonyx IR into a render plan
 - `create-axonyx`: project scaffolding CLI (similar to `create-next-app`)
+- `cargo-axonyx`: project helper CLI (`cargo ax ...`) for local authoring flows
+- integration with the `vendor/axonyx-runtime` git submodule for `axonyx-core`, `axonyx-runtime`, and `axonyx-macros`
 
 The public framework name, crate names, commands, and app config file now use `Axonyx` / `axonyx-*`.
 Repository URLs and local workspace folders are now aligned to `axonyx-*`.
 
 ## Package Model
 
-Current package roles inside the monorepo:
+Current package roles inside this repo:
 
 - `create-axonyx`: CLI that scaffolds a new Axonyx app
-- `axonyx-core`: parser, lowering, SQL draft compiler, and authoring ASTs
-- `axonyx-runtime`: execution/runtime contract used by generated apps
-- `axonyx-macros`: ergonomics layer for component authoring
+- `cargo-axonyx`: local CLI for `add` and `run dev`
+- runtime crates are imported from the `vendor/axonyx-runtime` submodule
 
 Generated apps can now target either:
 
-- a local Cargo `path` dependency during monorepo development
+- a local Cargo `path` dependency into the checked out runtime workspace
 - the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
 - a future crates.io package release such as `axonyx-runtime = "0.1.0"`
 
 Current local flow:
+
+```bash
+git submodule update --init --recursive
+```
 
 ## Quick Start
 
@@ -57,7 +59,7 @@ cargo run -p create-axonyx -- my-site --yes --template site --runtime-source git
 From an app root:
 
 ```bash
-cargo run -p cargo-axonyx --manifest-path H:/CODE/axonyx/axonyx-framework/Cargo.toml -- add docs
+cargo run --manifest-path H:/CODE/axonyx/axonyx-framework/Cargo.toml -p cargo-axonyx --bin cargo-ax -- add docs
 ```
 
 This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonyx.toml`.
@@ -97,7 +99,7 @@ create-axonyx my-app --yes
 Rust runtime executes compiled IR directly:
 
 ```bash
-cargo run -p axonyx-runtime --example execute_json
+cargo run --manifest-path H:/CODE/axonyx/axonyx-framework/vendor/axonyx-runtime/Cargo.toml -p axonyx-runtime --example execute_json
 ```
 
 ## Docs
@@ -435,8 +437,6 @@ Axonyx now also has a first SQL dialect draft in `axonyx-core`:
 
 ```text
 crates/
-  axonyx-core/
-  axonyx-macros/
-  axonyx-runtime/
+  cargo-axonyx/
   create-axonyx/
 ```

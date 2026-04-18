@@ -11,6 +11,7 @@ cargo run -p create-axonyx -- my-app --yes --runtime-source path
 ```
 
 This keeps iteration fast while the framework and runtime are evolving together.
+The generated dependency points at the checked out `vendor/axonyx-runtime` submodule by default, with a sibling workspace fallback during migration.
 
 ## 2. `git`
 

@@ -1,8 +1,5 @@
 [workspace]
 members = [
-  "crates/axonyx-core",
-  "crates/axonyx-macros",
-  "crates/axonyx-runtime",
   "crates/create-axonyx",
   "crates/cargo-axonyx",
 ]
@@ -11,6 +8,10 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/vladanPro/axonyx-framework"
+homepage = "https://github.com/vladanPro/axonyx-framework"
+documentation = "https://github.com/vladanPro/axonyx-framework"
+rust-version = "1.82"
 version = "0.1.0"
 
 [workspace.dependencies]
@@ -23,6 +24,8 @@ toml = "0.8.23"
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
 syn = { version = "2.0.117", features = ["full"] }
+axonyx-core = { path = "vendor/axonyx-runtime/crates/axonyx-core" }
+axonyx-runtime = { path = "vendor/axonyx-runtime/crates/axonyx-runtime" }
 
 [profile.release]
 lto = "fat"

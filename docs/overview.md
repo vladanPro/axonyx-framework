@@ -13,21 +13,19 @@ Today the broader Axonyx workspace is split into a few roles:
 
 - `axonyx-framework`
   - main experimental framework repo
-  - parser, lowering, scaffold CLI, and docs direction
+  - scaffold CLI, local dev CLI, templates, docs direction, and a pinned runtime submodule
 - `axonyx-runtime`
   - standalone runtime workspace repo
-  - intended long-term package story for generated apps
+  - parser, lowering, macros, runtime contract, and long-term package story for generated apps
 
 ## Main Building Blocks
 
 - `create-axonyx`
   - scaffolds new Axonyx applications
-- `axonyx-core`
-  - parser, lowering, SQL draft compiler, and authoring model
-- `axonyx-runtime`
-  - runtime contract, env loading, and backend execution planning
-- `axonyx-macros`
-  - ergonomic procedural macros
+- `cargo-axonyx`
+  - local `cargo ax ...` developer workflow
+- `axonyx-core`, `axonyx-runtime`, `axonyx-macros`
+  - come from the `vendor/axonyx-runtime` git submodule and are imported into this repo by path
 
 ## Current Direction
 
