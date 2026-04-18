@@ -103,10 +103,7 @@ pub fn center(props: CenterProps) -> AxNode {
 
     element_with_attrs(
         "div",
-        vec![
-            attr("data-layout", "center"),
-            attr("data-axis", axis),
-        ],
+        vec![attr("data-layout", "center"), attr("data-axis", axis)],
         props.children,
     )
 }
@@ -151,10 +148,10 @@ pub fn spacer(props: SpacerProps) -> AxNode {
 }
 
 pub mod prelude {
-    pub use super::r#box;
     pub use super::center;
     pub use super::container;
     pub use super::grid;
+    pub use super::r#box;
     pub use super::spacer;
     pub use super::stack;
     pub use super::Axis;

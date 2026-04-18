@@ -89,7 +89,10 @@ pub enum AxLowerError {
     EachRequiresList,
 }
 
-pub fn lower_document(document: &AxDocument, resolver: &impl AxDataResolver) -> Result<AxNode, AxLowerError> {
+pub fn lower_document(
+    document: &AxDocument,
+    resolver: &impl AxDataResolver,
+) -> Result<AxNode, AxLowerError> {
     let mut scope = BTreeMap::new();
     let children = lower_statements(&document.page.body, &mut scope, resolver)?;
 
@@ -160,14 +163,33 @@ fn lower_component(
     let node = match component.name.as_str() {
         "Container" => {
             attrs.insert(0, attr("data-layout", "container"));
-            attrs.insert(1, attr("data-max-width", prop_string(&mut props, &["max", "max_width"]).unwrap_or_else(|| "xl".to_string())));
+            attrs.insert(
+                1,
+                attr(
+                    "data-max-width",
+                    prop_string(&mut props, &["max", "max_width"])
+                        .unwrap_or_else(|| "xl".to_string()),
+                ),
+            );
             push_remaining_props(&mut attrs, props);
             element_with_attrs("div", attrs, children)
         }
         "Grid" => {
             attrs.insert(0, attr("data-layout", "grid"));
-            attrs.insert(1, attr("data-cols", prop_string(&mut props, &["cols"]).unwrap_or_else(|| "1".to_string())));
-            attrs.insert(2, attr("data-gap", prop_string(&mut props, &["gap"]).unwrap_or_else(|| "md".to_string())));
+            attrs.insert(
+                1,
+                attr(
+                    "data-cols",
+                    prop_string(&mut props, &["cols"]).unwrap_or_else(|| "1".to_string()),
+                ),
+            );
+            attrs.insert(
+                2,
+                attr(
+                    "data-gap",
+                    prop_string(&mut props, &["gap"]).unwrap_or_else(|| "md".to_string()),
+                ),
+            );
             push_remaining_props(&mut attrs, props);
             element_with_attrs("div", attrs, children)
         }
@@ -226,7 +248,10 @@ fn lower_pipeline(
             AxPipelineStage::Each(each) => {
                 children.push(element_with_attrs(
                     "div",
-                    vec![attr("data-stage", "each"), attr("data-binding", each.binding.clone())],
+                    vec![
+                        attr("data-stage", "each"),
+                        attr("data-binding", each.binding.clone()),
+                    ],
                     vec![],
                 ));
             }
@@ -259,10 +284,16 @@ fn style_attrs(
 ) -> Result<Vec<Attribute>, AxLowerError> {
     let mut attrs = Vec::new();
     if let Some(recipe) = &style.recipe {
-        attrs.push(attr("data-recipe", eval_expr(recipe, scope, resolver)?.as_string()));
+        attrs.push(attr(
+            "data-recipe",
+            eval_expr(recipe, scope, resolver)?.as_string(),
+        ));
     }
     if let Some(class) = &style.class {
-        attrs.push(attr("class", eval_expr(class, scope, resolver)?.as_string()));
+        attrs.push(attr(
+            "class",
+            eval_expr(class, scope, resolver)?.as_string(),
+        ));
     }
     Ok(attrs)
 }
@@ -276,17 +307,36 @@ fn eval_expr(
         AxExpr::String(value) => Ok(AxValue::String(value.clone())),
         AxExpr::Number(value) => Ok(AxValue::Number(*value)),
         AxExpr::Bool(value) => Ok(AxValue::Bool(*value)),
-        AxExpr::Identifier(name) => scope.get(name).cloned().ok_or_else(|| AxLowerError::UnknownIdentifier { name: name.clone() }),
+        AxExpr::Identifier(name) => scope
+            .get(name)
+            .cloned()
+            .ok_or_else(|| AxLowerError::UnknownIdentifier { name: name.clone() }),
         AxExpr::Member { object, property } => {
             let value = eval_expr(object, scope, resolver)?;
             match value {
-                AxValue::Record(fields) => fields.get(property).cloned().ok_or_else(|| AxLowerError::UnknownMember { property: property.clone() }),
-                _ => Err(AxLowerError::UnknownMember { property: property.clone() }),
+                AxValue::Record(fields) => {
+                    fields
+                        .get(property)
+                        .cloned()
+                        .ok_or_else(|| AxLowerError::UnknownMember {
+                            property: property.clone(),
+                        })
+                }
+                _ => Err(AxLowerError::UnknownMember {
+                    property: property.clone(),
+                }),
             }
         }
         AxExpr::Call { path, args } => {
-            let args = args.iter().map(|arg| eval_expr(arg, scope, resolver)).collect::<Result<Vec<_>, _>>()?;
-            resolver.resolve_call(path, &args).ok_or_else(|| AxLowerError::UnsupportedCall { path: path.join(".") })
+            let args = args
+                .iter()
+                .map(|arg| eval_expr(arg, scope, resolver))
+                .collect::<Result<Vec<_>, _>>()?;
+            resolver
+                .resolve_call(path, &args)
+                .ok_or_else(|| AxLowerError::UnsupportedCall {
+                    path: path.join("."),
+                })
         }
     }
 }
@@ -307,7 +357,10 @@ fn push_remaining_props(attrs: &mut Vec<Attribute>, props: BTreeMap<String, AxVa
 }
 
 fn attr_boxed(name: String, value: String) -> Attribute {
-    Attribute { name: Box::leak(name.into_boxed_str()), value }
+    Attribute {
+        name: Box::leak(name.into_boxed_str()),
+        value,
+    }
 }
 
 fn leak_tag(tag: String) -> &'static str {
@@ -368,52 +421,94 @@ page Home
             AxNode::Element {
                 tag: "main",
                 attrs: vec![
-                    Attribute { name: "data-ax-page", value: "Home".to_string() },
-                    Attribute { name: "data-ax-root", value: "page".to_string() },
+                    Attribute {
+                        name: "data-ax-page",
+                        value: "Home".to_string()
+                    },
+                    Attribute {
+                        name: "data-ax-root",
+                        value: "page".to_string()
+                    },
                 ],
                 children: vec![AxNode::Element {
                     tag: "div",
                     attrs: vec![
-                        Attribute { name: "data-layout", value: "container".to_string() },
-                        Attribute { name: "data-max-width", value: "xl".to_string() },
+                        Attribute {
+                            name: "data-layout",
+                            value: "container".to_string()
+                        },
+                        Attribute {
+                            name: "data-max-width",
+                            value: "xl".to_string()
+                        },
                     ],
                     children: vec![AxNode::Element {
                         tag: "div",
                         attrs: vec![
-                            Attribute { name: "data-layout", value: "grid".to_string() },
-                            Attribute { name: "data-cols", value: "3".to_string() },
-                            Attribute { name: "data-gap", value: "md".to_string() },
-                            Attribute { name: "data-recipe", value: "screen-center".to_string() },
+                            Attribute {
+                                name: "data-layout",
+                                value: "grid".to_string()
+                            },
+                            Attribute {
+                                name: "data-cols",
+                                value: "3".to_string()
+                            },
+                            Attribute {
+                                name: "data-gap",
+                                value: "md".to_string()
+                            },
+                            Attribute {
+                                name: "data-recipe",
+                                value: "screen-center".to_string()
+                            },
                         ],
                         children: vec![
                             AxNode::Element {
                                 tag: "article",
-                                attrs: vec![Attribute { name: "data-ui", value: "card".to_string() }],
+                                attrs: vec![Attribute {
+                                    name: "data-ui",
+                                    value: "card".to_string()
+                                }],
                                 children: vec![
                                     AxNode::Element {
                                         tag: "header",
-                                        attrs: vec![Attribute { name: "data-ui", value: "card-header".to_string() }],
+                                        attrs: vec![Attribute {
+                                            name: "data-ui",
+                                            value: "card-header".to_string()
+                                        }],
                                         children: vec![AxNode::Text("Card A".to_string())],
                                     },
                                     AxNode::Element {
                                         tag: "p",
-                                        attrs: vec![Attribute { name: "data-ui", value: "copy".to_string() }],
+                                        attrs: vec![Attribute {
+                                            name: "data-ui",
+                                            value: "copy".to_string()
+                                        }],
                                         children: vec![AxNode::Text("Intro A".to_string())],
                                     },
                                 ],
                             },
                             AxNode::Element {
                                 tag: "article",
-                                attrs: vec![Attribute { name: "data-ui", value: "card".to_string() }],
+                                attrs: vec![Attribute {
+                                    name: "data-ui",
+                                    value: "card".to_string()
+                                }],
                                 children: vec![
                                     AxNode::Element {
                                         tag: "header",
-                                        attrs: vec![Attribute { name: "data-ui", value: "card-header".to_string() }],
+                                        attrs: vec![Attribute {
+                                            name: "data-ui",
+                                            value: "card-header".to_string()
+                                        }],
                                         children: vec![AxNode::Text("Card B".to_string())],
                                     },
                                     AxNode::Element {
                                         tag: "p",
-                                        attrs: vec![Attribute { name: "data-ui", value: "copy".to_string() }],
+                                        attrs: vec![Attribute {
+                                            name: "data-ui",
+                                            value: "copy".to_string()
+                                        }],
                                         children: vec![AxNode::Text("Intro B".to_string())],
                                     },
                                 ],

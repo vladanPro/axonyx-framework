@@ -118,11 +118,17 @@ impl AxBackendStmt {
         Self::Data(AxBackendData::new(name, value))
     }
 
-    pub fn insert(collection: impl Into<String>, fields: impl IntoIterator<Item = AxAssignment>) -> Self {
+    pub fn insert(
+        collection: impl Into<String>,
+        fields: impl IntoIterator<Item = AxAssignment>,
+    ) -> Self {
         Self::Insert(AxMutation::new(collection, fields))
     }
 
-    pub fn update(collection: impl Into<String>, fields: impl IntoIterator<Item = AxAssignment>) -> Self {
+    pub fn update(
+        collection: impl Into<String>,
+        fields: impl IntoIterator<Item = AxAssignment>,
+    ) -> Self {
         Self::Update(AxMutation::new(collection, fields))
     }
 
@@ -295,22 +301,22 @@ mod tests {
         let document = AxBackendDocument::new([
             AxBackendBlock::Loader(AxLoader::new(
                 "PostsList",
-                [AxBackendStmt::data(
-                    "posts",
-                    AxQuerySpec::new(AxQuerySource::Stream {
-                        collection: "posts".to_string(),
-                    })
-                    .filter(AxQueryFilter::new(
-                        "status",
-                        AxQueryFilterOp::Eq,
-                        AxExpr::string("published"),
-                    ))
-                    .order(AxQueryOrder::new(
-                        "created_at",
-                        AxQueryOrderDirection::Desc,
-                    ))
-                    .limit(20),
-                ), AxBackendStmt::r#return(AxExpr::ident("posts"))],
+                [
+                    AxBackendStmt::data(
+                        "posts",
+                        AxQuerySpec::new(AxQuerySource::Stream {
+                            collection: "posts".to_string(),
+                        })
+                        .filter(AxQueryFilter::new(
+                            "status",
+                            AxQueryFilterOp::Eq,
+                            AxExpr::string("published"),
+                        ))
+                        .order(AxQueryOrder::new("created_at", AxQueryOrderDirection::Desc))
+                        .limit(20),
+                    ),
+                    AxBackendStmt::r#return(AxExpr::ident("posts")),
+                ],
             )),
             AxBackendBlock::Action(
                 AxAction::new("CreatePost")
@@ -323,7 +329,10 @@ mod tests {
                             "posts",
                             [
                                 AxAssignment::new("title", AxExpr::ident("input").member("title")),
-                                AxAssignment::new("excerpt", AxExpr::ident("input").member("excerpt")),
+                                AxAssignment::new(
+                                    "excerpt",
+                                    AxExpr::ident("input").member("excerpt"),
+                                ),
                             ],
                         ),
                         AxBackendStmt::revalidate("/posts"),
@@ -333,10 +342,13 @@ mod tests {
             AxBackendBlock::Route(AxRoute::new(
                 "GET",
                 "/api/posts",
-                [AxBackendStmt::data(
-                    "posts",
-                    AxExpr::call(["Db", "Stream"], [AxExpr::string("posts")]),
-                ), AxBackendStmt::r#return(AxExpr::ident("posts"))],
+                [
+                    AxBackendStmt::data(
+                        "posts",
+                        AxExpr::call(["Db", "Stream"], [AxExpr::string("posts")]),
+                    ),
+                    AxBackendStmt::r#return(AxExpr::ident("posts")),
+                ],
             )),
         ]);
 
@@ -356,10 +368,7 @@ mod tests {
         let job = AxJob::new(
             "PublishDailyDigest",
             [
-                AxBackendStmt::data(
-                    "posts",
-                    AxExpr::call(["Query", "PublishedPosts"], []),
-                ),
+                AxBackendStmt::data("posts", AxExpr::call(["Query", "PublishedPosts"], [])),
                 AxBackendStmt::send("DigestEmail", AxExpr::ident("posts")),
             ],
         );

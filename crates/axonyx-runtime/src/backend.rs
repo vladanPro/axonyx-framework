@@ -1305,7 +1305,7 @@ mod tests {
     fn env_can_resolve_database_config_for_mysql() {
         let env = AxEnv::new()
             .with_secret("db_dialect", "mysql")
-                .with_secret("db_url", "mysql://root:root@localhost:3306/axonyx");
+            .with_secret("db_url", "mysql://root:root@localhost:3306/axonyx");
 
         let config = env.database_config().expect("config should resolve");
 
@@ -1325,7 +1325,7 @@ mod tests {
     fn runtime_from_env_can_select_mysql_adapter() {
         let env = AxEnv::new()
             .with_secret("db_dialect", "mysql")
-                .with_secret("db_url", "mysql://root:root@localhost:3306/axonyx");
+            .with_secret("db_url", "mysql://root:root@localhost:3306/axonyx");
         let runtime = runtime_from_env(env).expect("runtime should initialize");
 
         let value = runtime
@@ -1351,7 +1351,7 @@ mod tests {
     fn direct_transport_emits_sql_execution_plan() {
         let env = AxEnv::new()
             .with_secret("db_dialect", "postgres")
-                .with_secret("db_url", "postgres://local/axonyx");
+            .with_secret("db_url", "postgres://local/axonyx");
         let runtime = runtime_from_env(env).expect("runtime should initialize");
 
         let value = runtime
@@ -1410,7 +1410,7 @@ mod tests {
     fn direct_update_emits_where_clause_when_filters_exist() {
         let env = AxEnv::new()
             .with_secret("db_dialect", "postgres")
-                .with_secret("db_url", "postgres://local/axonyx");
+            .with_secret("db_url", "postgres://local/axonyx");
         let runtime = runtime_from_env(env).expect("runtime should initialize");
 
         let value = runtime
@@ -1437,7 +1437,7 @@ mod tests {
     fn direct_delete_emits_where_clause_when_filters_exist() {
         let env = AxEnv::new()
             .with_secret("db_dialect", "postgres")
-                .with_secret("db_url", "postgres://local/axonyx");
+            .with_secret("db_url", "postgres://local/axonyx");
         let runtime = runtime_from_env(env).expect("runtime should initialize");
 
         let value = runtime

@@ -52,12 +52,16 @@ impl Parser {
     fn parse_document(&mut self) -> Result<AxDocument, AxParseError> {
         let page_line = self.current().ok_or(AxParseError::EmptyDocument)?.clone();
         if page_line.indent != 0 || !page_line.text.starts_with("page ") {
-            return Err(AxParseError::InvalidPage { line: page_line.line });
+            return Err(AxParseError::InvalidPage {
+                line: page_line.line,
+            });
         }
 
         let name = page_line.text["page ".len()..].trim();
         if name.is_empty() {
-            return Err(AxParseError::InvalidPage { line: page_line.line });
+            return Err(AxParseError::InvalidPage {
+                line: page_line.line,
+            });
         }
 
         self.pos += 1;
@@ -178,18 +182,25 @@ impl Parser {
             }
 
             if stage_line.indent != indent + 2 || !stage_line.text.starts_with("|> ") {
-                return Err(AxParseError::InvalidPipelineStage { line: stage_line.line });
+                return Err(AxParseError::InvalidPipelineStage {
+                    line: stage_line.line,
+                });
             }
 
             let stage_text = stage_line.text["|> ".len()..].trim();
             if let Some(binding) = stage_text.strip_prefix("Each ") {
                 let binding = binding.trim();
                 if binding.is_empty() {
-                    return Err(AxParseError::InvalidPipelineStage { line: stage_line.line });
+                    return Err(AxParseError::InvalidPipelineStage {
+                        line: stage_line.line,
+                    });
                 }
                 pipeline = pipeline.stage(AxPipelineStage::Each(AxEachStage::new(binding)));
             } else {
-                pipeline = pipeline.stage(AxPipelineStage::Component(parse_component_line(stage_text, stage_line.line)?));
+                pipeline = pipeline.stage(AxPipelineStage::Component(parse_component_line(
+                    stage_text,
+                    stage_line.line,
+                )?));
             }
 
             self.pos += 1;
@@ -301,7 +312,9 @@ fn parse_expr(input: &str, line: usize) -> Result<AxExpr, AxParseError> {
         });
     }
 
-    if (input.starts_with('"') && input.ends_with('"')) || (input.starts_with('\'') && input.ends_with('\'')) {
+    if (input.starts_with('"') && input.ends_with('"'))
+        || (input.starts_with('\'') && input.ends_with('\''))
+    {
         return Ok(AxExpr::string(input[1..input.len() - 1].to_string()));
     }
 

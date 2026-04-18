@@ -176,22 +176,22 @@ where
 pub mod prelude {
     pub use super::attr;
     pub use super::children;
+    pub use super::effect;
     pub use super::element;
     pub use super::element_with_attrs;
-    pub use super::effect;
     pub use super::mem;
-    pub use super::Attribute;
-    pub use super::Attributes;
-    pub use super::Children;
-    pub use super::Props;
-    pub use super::resource;
     pub use super::render_component;
+    pub use super::resource;
     pub use super::signal;
     pub use super::text;
     pub use super::view;
+    pub use super::Attribute;
+    pub use super::Attributes;
     pub use super::AxNode;
+    pub use super::Children;
     pub use super::EffectHandle;
     pub use super::Mem;
+    pub use super::Props;
     pub use super::Resource;
     pub use super::ResourceState;
     pub use super::Signal;

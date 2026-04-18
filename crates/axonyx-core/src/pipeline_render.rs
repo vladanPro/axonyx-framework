@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::layout::prelude::*;
 use crate::prelude::*;
 use crate::ui::prelude::*;
-use crate::{compile_pipeline, AxonyxIr, CompileError, Source, SourceKind, Transform, TransformKind, View, ViewKind};
+use crate::{
+    compile_pipeline, AxonyxIr, CompileError, Source, SourceKind, Transform, TransformKind, View,
+    ViewKind,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PipelineField {
@@ -50,7 +53,11 @@ pub fn render_pipeline_node(
 }
 
 pub fn render_ir_node(ir: &AxonyxIr, records: &[PipelineRecord]) -> AxNode {
-    let rendered_records = children(records.iter().map(|record| render_view_node(&ir.view, record)));
+    let rendered_records = children(
+        records
+            .iter()
+            .map(|record| render_view_node(&ir.view, record)),
+    );
     let content = apply_transforms(&ir.transforms, rendered_records);
     wrap_source(&ir.source, content, records.len())
 }
@@ -89,11 +96,9 @@ fn apply_transforms(transforms: &[Transform], rendered_records: Children) -> AxN
     }
 
     match current {
-        StageOutput::Many(nodes) => element_with_attrs(
-            "div",
-            vec![attr("data-axonyx-stage", "view-list")],
-            nodes,
-        ),
+        StageOutput::Many(nodes) => {
+            element_with_attrs("div", vec![attr("data-axonyx-stage", "view-list")], nodes)
+        }
         StageOutput::One(node) => node,
     }
 }
@@ -193,8 +198,11 @@ mod tests {
                 .field("status", "published"),
         ];
 
-        let node = render_pipeline_node(r#"Db.Stream("posts") |> layout.Grid(2) |> Card()"#, &records)
-            .expect("pipeline should render");
+        let node = render_pipeline_node(
+            r#"Db.Stream("posts") |> layout.Grid(2) |> Card()"#,
+            &records,
+        )
+        .expect("pipeline should render");
 
         assert_eq!(
             node,

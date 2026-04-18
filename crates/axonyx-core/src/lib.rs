@@ -15,7 +15,6 @@ pub mod ui;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub use axonyx_macros::component;
 pub use ax_ast::prelude as ax_ast_prelude;
 pub use ax_backend_ast::prelude as ax_backend_ast_prelude;
 pub use ax_backend_codegen::prelude as ax_backend_codegen_prelude;
@@ -25,6 +24,7 @@ pub use ax_lowering::prelude as ax_lowering_prelude;
 pub use ax_parser::prelude as ax_parser_prelude;
 pub use ax_query_ast::prelude as ax_query_ast_prelude;
 pub use ax_sql::prelude as ax_sql_prelude;
+pub use axonyx_macros::component;
 pub use layout::prelude as layout_prelude;
 pub use pipeline_render::prelude as pipeline_prelude;
 pub use reactive::prelude;
@@ -242,8 +242,8 @@ pub fn compile_ir(pipeline: &Pipeline) -> Result<AxonyxIr, CompileError> {
 
 fn compile_source(call: &Call) -> Result<Source, CompileError> {
     let normalized = normalize_path(&call.path);
-    let is_collection_source = normalized.as_slice() == ["db", "stream"]
-        || normalized.as_slice() == ["from"];
+    let is_collection_source =
+        normalized.as_slice() == ["db", "stream"] || normalized.as_slice() == ["from"];
     if !is_collection_source {
         return Err(CompileError::InvalidSource(call.path.clone()));
     }
@@ -299,7 +299,9 @@ fn compile_view(call: &Call) -> Result<View, CompileError> {
 }
 
 fn normalize_path(path: &[String]) -> Vec<String> {
-    path.iter().map(|x| x.trim().to_ascii_lowercase()).collect::<Vec<_>>()
+    path.iter()
+        .map(|x| x.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>()
 }
 
 fn trim_quotes(input: &str) -> String {
@@ -344,6 +346,11 @@ mod tests {
                 kind: TransformKind::Grid { columns: 4 }
             }]
         );
-        assert_eq!(ir.view, View { kind: ViewKind::Card });
+        assert_eq!(
+            ir.view,
+            View {
+                kind: ViewKind::Card
+            }
+        );
     }
 }

@@ -394,15 +394,14 @@ fn render_expr(expr: &AxExpr) -> String {
 
 fn try_render_runtime_env(expr: &AxExpr) -> Option<String> {
     let path = expr_member_path(expr)?;
-    let normalized = path.iter().map(|segment| segment.as_str()).collect::<Vec<_>>();
+    let normalized = path
+        .iter()
+        .map(|segment| segment.as_str())
+        .collect::<Vec<_>>();
 
     match normalized.as_slice() {
-        ["Runtime", "Env", "public", key] => {
-            Some(format!("runtime.env().public({key:?})?"))
-        }
-        ["Runtime", "Env", "secret", key] => {
-            Some(format!("runtime.env().secret({key:?})?"))
-        }
+        ["Runtime", "Env", "public", key] => Some(format!("runtime.env().public({key:?})?")),
+        ["Runtime", "Env", "secret", key] => Some(format!("runtime.env().secret({key:?})?")),
         _ => None,
     }
 }
@@ -461,7 +460,10 @@ fn route_path_ident(path: &str) -> String {
 
 fn route_method_ident(method: &str) -> String {
     let method = method.trim();
-    if method.chars().all(|ch| !ch.is_ascii_alphabetic() || ch.is_ascii_uppercase()) {
+    if method
+        .chars()
+        .all(|ch| !ch.is_ascii_alphabetic() || ch.is_ascii_uppercase())
+    {
         method.to_ascii_lowercase()
     } else {
         normalize_ident(method)
@@ -476,10 +478,10 @@ pub mod prelude {
     pub use super::AxFieldPlan;
     pub use super::AxHandlerKind;
     pub use super::AxHandlerPlan;
-    pub use super::AxQueryFilterPlan;
     pub use super::AxQueryFilterOpPlan;
-    pub use super::AxQueryOrderPlan;
+    pub use super::AxQueryFilterPlan;
     pub use super::AxQueryOrderDirectionPlan;
+    pub use super::AxQueryOrderPlan;
     pub use super::AxQueryPlan;
     pub use super::AxQuerySourcePlan;
     pub use super::AxReturnPlan;
@@ -717,18 +719,14 @@ loader PostsList
             plan.handlers[0].steps[0],
             AxStepPlan::Let {
                 binding: "db_url".to_string(),
-                value: AxValuePlan::Expr(AxRustExpr::new(
-                    r#"runtime.env().secret("db_url")?"#,
-                )),
+                value: AxValuePlan::Expr(AxRustExpr::new(r#"runtime.env().secret("db_url")?"#,)),
             }
         );
         assert_eq!(
             plan.handlers[0].steps[1],
             AxStepPlan::Let {
                 binding: "app_name".to_string(),
-                value: AxValuePlan::Expr(AxRustExpr::new(
-                    r#"runtime.env().public("app_name")?"#,
-                )),
+                value: AxValuePlan::Expr(AxRustExpr::new(r#"runtime.env().public("app_name")?"#,)),
             }
         );
     }

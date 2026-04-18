@@ -8,4 +8,3 @@ fn main() {
         plan.source, plan.layout.kind, plan.layout.columns, plan.view.component
     );
 }
-

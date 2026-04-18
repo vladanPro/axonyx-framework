@@ -65,10 +65,11 @@ pub fn compile_backend_sources_to_module(
             name: (*name).to_string(),
             source: AxBackendCompileError::Parse(source),
         })?;
-        let plan = lower_backend_document(&document).map_err(|source| AxBackendBundleError::Source {
-            name: (*name).to_string(),
-            source: AxBackendCompileError::Lower(source),
-        })?;
+        let plan =
+            lower_backend_document(&document).map_err(|source| AxBackendBundleError::Source {
+                name: (*name).to_string(),
+                source: AxBackendCompileError::Lower(source),
+            })?;
         handlers.extend(plan.handlers);
     }
 
@@ -316,8 +317,8 @@ fn action_input_struct_name(rust_fn: &str) -> String {
 pub mod prelude {
     pub use super::compile_backend_ax_to_module;
     pub use super::compile_backend_sources_to_module;
-    pub use super::AxBackendBundleError;
     pub use super::generate_backend_module;
+    pub use super::AxBackendBundleError;
     pub use super::AxBackendCodegenError;
     pub use super::AxBackendCompileError;
 }

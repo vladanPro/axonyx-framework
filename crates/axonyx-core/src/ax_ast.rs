@@ -41,7 +41,11 @@ impl AxStatement {
         Self::Data(AxDataBinding::new(name, value))
     }
 
-    pub fn each(binding: impl Into<String>, source: AxExpr, body: impl IntoIterator<Item = AxStatement>) -> Self {
+    pub fn each(
+        binding: impl Into<String>,
+        source: AxExpr,
+        body: impl IntoIterator<Item = AxStatement>,
+    ) -> Self {
         Self::Each(AxEachBlock::new(binding, source, body))
     }
 
@@ -253,7 +257,10 @@ impl AxExpr {
         }
     }
 
-    pub fn call(path: impl IntoIterator<Item = impl Into<String>>, args: impl IntoIterator<Item = AxExpr>) -> Self {
+    pub fn call(
+        path: impl IntoIterator<Item = impl Into<String>>,
+        args: impl IntoIterator<Item = AxExpr>,
+    ) -> Self {
         Self::Call {
             path: path.into_iter().map(Into::into).collect(),
             args: args.into_iter().collect(),
@@ -318,9 +325,8 @@ mod tests {
                     AxExpr::call(["Db", "Stream"], [AxExpr::string("posts")]),
                 ),
                 AxStatement::component(
-                    AxComponent::new("Container")
-                        .prop("max", "xl")
-                        .block([AxStatement::component(
+                    AxComponent::new("Container").prop("max", "xl").block([
+                        AxStatement::component(
                             AxComponent::new("Grid")
                                 .prop("cols", 3_i64)
                                 .prop("gap", "md")
@@ -336,7 +342,8 @@ mod tests {
                                             )]),
                                     )],
                                 )]),
-                        )]),
+                        ),
+                    ]),
                 ),
             ],
         );
@@ -368,10 +375,7 @@ mod tests {
             node,
             AxComponent {
                 name: "Button".to_string(),
-                props: vec![
-                    AxProp::new("tone", "primary"),
-                    AxProp::new("size", "lg"),
-                ],
+                props: vec![AxProp::new("tone", "primary"), AxProp::new("size", "lg"),],
                 style: AxStyle {
                     recipe: Some(AxExpr::String("hero-cta".to_string())),
                     class: Some(AxExpr::String("w-full".to_string())),
@@ -391,8 +395,7 @@ mod tests {
             ))
             .stage(AxPipelineStage::Each(AxEachStage::new("post")))
             .stage(AxPipelineStage::Component(
-                AxComponent::new("Card")
-                    .prop("title", AxExpr::ident("post").member("title")),
+                AxComponent::new("Card").prop("title", AxExpr::ident("post").member("title")),
             ));
 
         assert_eq!(pipeline.stages.len(), 3);
