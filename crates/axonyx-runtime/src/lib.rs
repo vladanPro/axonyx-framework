@@ -1,10 +1,13 @@
 pub mod backend;
 
+use axonyx_core::ax_ast_prelude::{
+    AxBody, AxComponent, AxDocument, AxPipeline, AxPipelineStage, AxStatement,
+};
 use axonyx_core::ax_lowering::AxLowerError;
-use axonyx_core::ax_parser::AxParseError;
-use axonyx_core::prelude::{Attribute, AxNode};
 use axonyx_core::ax_lowering_prelude::{lower_document, AxValue};
+use axonyx_core::ax_parser::AxParseError;
 use axonyx_core::ax_parser_prelude::parse_ax;
+use axonyx_core::prelude::{Attribute, AxNode};
 use axonyx_core::{AxonyxIr, SourceKind, TransformKind, ViewKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -70,17 +73,107 @@ pub fn execute_json(ir_json: &str) -> Result<RenderPlan, serde_json::Error> {
 
 #[derive(Debug, Error)]
 pub enum PreviewError {
-    #[error("failed to parse .ax page")]
+    #[error("failed to parse .ax file")]
     Parse(#[from] AxParseError),
-    #[error("failed to lower .ax page")]
+    #[error("failed to lower .ax file")]
     Lower(#[from] AxLowerError),
 }
 
 pub fn preview_ax_page(ax_source: &str) -> Result<String, PreviewError> {
-    let document = parse_ax(ax_source)?;
+    preview_ax_app(None, ax_source)
+}
+
+pub fn preview_ax_app(
+    layout_source: Option<&str>,
+    page_source: &str,
+) -> Result<String, PreviewError> {
+    let layout_sources = layout_source.into_iter().collect::<Vec<_>>();
+    preview_ax_route(&layout_sources, page_source)
+}
+
+pub fn preview_ax_route(
+    layout_sources: &[&str],
+    page_source: &str,
+) -> Result<String, PreviewError> {
+    let page_document = parse_ax(page_source)?;
+    let mut document = page_document;
+
+    for layout_source in layout_sources.iter().rev() {
+        let layout_document = parse_ax(layout_source)?;
+        document = compose_layout_with_page(layout_document, document);
+    }
+
     let resolver = |_: &[String], _: &[AxValue]| -> Option<AxValue> { None };
     let node = lower_document(&document, &resolver)?;
     Ok(render_preview_document(&node))
+}
+
+fn compose_layout_with_page(mut layout: AxDocument, page: AxDocument) -> AxDocument {
+    let page_name = page.page.name;
+    let page_body = page.page.body;
+
+    if !inject_slot_statements(&mut layout.page.body, &page_body) {
+        layout.page.body.extend(page_body);
+    }
+
+    layout.page.name = page_name;
+    layout
+}
+
+fn inject_slot_statements(statements: &mut Vec<AxStatement>, page_body: &[AxStatement]) -> bool {
+    let mut found_slot = false;
+    let mut composed = Vec::with_capacity(statements.len() + page_body.len());
+
+    for statement in statements.drain(..) {
+        match statement {
+            AxStatement::Component(component) if is_slot_component(&component) => {
+                composed.extend(page_body.iter().cloned());
+                found_slot = true;
+            }
+            AxStatement::Component(mut component) => {
+                if let AxBody::Block(body) = &mut component.body {
+                    found_slot |= inject_slot_statements(body, page_body);
+                }
+                composed.push(AxStatement::Component(component));
+            }
+            AxStatement::Each(mut each) => {
+                found_slot |= inject_slot_statements(&mut each.body, page_body);
+                composed.push(AxStatement::Each(each));
+            }
+            AxStatement::Pipeline(mut pipeline) => {
+                found_slot |= inject_slot_pipeline(&mut pipeline, page_body);
+                composed.push(AxStatement::Pipeline(pipeline));
+            }
+            other => composed.push(other),
+        }
+    }
+
+    *statements = composed;
+    found_slot
+}
+
+fn inject_slot_pipeline(pipeline: &mut AxPipeline, page_body: &[AxStatement]) -> bool {
+    let mut found_slot = false;
+
+    for stage in &mut pipeline.stages {
+        if let AxPipelineStage::Component(component) = stage {
+            if is_slot_component(component) {
+                *component = AxComponent::new("Fragment").block(page_body.iter().cloned());
+                found_slot = true;
+                continue;
+            }
+
+            if let AxBody::Block(body) = &mut component.body {
+                found_slot |= inject_slot_statements(body, page_body);
+            }
+        }
+    }
+
+    found_slot
+}
+
+fn is_slot_component(component: &AxComponent) -> bool {
+    component.name == "Slot"
 }
 
 fn render_preview_document(root: &AxNode) -> String {
@@ -97,7 +190,11 @@ fn render_preview_document(root: &AxNode) -> String {
 fn render_node(node: &AxNode, out: &mut String) {
     match node {
         AxNode::Text(text) => out.push_str(&escape_html(text)),
-        AxNode::Element { tag, attrs, children } => {
+        AxNode::Element {
+            tag,
+            attrs,
+            children,
+        } => {
             out.push('<');
             out.push_str(tag);
             for attr in attrs {
@@ -188,6 +285,15 @@ fn preview_styles() -> &'static str {
             gap: 24px;
         }
 
+        [data-recipe="app-shell"] {
+            display: grid;
+            gap: 18px;
+        }
+
+        [data-recipe="app-frame"] {
+            gap: 20px;
+        }
+
         [data-ui="card"] {
             padding: 24px;
             border-radius: 24px;
@@ -230,6 +336,11 @@ fn preview_styles() -> &'static str {
             font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.14em;
+        }
+
+        [data-ui="copy"][data-tone="muted"] {
+            color: var(--ax-muted);
+            font-size: 0.95rem;
         }
 
         [data-ui="button"] {
@@ -295,5 +406,80 @@ page Home
         assert!(html.contains("Hello Axonyx"));
         assert!(html.contains("data-recipe=\"hero-card\""));
         assert!(html.contains("Edit app/page.ax"));
+    }
+
+    #[test]
+    fn previews_layout_and_page_as_one_html_document() {
+        let html = preview_ax_app(
+            Some(
+                r#"
+page RootLayout
+  Container max: "xl", recipe: "app-shell"
+    Copy tone: "eyebrow" -> "Axonyx Layout"
+    Slot
+"#,
+            ),
+            r#"
+page Home
+  Card title: "Hello Axonyx"
+    Copy -> "Page content"
+"#,
+        )
+        .expect("layout preview should render");
+
+        assert!(html.contains("Axonyx Layout"));
+        assert!(html.contains("Hello Axonyx"));
+        assert!(html.contains("Page content"));
+        assert!(html.contains("data-ax-page=\"Home\""));
+        assert!(!html.contains("data-component=\"Slot\""));
+    }
+
+    #[test]
+    fn appends_page_when_layout_has_no_slot() {
+        let html = preview_ax_app(
+            Some(
+                r#"
+page RootLayout
+  Copy -> "Layout only"
+"#,
+            ),
+            r#"
+page Home
+  Copy -> "Page body"
+"#,
+        )
+        .expect("layout without slot should still render");
+
+        assert!(html.contains("Layout only"));
+        assert!(html.contains("Page body"));
+    }
+
+    #[test]
+    fn previews_route_with_nested_layouts() {
+        let html = preview_ax_route(
+            &[
+                r#"
+page RootLayout
+  Container max: "xl", recipe: "app-shell"
+    Copy tone: "eyebrow" -> "Root Layout"
+    Slot
+"#,
+                r#"
+page DocsLayout
+  Card title: "Docs Shell"
+    Slot
+"#,
+            ],
+            r#"
+page DocsHome
+  Copy -> "Nested page"
+"#,
+        )
+        .expect("route preview should render");
+
+        assert!(html.contains("Root Layout"));
+        assert!(html.contains("Docs Shell"));
+        assert!(html.contains("Nested page"));
+        assert!(html.contains("data-ax-page=\"DocsHome\""));
     }
 }

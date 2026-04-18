@@ -14,6 +14,16 @@ cargo run
 
 This generates a first page preview at `target/axonyx-preview.html`.
 
+The preview composes `app/layout.ax` around `app/page.ax`, so the first loop already follows the intended Axonyx app structure.
+
+If `cargo-axonyx` is installed, you can also run:
+
+```bash
+cargo ax run dev
+```
+
+That serves the current app routes locally with nested layout composition and dev-time browser refresh. The older `cargo axonyx dev` path can still stay as a compatibility alias.
+
 ## Starter Shape
 
 - landing-focused `app/page.ax`

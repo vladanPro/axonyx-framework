@@ -14,9 +14,17 @@ cargo run
 
 This generates a first page preview at `target/axonyx-preview.html`.
 
+If `cargo-axonyx` is installed, you can also start the local dev server:
+
+```bash
+cargo ax run dev
+```
+
+This serves the current `.ax` routes at `http://127.0.0.1:3000` and refreshes the browser when `app/**/page.ax` or `app/**/layout.ax` changes. The older `cargo axonyx dev` path can still stay as a compatibility alias.
+
 Use it as the smallest "Hello Axonyx" loop:
 
-1. edit `app/page.ax`
+1. edit `app/layout.ax` or `app/page.ax`
 2. run `cargo run`
 3. refresh `target/axonyx-preview.html`
 
