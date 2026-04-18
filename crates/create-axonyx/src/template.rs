@@ -27,6 +27,7 @@ const APP_JOB_DIGEST_AX: &str = include_str!("../templates/minimal/jobs/digest.a
 const APP_README: &str = include_str!("../templates/minimal/README.md.tpl");
 const APP_GITIGNORE: &str = include_str!("../templates/minimal/.gitignore.tpl");
 const APP_ENV_EXAMPLE: &str = include_str!("../templates/minimal/.env.example.tpl");
+const APP_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/minimal/public/favicon.svg.tpl");
 
 const SITE_APP_LAYOUT_AX: &str = include_str!("../templates/site/app/layout.ax.tpl");
 const SITE_APP_PAGE_AX: &str = include_str!("../templates/site/app/page.ax.tpl");
@@ -36,6 +37,9 @@ const SITE_APP_POSTS_ACTIONS_AX: &str = include_str!("../templates/site/app/post
 const SITE_APP_ROUTE_POSTS_AX: &str = include_str!("../templates/site/routes/api/posts.ax.tpl");
 const SITE_APP_JOB_DIGEST_AX: &str = include_str!("../templates/site/jobs/digest.ax.tpl");
 const SITE_APP_README: &str = include_str!("../templates/site/README.md.tpl");
+const SITE_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/site/public/favicon.svg.tpl");
+const SITE_PUBLIC_BRAND_MARK_SVG: &str =
+    include_str!("../templates/site/public/brand-mark.svg.tpl");
 
 pub fn template_files(
     template: AppTemplate,
@@ -58,6 +62,8 @@ pub fn template_files(
         posts_actions_ax,
         route_posts_ax,
         job_digest_ax,
+        favicon_svg,
+        brand_mark_svg,
     ) = match template {
         AppTemplate::Minimal => (
             APP_README,
@@ -68,6 +74,8 @@ pub fn template_files(
             APP_POSTS_ACTIONS_AX,
             APP_ROUTE_POSTS_AX,
             APP_JOB_DIGEST_AX,
+            APP_PUBLIC_FAVICON_SVG,
+            None,
         ),
         AppTemplate::Site => (
             SITE_APP_README,
@@ -78,10 +86,12 @@ pub fn template_files(
             SITE_APP_POSTS_ACTIONS_AX,
             SITE_APP_ROUTE_POSTS_AX,
             SITE_APP_JOB_DIGEST_AX,
+            SITE_PUBLIC_FAVICON_SVG,
+            Some(SITE_PUBLIC_BRAND_MARK_SVG),
         ),
     };
 
-    vec![
+    let mut files = vec![
         TemplateFile {
             relative_path: "Cargo.toml",
             contents: apply_vars(APP_CARGO_TOML, &vars),
@@ -139,6 +149,10 @@ pub fn template_files(
             contents: apply_vars(job_digest_ax, &vars),
         },
         TemplateFile {
+            relative_path: "public/favicon.svg",
+            contents: apply_vars(favicon_svg, &vars),
+        },
+        TemplateFile {
             relative_path: "README.md",
             contents: apply_vars(readme, &vars),
         },
@@ -150,7 +164,16 @@ pub fn template_files(
             relative_path: ".gitignore",
             contents: apply_vars(APP_GITIGNORE, &vars),
         },
-    ]
+    ];
+
+    if let Some(brand_mark_svg) = brand_mark_svg {
+        files.push(TemplateFile {
+            relative_path: "public/brand-mark.svg",
+            contents: apply_vars(brand_mark_svg, &vars),
+        });
+    }
+
+    files
 }
 
 fn apply_vars(source: &str, vars: &[(&str, &str)]) -> String {

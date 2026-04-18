@@ -69,6 +69,11 @@ struct ResolvedRoute {
     layout_paths: Vec<PathBuf>,
 }
 
+struct StaticAsset {
+    content_type: &'static str,
+    body: Vec<u8>,
+}
+
 pub fn main_entry() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -249,6 +254,16 @@ fn handle_connection(mut stream: TcpStream, root: &Path) -> Result<()> {
         return Ok(());
     }
 
+    if let Some(asset) = load_public_asset(root, target)? {
+        write_response(
+            &mut stream,
+            "200 OK",
+            asset.content_type,
+            &asset.body,
+        )?;
+        return Ok(());
+    }
+
     if target == "/favicon.ico" {
         write_response(
             &mut stream,
@@ -282,6 +297,16 @@ fn handle_connection(mut stream: TcpStream, root: &Path) -> Result<()> {
     }
 
     let Some(route) = resolve_route(root, target)? else {
+        if looks_like_asset_request(target) {
+            write_response(
+                &mut stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"asset not found",
+            )?;
+            return Ok(());
+        }
+
         let html = format!(
             "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx 404</title></head><body><h1>Route not found</h1><p>No <code>page.ax</code> matched <code>{}</code>.</p></body></html>",
             html_escape(target)
@@ -304,6 +329,30 @@ fn handle_connection(mut stream: TcpStream, root: &Path) -> Result<()> {
         html.as_bytes(),
     )?;
     Ok(())
+}
+
+fn load_public_asset(root: &Path, request_path: &str) -> Result<Option<StaticAsset>> {
+    let normalized = normalize_request_path(request_path)?;
+    let segments = path_segments(&normalized);
+    if segments.is_empty() {
+        return Ok(None);
+    }
+
+    let asset_path = segments
+        .iter()
+        .fold(root.join("public"), |current, segment| current.join(segment));
+
+    if !asset_path.exists() || !asset_path.is_file() {
+        return Ok(None);
+    }
+
+    let body = fs::read(&asset_path)
+        .with_context(|| format!("failed to read asset '{}'", asset_path.display()))?;
+
+    Ok(Some(StaticAsset {
+        content_type: content_type_for(&asset_path),
+        body,
+    }))
 }
 
 fn resolve_route(root: &Path, request_path: &str) -> Result<Option<ResolvedRoute>> {
@@ -527,6 +576,31 @@ fn html_escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+fn looks_like_asset_request(request_path: &str) -> bool {
+    request_path
+        .split(['?', '#'])
+        .next()
+        .and_then(|path| path.rsplit('/').next())
+        .is_some_and(|segment| segment.contains('.'))
+}
+
+fn content_type_for(path: &Path) -> &'static str {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("html") => "text/html; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +657,32 @@ mod tests {
 
         assert!(html.contains("/__axonyx/version"));
         assert!(html.contains("window.location.reload"));
+    }
+
+    #[test]
+    fn loads_public_asset_from_public_directory() {
+        let root = make_temp_dir("public");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+        fs::write(root.join("public/logo.svg"), "<svg></svg>").expect("asset should write");
+
+        let asset = load_public_asset(&root, "/logo.svg")
+            .expect("asset lookup should work")
+            .expect("asset should exist");
+
+        assert_eq!(asset.content_type, "image/svg+xml");
+        assert_eq!(asset.body, b"<svg></svg>");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn missing_public_asset_returns_none() {
+        let root = make_temp_dir("missing-public");
+
+        let asset = load_public_asset(&root, "/missing.svg").expect("asset lookup should work");
+
+        assert!(asset.is_none());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 }
