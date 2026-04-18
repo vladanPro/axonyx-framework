@@ -12,6 +12,8 @@ This starter is oriented around a marketing or presentation site shape with a st
 cargo run
 ```
 
+This generates a first page preview at `target/axonyx-preview.html`.
+
 ## Starter Shape
 
 - landing-focused `app/page.ax`

@@ -3,9 +3,17 @@ name = "axonyx-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository = "https://github.com/vladanPro/axonyx-runtime"
+homepage = "https://github.com/vladanPro/axonyx-runtime"
+documentation = "https://github.com/vladanPro/axonyx-runtime"
+rust-version = "1.82"
+description = "Runtime contract and execution layer for Axonyx applications"
+readme = "../../README.md"
+keywords = ["axonyx", "runtime", "ui", "rust", "framework"]
+categories = ["web-programming", "gui"]
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-axonyx-core = { path = "../axonyx-core" }
+axonyx-core = { version = "0.1.0", path = "../axonyx-core" }

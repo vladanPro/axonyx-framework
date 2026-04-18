@@ -12,6 +12,14 @@ If you selected the registry runtime source before the package is published, swi
 cargo run
 ```
 
+This generates a first page preview at `target/axonyx-preview.html`.
+
+Use it as the smallest "Hello Axonyx" loop:
+
+1. edit `app/page.ax`
+2. run `cargo run`
+3. refresh `target/axonyx-preview.html`
+
 ## Env
 
 Copy `.env.example` to `.env` and set your runtime values.

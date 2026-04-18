@@ -3,8 +3,16 @@ name = "axonyx-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository = "https://github.com/vladanPro/axonyx-runtime"
+homepage = "https://github.com/vladanPro/axonyx-runtime"
+documentation = "https://github.com/vladanPro/axonyx-runtime"
+rust-version = "1.82"
+description = "Core parser, lowering, query model, and SQL draft compiler for Axonyx"
+readme = "../../README.md"
+keywords = ["axonyx", "parser", "compiler", "ui", "rust"]
+categories = ["compilers", "web-programming"]
 
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-axonyx-macros = { path = "../axonyx-macros" }
+axonyx-macros = { version = "0.1.0", path = "../axonyx-macros" }
