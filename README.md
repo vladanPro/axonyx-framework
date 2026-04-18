@@ -71,7 +71,28 @@ cargo run --manifest-path H:/CODE/axonyx/axonyx-framework/Cargo.toml -p cargo-ax
 
 This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonyx.toml`.
 
-### 1b) Create a new Axonyx app against the standalone runtime repo
+### 1b) Build generated backend output from `.ax` sources
+
+From an app root:
+
+```bash
+cargo ax build
+```
+
+This scans:
+
+- `app/**/loader.ax`
+- `app/**/actions.ax`
+- `routes/**/*.ax`
+- `jobs/**/*.ax`
+
+and regenerates:
+
+```text
+src/generated/backend.rs
+```
+
+### 1c) Create a new Axonyx app against the standalone runtime repo
 
 ```bash
 cargo run -p create-axonyx -- my-app --yes
@@ -79,7 +100,7 @@ cargo run -p create-axonyx -- my-app --yes
 
 Use `--runtime-source path` only when contributing to Axonyx itself from the framework workspace.
 
-### 1c) Create a new Axonyx app against the future registry release
+### 1d) Create a new Axonyx app against the future registry release
 
 ```bash
 cargo run -p create-axonyx -- my-app --yes --runtime-source registry
@@ -92,6 +113,12 @@ Use the registry mode once `axonyx-runtime` is published. Until then, prefer `pa
 ```bash
 cd my-app
 cargo run
+```
+
+For route-aware local serving with an automatic backend compile at startup:
+
+```bash
+cargo ax run dev
 ```
 
 ## Planned global CLI flow

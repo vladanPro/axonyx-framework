@@ -20,6 +20,22 @@ cd my-app
 cargo run
 ```
 
+If `cargo-axonyx` is installed, the first framework-shaped local loop is:
+
+```bash
+cargo ax build
+cargo ax run dev
+```
+
+`cargo ax build` regenerates `src/generated/backend.rs` from:
+
+- `app/**/loader.ax`
+- `app/**/actions.ax`
+- `routes/**/*.ax`
+- `jobs/**/*.ax`
+
+`cargo ax run dev` now runs that backend sync once before starting the local route-aware dev server.
+
 ## Runtime Source Defaults
 
 The default scaffold flow now uses `--runtime-source git`.
