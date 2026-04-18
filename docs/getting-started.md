@@ -11,6 +11,8 @@ git submodule update --init --recursive
 cargo run -p create-axonyx -- my-app --yes
 ```
 
+By default the generated app uses the shared `axonyx-runtime` Git repository, so regular users do not need the framework submodule setup after scaffolding.
+
 Then:
 
 ```bash
@@ -18,14 +20,19 @@ cd my-app
 cargo run
 ```
 
-## Recommended Early-Adopter Flow
+## Runtime Source Defaults
 
-The default `path` flow now resolves the checked out submodule workspace at `H:/CODE/axonyx/axonyx-framework/vendor/axonyx-runtime/crates/axonyx-runtime`.
+The default scaffold flow now uses `--runtime-source git`.
 
-If you want your generated app to track the standalone runtime repository:
+- `git`
+  - best default for current public use
+- `path`
+  - best for Axonyx contributors working inside the framework repo
+- `registry`
+  - best once the runtime crates are published
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes --runtime-source git
+cargo run -p create-axonyx -- my-app --yes
 ```
 
 ## First Useful Variants
@@ -39,7 +46,7 @@ cargo run -p create-axonyx -- my-app --yes --template minimal
 Site starter:
 
 ```bash
-cargo run -p create-axonyx -- my-site --yes --template site --runtime-source git
+cargo run -p create-axonyx -- my-site --yes --template site
 ```
 
 ## What You Get

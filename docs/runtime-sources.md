@@ -1,8 +1,22 @@
 # Runtime Sources
 
-Generated Axonyx apps can currently point at the runtime in three different ways.
+Generated Axonyx apps can currently point at the runtime in three different ways. The default generated flow is `git`.
 
-## 1. `path`
+## 1. `git`
+
+Best for current public use.
+
+```bash
+cargo run -p create-axonyx -- my-app --yes
+```
+
+This points the generated app at:
+
+```text
+https://github.com/vladanPro/axonyx-runtime
+```
+
+## 2. `path`
 
 Best for local framework development.
 
@@ -12,20 +26,6 @@ cargo run -p create-axonyx -- my-app --yes --runtime-source path
 
 This keeps iteration fast while the framework and runtime are evolving together.
 The generated dependency points at the checked out `vendor/axonyx-runtime` submodule by default, with a sibling workspace fallback during migration.
-
-## 2. `git`
-
-Best for early adopters or cross-repo development.
-
-```bash
-cargo run -p create-axonyx -- my-app --yes --runtime-source git
-```
-
-This points the generated app at:
-
-```text
-https://github.com/vladanPro/axonyx-runtime
-```
 
 ## 3. `registry`
 

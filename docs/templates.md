@@ -28,11 +28,11 @@ Good for:
 ## Example Commands
 
 ```bash
-cargo run -p create-axonyx -- demo-minimal --yes --template minimal --runtime-source git
+cargo run -p create-axonyx -- demo-minimal --yes --template minimal
 ```
 
 ```bash
-cargo run -p create-axonyx -- demo-site --yes --template site --runtime-source git
+cargo run -p create-axonyx -- demo-site --yes --template site
 ```
 
 ## Planned Templates

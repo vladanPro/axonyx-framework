@@ -43,6 +43,8 @@ git submodule update --init --recursive
 cargo run -p create-axonyx -- my-app --yes
 ```
 
+The default runtime source is now `git`, so generated apps work without needing the framework repo or its submodule layout.
+
 Available templates today:
 
 - `minimal`
@@ -51,7 +53,7 @@ Available templates today:
 Example:
 
 ```bash
-cargo run -p create-axonyx -- my-site --yes --template site --runtime-source git
+cargo run -p create-axonyx -- my-site --yes --template site
 ```
 
 ### 1a) Add a docs module into an existing Axonyx app
@@ -67,8 +69,10 @@ This first proof-of-concept adds an `app/docs/...` route tree and enables the mo
 ### 1b) Create a new Axonyx app against the standalone runtime repo
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes --runtime-source git
+cargo run -p create-axonyx -- my-app --yes
 ```
+
+Use `--runtime-source path` only when contributing to Axonyx itself from the framework workspace.
 
 ### 1c) Create a new Axonyx app against the future registry release
 

@@ -35,8 +35,8 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = AppTemplate::Minimal)]
     template: AppTemplate,
 
-    /// Where the generated app should load axonyx-runtime from
-    #[arg(long, value_enum, default_value_t = RuntimeSource::Path)]
+    /// Where the generated app should load axonyx-runtime from (default: git for public use)
+    #[arg(long, value_enum, default_value_t = RuntimeSource::Git)]
     runtime_source: RuntimeSource,
 
     /// Git URL used when --runtime-source git is selected
@@ -334,9 +334,9 @@ fn runtime_dependency_spec(cli: &Cli) -> Result<String> {
 
 fn runtime_source_note(cli: &Cli) -> String {
     match cli.runtime_source {
-        RuntimeSource::Path => "This scaffold links against the local `axonyx-runtime` workspace path. By default that comes from the `vendor/axonyx-runtime` git submodule, with a sibling workspace fallback for local migration.".to_string(),
+        RuntimeSource::Path => "This scaffold links against the local `axonyx-runtime` workspace path. Use this mode when contributing to Axonyx itself, typically through the `vendor/axonyx-runtime` git submodule in the framework repo.".to_string(),
         RuntimeSource::Git => format!(
-            "This scaffold links against the shared `axonyx-runtime` Git repository at `{}` so the app can track the standalone runtime workspace outside the local monorepo.",
+            "This scaffold links against the shared `axonyx-runtime` Git repository at `{}`. This is the recommended public setup until the first crates.io release is available.",
             cli.runtime_git_url.trim()
         ),
         RuntimeSource::Registry => format!(
