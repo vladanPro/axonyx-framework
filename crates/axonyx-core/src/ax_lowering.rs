@@ -219,6 +219,10 @@ fn lower_component(
             push_remaining_props(&mut attrs, props);
             element_with_attrs("button", attrs, children)
         }
+        tag if is_native_html_tag(tag) => {
+            push_native_props(&mut attrs, props);
+            element_with_attrs(leak_tag(tag.to_string()), attrs, children)
+        }
         other => {
             attrs.insert(0, attr("data-component", other.to_string()));
             push_remaining_props(&mut attrs, props);
@@ -354,6 +358,25 @@ fn push_remaining_props(attrs: &mut Vec<Attribute>, props: BTreeMap<String, AxVa
     for (name, value) in props {
         attrs.push(attr_boxed(format!("data-{name}"), value.as_string()));
     }
+}
+
+fn push_native_props(attrs: &mut Vec<Attribute>, props: BTreeMap<String, AxValue>) {
+    for (name, value) in props {
+        attrs.push(attr_boxed(name, value.as_string()));
+    }
+}
+
+fn is_native_html_tag(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+
+    chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 fn attr_boxed(name: String, value: String) -> Attribute {
@@ -514,6 +537,59 @@ page Home
                                 ],
                             },
                         ],
+                    }],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn lowers_native_html_tags_with_real_attributes() {
+        let document = parse_ax(
+            r#"
+page Home
+  section class: "hero-shell"
+    a href: "/docs", target: "_blank" -> "Read docs"
+"#,
+        )
+        .expect("document should parse");
+
+        let resolver = |_: &[String], _: &[AxValue]| -> Option<AxValue> { None };
+        let node = lower_document(&document, &resolver).expect("document should lower");
+
+        assert_eq!(
+            node,
+            AxNode::Element {
+                tag: "main",
+                attrs: vec![
+                    Attribute {
+                        name: "data-ax-page",
+                        value: "Home".to_string(),
+                    },
+                    Attribute {
+                        name: "data-ax-root",
+                        value: "page".to_string(),
+                    },
+                ],
+                children: vec![AxNode::Element {
+                    tag: "section",
+                    attrs: vec![Attribute {
+                        name: "class",
+                        value: "hero-shell".to_string(),
+                    }],
+                    children: vec![AxNode::Element {
+                        tag: "a",
+                        attrs: vec![
+                            Attribute {
+                                name: "href",
+                                value: "/docs".to_string(),
+                            },
+                            Attribute {
+                                name: "target",
+                                value: "_blank".to_string(),
+                            },
+                        ],
+                        children: vec![AxNode::Text("Read docs".to_string())],
                     }],
                 }],
             }

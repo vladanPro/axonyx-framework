@@ -250,7 +250,7 @@ fn parse_component_line(input: &str, line: usize) -> Result<AxComponent, AxParse
     let (head, inline) = split_inline_arrow(input);
     let (name, rest) = split_first_token(head).ok_or(AxParseError::InvalidComponent { line })?;
 
-    if name.is_empty() || !name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+    if name.is_empty() || !is_component_name(name) {
         return Err(AxParseError::InvalidComponent { line });
     }
 
@@ -278,6 +278,23 @@ fn parse_component_line(input: &str, line: usize) -> Result<AxComponent, AxParse
     }
 
     Ok(component)
+}
+
+fn is_component_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+
+    if first.is_ascii_uppercase() {
+        return chars.all(|ch| ch.is_ascii_alphanumeric());
+    }
+
+    chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 fn split_inline_arrow(input: &str) -> (&str, Option<&str>) {
@@ -524,6 +541,35 @@ page Home
         assert_eq!(button.props.len(), 2);
         assert_eq!(button.style.recipe, Some(AxExpr::string("hero-cta")));
         assert_eq!(button.style.class, Some(AxExpr::string("w-full")));
+    }
+
+    #[test]
+    fn parses_native_html_tag_component() {
+        let input = r#"
+page Home
+  section class: "hero-shell"
+    a href: "/docs", target: "_blank" -> "Read docs"
+"#;
+
+        let document = parse_ax(input).expect("document should parse");
+
+        let AxStatement::Component(section) = &document.page.body[0] else {
+            panic!("expected section component");
+        };
+
+        assert_eq!(section.name, "section");
+        assert_eq!(section.style.class, Some(AxExpr::string("hero-shell")));
+
+        let AxBody::Block(body) = &section.body else {
+            panic!("expected block body");
+        };
+
+        let AxStatement::Component(anchor) = &body[0] else {
+            panic!("expected anchor component");
+        };
+
+        assert_eq!(anchor.name, "a");
+        assert_eq!(anchor.props.len(), 2);
     }
 
     #[test]
