@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
+use axonyx_core::ax_parser_auto_prelude::parse_ax_auto;
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
-    preview_ax_route_with_request_context, AxPreviewHttpResponse, AxPreviewStore,
+    preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -485,7 +486,7 @@ fn handle_connection(mut stream: TcpStream, state: &DevServerState) -> Result<()
             return Ok(());
         };
 
-        let version = route_version(&route)?;
+        let version = route_version(&state.root, &route)?;
         write_response(
             &mut stream,
             "200 OK",
@@ -972,8 +973,9 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
         .preview_store
         .lock()
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+    let import_resolver = |source: &str| load_preview_import_source(&state.root, source);
 
-    preview_ax_route_with_request_context(
+    preview_ax_route_with_request_context_and_imports(
         &layout_refs,
         &loader_refs,
         &action_refs,
@@ -981,6 +983,7 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
         &route.request_target,
         &route.params,
         &store,
+        &import_resolver,
     )
     .with_context(|| {
         format!(
@@ -991,13 +994,14 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
     })
 }
 
-fn route_version(route: &ResolvedRoute) -> Result<String> {
+fn route_version(root: &Path, route: &ResolvedRoute) -> Result<String> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut visited = std::collections::BTreeSet::new();
     route.request_path.hash(&mut hasher);
 
-    hash_file(&route.page_path, &mut hasher)?;
+    hash_ax_file_with_imports(root, &route.page_path, &mut hasher, &mut visited)?;
     for path in &route.layout_paths {
-        hash_file(path, &mut hasher)?;
+        hash_ax_file_with_imports(root, path, &mut hasher, &mut visited)?;
     }
     if let Some(path) = &route.loader_path {
         hash_file(path, &mut hasher)?;
@@ -1015,6 +1019,104 @@ fn hash_file(path: &Path, hasher: &mut impl Hasher) -> Result<()> {
         .with_context(|| format!("failed to read '{}' for hashing", path.display()))?;
     contents.hash(hasher);
     Ok(())
+}
+
+fn hash_ax_file_with_imports(
+    root: &Path,
+    path: &Path,
+    hasher: &mut impl Hasher,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+
+    hash_file(path, hasher)?;
+
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let Ok(document) = parse_ax_auto(&source) else {
+        return Ok(());
+    };
+
+    for import_decl in document.imports {
+        if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
+            if import_path.exists() {
+                hash_ax_file_with_imports(root, &import_path, hasher, visited)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn load_preview_import_source(root: &Path, source: &str) -> Option<String> {
+    let path = resolve_preview_import_path(root, source)?;
+    fs::read_to_string(path).ok()
+}
+
+fn resolve_preview_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+    resolve_app_import_path(root, source).or_else(|| resolve_axonyx_ui_import_path(root, source))
+}
+
+fn resolve_app_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+    let relative = source.strip_prefix("@/")?;
+    let mut path = root.join("app");
+
+    for segment in relative.split('/') {
+        if !segment.is_empty() {
+            path.push(segment);
+        }
+    }
+
+    if path.extension().is_none() {
+        path.set_extension("ax");
+    }
+
+    Some(path)
+}
+
+fn resolve_axonyx_ui_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+    let relative = source.strip_prefix("@axonyx/ui/")?;
+    for base in axonyx_ui_import_bases(root) {
+        let mut path = base;
+        for segment in relative.split('/') {
+            if !segment.is_empty() {
+                path.push(segment);
+            }
+        }
+
+        if path.extension().is_none() {
+            path.set_extension("ax");
+        }
+
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
+fn axonyx_ui_import_bases(root: &Path) -> Vec<PathBuf> {
+    let mut bases = Vec::new();
+
+    bases.push(root.join("vendor").join("axonyx-ui").join("src").join("ax"));
+
+    if let Some(workspace_root) = root.parent() {
+        bases.push(
+            workspace_root
+                .join("axonyx-framework")
+                .join("vendor")
+                .join("axonyx-ui")
+                .join("src")
+                .join("ax"),
+        );
+        bases.push(workspace_root.join("axonyx-ui").join("src").join("ax"));
+    }
+
+    bases
 }
 
 fn inject_dev_client(html: &str, request_path: &str) -> String {
@@ -1530,5 +1632,188 @@ mod tests {
         assert!(!html.contains("Hello Axonyx"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn renders_page_with_imported_app_component() {
+        let root = make_temp_dir("imported-app-component");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/components/site-card.ax"),
+            r#"
+page SiteCard
+<Card title={title}>
+  <Slot />
+</Card>
+"#,
+        )
+        .expect("component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { SiteCard } from "@/components/site-card.ax"
+
+page Home
+<SiteCard title="Hello from import">
+  <Copy>Inner body</Copy>
+</SiteCard>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html =
+            render_route_html(&state, &route).expect("imported component route should render");
+
+        assert!(html.contains("Hello from import"));
+        assert!(html.contains("Inner body"));
+        assert!(!html.contains("data-import-source"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn route_version_changes_when_imported_component_changes() {
+        let root = make_temp_dir("route-version-imports");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/components/site-card.ax"),
+            r#"
+page SiteCard
+<Card title="Initial" />
+"#,
+        )
+        .expect("component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { SiteCard } from "@/components/site-card.ax"
+
+page Home
+<SiteCard />
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let before = route_version(&root, &route).expect("initial version should hash");
+
+        fs::write(
+            root.join("app/components/site-card.ax"),
+            r#"
+page SiteCard
+<Card title="Updated" />
+"#,
+        )
+        .expect("component should update");
+
+        let after = route_version(&root, &route).expect("updated version should hash");
+        assert_ne!(before, after);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn renders_page_with_imported_axonyx_ui_component() {
+        let workspace = make_temp_dir("ui-package-workspace");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/ax/foundry")).expect("ui ax dir should exist");
+        fs::write(
+            ui_root.join("src/ax/foundry/SectionCard.ax"),
+            r#"
+page SectionCard
+<Card title={title}>
+  <Slot />
+</Card>
+"#,
+        )
+        .expect("ui component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+
+<SectionCard title="Imported from UI">
+  <Copy>Silver contract</Copy>
+</SectionCard>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html =
+            render_route_html(&state, &route).expect("package component route should render");
+
+        assert!(html.contains("Imported from UI"));
+        assert!(html.contains("Silver contract"));
+        assert!(!html.contains("data-import-source"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn route_version_changes_when_imported_axonyx_ui_component_changes() {
+        let workspace = make_temp_dir("ui-package-version");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/ax/foundry")).expect("ui ax dir should exist");
+        fs::write(
+            ui_root.join("src/ax/foundry/SectionCard.ax"),
+            r#"
+page SectionCard
+<Card title="Version A" />
+"#,
+        )
+        .expect("ui component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+<SectionCard />
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let before = route_version(&root, &route).expect("initial version should hash");
+
+        fs::write(
+            ui_root.join("src/ax/foundry/SectionCard.ax"),
+            r#"
+page SectionCard
+<Card title="Version B" />
+"#,
+        )
+        .expect("ui component should update");
+
+        let after = route_version(&root, &route).expect("updated version should hash");
+        assert_ne!(before, after);
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
 }

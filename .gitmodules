@@ -1,3 +1,6 @@
 [submodule "vendor/axonyx-runtime"]
 	path = vendor/axonyx-runtime
 	url = https://github.com/vladanPro/axonyx-runtime
+[submodule "vendor/axonyx-ui"]
+	path = vendor/axonyx-ui
+	url = https://github.com/vladanPro/axonyx-ui
