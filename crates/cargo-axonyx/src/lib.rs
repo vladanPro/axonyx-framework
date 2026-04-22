@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ const DOCS_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
+const AXONYX_UI_GIT_URL: &str = "https://github.com/vladanPro/axonyx-ui";
 
 #[derive(Debug, Parser)]
 #[command(name = "ax")]
@@ -70,6 +72,7 @@ enum RunCommands {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModuleKind {
     Docs,
+    Ui,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +181,10 @@ fn add_module(module: ModuleKind) -> Result<()> {
             scaffold_docs_module(&root)?;
             enable_module(&axonyx_toml, "docs")?;
             println!("Added docs module.");
+        }
+        ModuleKind::Ui => {
+            add_ui_module(&root, &axonyx_toml)?;
+            println!("Added ui module.");
         }
     }
 
@@ -385,6 +392,259 @@ fn scaffold_docs_module(root: &Path) -> Result<()> {
     write_if_missing(root, "app/docs/reference/page.ax", DOCS_REFERENCE_AX)?;
     write_if_missing(root, "app/docs/examples/page.ax", DOCS_EXAMPLES_AX)?;
     Ok(())
+}
+
+fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
+    let vendor_root = root.join("vendor").join("axonyx-ui");
+    let installed = ensure_ui_vendor(root, &vendor_root)?;
+    sync_ui_css_snapshot(&vendor_root, root)?;
+    ensure_ui_layout_setup(root)?;
+    enable_module(&axonyx_toml.to_path_buf(), "ui")?;
+
+    if installed {
+        println!("Vendored axonyx-ui into '{}'.", vendor_root.display());
+    } else {
+        println!(
+            "axonyx-ui was already present at '{}'.",
+            vendor_root.display()
+        );
+    }
+
+    println!("Synced Foundry CSS into 'public/css/axonyx-ui'.");
+    println!("Updated app/layout.ax with silver theme and stylesheet link when needed.");
+    println!("You can now import components such as:");
+    println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard.ax\"");
+    Ok(())
+}
+
+fn ensure_ui_vendor(root: &Path, vendor_root: &Path) -> Result<bool> {
+    if vendor_root.exists() {
+        return Ok(false);
+    }
+
+    if let Some(source_root) = resolve_local_ui_source(root) {
+        copy_dir_all_filtered(&source_root, vendor_root, |path| {
+            path.file_name().is_some_and(|name| name == ".git")
+        })?;
+        return Ok(true);
+    }
+
+    if let Some(parent) = vendor_root.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create '{}'", parent.display()))?;
+    }
+
+    let status = Command::new("git")
+        .args(["clone", "--depth", "1", AXONYX_UI_GIT_URL])
+        .arg(vendor_root)
+        .status()
+        .context("failed to launch git while vendoring axonyx-ui")?;
+
+    if !status.success() {
+        bail!(
+            "failed to clone axonyx-ui from '{AXONYX_UI_GIT_URL}' into '{}'",
+            vendor_root.display()
+        );
+    }
+
+    let git_dir = vendor_root.join(".git");
+    if git_dir.exists() {
+        fs::remove_dir_all(&git_dir)
+            .with_context(|| format!("failed to clean '{}'", git_dir.display()))?;
+    }
+
+    Ok(true)
+}
+
+fn resolve_local_ui_source(root: &Path) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("AXONYX_UI_SOURCE") {
+        let candidate = PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let mut candidates = vec![
+        root.join("vendor").join("axonyx-ui"),
+        root.join("..")
+            .join("axonyx-framework")
+            .join("vendor")
+            .join("axonyx-ui"),
+        root.join("..").join("axonyx-ui"),
+    ];
+
+    if let Some(parent) = root.parent() {
+        candidates.push(
+            parent
+                .join("axonyx-framework")
+                .join("vendor")
+                .join("axonyx-ui"),
+        );
+        candidates.push(parent.join("axonyx-ui"));
+    }
+
+    candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+fn copy_dir_all_filtered(
+    source: &Path,
+    destination: &Path,
+    skip: impl Fn(&Path) -> bool + Copy,
+) -> Result<()> {
+    if skip(source) {
+        return Ok(());
+    }
+
+    if source.is_dir() {
+        fs::create_dir_all(destination)
+            .with_context(|| format!("failed to create '{}'", destination.display()))?;
+
+        for entry in fs::read_dir(source)
+            .with_context(|| format!("failed to read '{}'", source.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to read entry in '{}'", source.display()))?;
+            let path = entry.path();
+            let target = destination.join(entry.file_name());
+            copy_dir_all_filtered(&path, &target, skip)?;
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create '{}'", parent.display()))?;
+    }
+
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "failed to copy '{}' to '{}'",
+            source.display(),
+            destination.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn sync_ui_css_snapshot(vendor_root: &Path, app_root: &Path) -> Result<()> {
+    let css_source = vendor_root.join("src").join("css");
+    if !css_source.exists() {
+        bail!(
+            "vendored axonyx-ui did not contain '{}'",
+            css_source.display()
+        );
+    }
+
+    let css_target = app_root.join("public").join("css").join("axonyx-ui");
+    copy_dir_all_filtered(&css_source, &css_target, |_| false)?;
+    Ok(())
+}
+
+fn ensure_ui_layout_setup(root: &Path) -> Result<()> {
+    let layout_path = root.join("app").join("layout.ax");
+    if !layout_path.exists() {
+        return Ok(());
+    }
+
+    let source = fs::read_to_string(&layout_path)
+        .with_context(|| format!("failed to read '{}'", layout_path.display()))?;
+    let updated = if source.contains("<Head>") {
+        ensure_ui_layout_setup_jsx(&source)
+    } else {
+        ensure_ui_layout_setup_v1(&source)
+    };
+
+    if updated != source {
+        fs::write(&layout_path, updated)
+            .with_context(|| format!("failed to write '{}'", layout_path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn ensure_ui_layout_setup_jsx(source: &str) -> String {
+    const THEME_TAG: &str = "<Theme>silver</Theme>";
+    const STYLESHEET_TAG: &str = r#"<Link rel="stylesheet" href="/css/axonyx-ui/index.css" />"#;
+
+    let mut updated = source.to_string();
+
+    if updated.contains("<Head>") {
+        if !updated.contains(THEME_TAG) {
+            updated = updated.replacen("<Head>", &format!("<Head>\n  {THEME_TAG}"), 1);
+        }
+
+        if !updated.contains("/css/axonyx-ui/index.css") {
+            updated = updated.replacen("</Head>", &format!("  {STYLESHEET_TAG}\n</Head>"), 1);
+        }
+
+        return updated;
+    }
+
+    let mut lines = source.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let page_index = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("page "))
+        .unwrap_or(0);
+
+    let mut head_block = vec![
+        String::new(),
+        "<Head>".to_string(),
+        format!("  {THEME_TAG}"),
+        format!("  {STYLESHEET_TAG}"),
+        "</Head>".to_string(),
+    ];
+
+    lines.splice(page_index + 1..page_index + 1, head_block.drain(..));
+    lines.join("\n")
+}
+
+fn ensure_ui_layout_setup_v1(source: &str) -> String {
+    let mut lines = source.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let Some(page_index) = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("page "))
+    else {
+        return source.to_string();
+    };
+
+    let has_theme = lines
+        .iter()
+        .any(|line| line.trim() == "theme \"silver\"" || line.trim_start().starts_with("theme "));
+    let has_stylesheet = lines
+        .iter()
+        .any(|line| line.contains("/css/axonyx-ui/index.css"));
+
+    if has_theme && has_stylesheet {
+        return source.to_string();
+    }
+
+    let mut insert_at = page_index + 1;
+    while insert_at < lines.len() {
+        let trimmed = lines[insert_at].trim_start();
+        if lines[insert_at].starts_with("  ")
+            && matches!(
+                trimmed.split_whitespace().next(),
+                Some("title" | "meta" | "link" | "script" | "theme")
+            )
+        {
+            insert_at += 1;
+            continue;
+        }
+        break;
+    }
+
+    let mut to_insert = Vec::new();
+    if !has_theme {
+        to_insert.push("  theme \"silver\"".to_string());
+    }
+    if !has_stylesheet {
+        to_insert
+            .push("  link rel: \"stylesheet\", href: \"/css/axonyx-ui/index.css\"".to_string());
+    }
+
+    lines.splice(insert_at..insert_at, to_insert);
+    lines.join("\n")
 }
 
 fn write_if_missing(root: &Path, relative: &str, contents: &str) -> Result<()> {
@@ -1516,6 +1776,81 @@ mod tests {
         let cli = Cli::try_parse_from(normalized).expect("cargo ax args should parse");
 
         assert!(matches!(cli.command, Commands::Run(_)));
+    }
+
+    #[test]
+    fn add_ui_module_vendors_source_syncs_css_and_updates_layout() {
+        let workspace = make_temp_dir("add-ui");
+        let app_root = workspace.join("demo-app");
+        let ui_root = workspace.join("axonyx-ui");
+
+        fs::create_dir_all(app_root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/ax/foundry")).expect("ui ax dir should exist");
+        fs::create_dir_all(ui_root.join("src/css")).expect("ui css dir should exist");
+        fs::write(
+            app_root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[modules]\nenabled = []\n",
+        )
+        .expect("config should write");
+        fs::write(
+            app_root.join("app/layout.ax"),
+            "page RootLayout\n  title \"Demo\"\n  Slot\n",
+        )
+        .expect("layout should write");
+        fs::write(ui_root.join("README.md"), "# Axonyx UI\n").expect("ui readme should write");
+        fs::write(
+            ui_root.join("src/ax/foundry/SectionCard.ax"),
+            "page SectionCard\n  Card title: title\n    Slot\n",
+        )
+        .expect("ui component should write");
+        fs::write(
+            ui_root.join("src/css/index.css"),
+            "@import './tokens.css';\n",
+        )
+        .expect("ui index css should write");
+        fs::write(
+            ui_root.join("src/css/tokens.css"),
+            ":root { --ax-text: #fff; }\n",
+        )
+        .expect("ui tokens css should write");
+
+        add_ui_module(&app_root, &app_root.join("Axonyx.toml")).expect("ui module should add");
+
+        assert!(app_root
+            .join("vendor/axonyx-ui/src/ax/foundry/SectionCard.ax")
+            .exists());
+        assert!(app_root.join("public/css/axonyx-ui/index.css").exists());
+        assert!(app_root.join("public/css/axonyx-ui/tokens.css").exists());
+
+        let axonyx_toml =
+            fs::read_to_string(app_root.join("Axonyx.toml")).expect("config should read back");
+        assert!(axonyx_toml.contains("\"ui\""));
+
+        let layout =
+            fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read back");
+        assert!(layout.contains("theme \"silver\""));
+        assert!(layout.contains("/css/axonyx-ui/index.css"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn jsx_layout_setup_adds_theme_and_stylesheet_inside_head() {
+        let source = r#"page SiteLayout
+
+<Head>
+  <Title>Demo</Title>
+</Head>
+
+<Container max="xl">
+  <Slot />
+</Container>"#;
+
+        let updated = ensure_ui_layout_setup_jsx(source);
+
+        assert!(updated.contains("<Theme>silver</Theme>"));
+        assert!(updated.contains(r#"<Link rel="stylesheet" href="/css/axonyx-ui/index.css" />"#));
+        assert!(updated.contains("<Title>Demo</Title>"));
     }
 
     #[test]
