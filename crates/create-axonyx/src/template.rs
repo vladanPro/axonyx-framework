@@ -65,6 +65,13 @@ pub fn template_files(
         ("{{AXONYX_RUNTIME_SOURCE_NOTE}}", runtime_source_note),
     ];
 
+    let axonyx_toml = match template {
+        AppTemplate::Minimal => APP_AXONYX_TOML.to_string(),
+        AppTemplate::Site | AppTemplate::Docs => {
+            APP_AXONYX_TOML.replace("enabled = []", "enabled = [\"ui\"]")
+        }
+    };
+
     let mut files = vec![
         TemplateFile {
             relative_path: "Cargo.toml",
@@ -92,7 +99,7 @@ pub fn template_files(
         },
         TemplateFile {
             relative_path: "Axonyx.toml",
-            contents: apply_vars(APP_AXONYX_TOML, &vars),
+            contents: apply_vars(&axonyx_toml, &vars),
         },
         TemplateFile {
             relative_path: ".env.example",

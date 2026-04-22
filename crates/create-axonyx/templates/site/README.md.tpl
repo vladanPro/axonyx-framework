@@ -6,6 +6,8 @@ Generated with `create-axonyx` using the `site` template.
 
 This starter is oriented around a marketing or presentation site shape with a stronger landing page voice while keeping the same Axonyx runtime and backend authoring model.
 
+The `site` template already vendors `axonyx-ui` into `vendor/axonyx-ui`, syncs the Foundry CSS into `public/css/axonyx-ui`, and wires the `silver` theme in `app/layout.ax`.
+
 ## Run
 
 ```bash
@@ -28,6 +30,7 @@ That serves the current app routes locally with nested layout composition and de
 
 - landing-focused `app/page.ax`
 - featured posts section in `app/posts/page.ax`
+- reusable Foundry imports from `@axonyx/ui/...`
 - same backend route/loader/action/job draft structure as the minimal template
 
 ## Env

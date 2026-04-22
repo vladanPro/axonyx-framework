@@ -11,6 +11,7 @@ use clap::{Parser, ValueEnum};
 const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runtime";
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
 const DEFAULT_RUNTIME_VERSION: &str = "0.1.0";
+const DEFAULT_UI_GIT_URL: &str = "https://github.com/vladanPro/axonyx-ui";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonyx")]
@@ -167,8 +168,22 @@ fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
             .with_context(|| format!("failed to write '{}'", full_path.display()))?;
     }
 
+    if matches!(
+        template,
+        template::AppTemplate::Site | template::AppTemplate::Docs
+    ) {
+        install_template_ui(target_dir)?;
+    }
+
     compile_initial_backend(target_dir)?;
 
+    Ok(())
+}
+
+fn install_template_ui(target_dir: &Path) -> Result<()> {
+    let vendor_root = target_dir.join("vendor").join("axonyx-ui");
+    ensure_ui_vendor(&vendor_root)?;
+    sync_ui_css_snapshot(&vendor_root, target_dir)?;
     Ok(())
 }
 
@@ -349,6 +364,131 @@ fn runtime_source_note(cli: &Cli) -> String {
     }
 }
 
+fn ensure_ui_vendor(vendor_root: &Path) -> Result<()> {
+    if vendor_root.exists() {
+        return Ok(());
+    }
+
+    if let Some(source_root) = resolve_local_ui_source() {
+        copy_dir_all_filtered(&source_root, vendor_root, |path| {
+            path.file_name().is_some_and(|name| name == ".git")
+        })?;
+        return Ok(());
+    }
+
+    if let Some(parent) = vendor_root.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create '{}'", parent.display()))?;
+    }
+
+    let status = std::process::Command::new("git")
+        .args(["clone", "--depth", "1", DEFAULT_UI_GIT_URL])
+        .arg(vendor_root)
+        .status()
+        .context("failed to launch git while vendoring axonyx-ui")?;
+
+    if !status.success() {
+        bail!(
+            "failed to clone axonyx-ui from '{}' into '{}'",
+            DEFAULT_UI_GIT_URL,
+            vendor_root.display()
+        );
+    }
+
+    let git_dir = vendor_root.join(".git");
+    if git_dir.exists() {
+        fs::remove_dir_all(&git_dir)
+            .with_context(|| format!("failed to clean '{}'", git_dir.display()))?;
+    }
+
+    Ok(())
+}
+
+fn resolve_local_ui_source() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("AXONYX_UI_SOURCE") {
+        let candidate = PathBuf::from(path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    let workspace = workspace_root();
+    let mut candidates = vec![
+        workspace.join("vendor").join("axonyx-ui"),
+        workspace.parent().map_or_else(
+            || PathBuf::from("axonyx-ui"),
+            |parent| parent.join("axonyx-ui"),
+        ),
+    ];
+
+    if let Some(parent) = workspace.parent() {
+        candidates.push(parent.join("axonyx-ui"));
+    }
+
+    candidates.into_iter().find(|candidate| candidate.exists())
+}
+
+fn sync_ui_css_snapshot(vendor_root: &Path, app_root: &Path) -> Result<()> {
+    let css_source = vendor_root.join("src").join("css");
+    if !css_source.exists() {
+        bail!(
+            "vendored axonyx-ui did not contain '{}'",
+            css_source.display()
+        );
+    }
+
+    let css_target = app_root.join("public").join("css").join("axonyx-ui");
+    copy_dir_all_filtered(&css_source, &css_target, |_| false)?;
+    Ok(())
+}
+
+fn copy_dir_all_filtered(
+    source: &Path,
+    target: &Path,
+    skip: impl Fn(&Path) -> bool + Copy,
+) -> Result<()> {
+    if skip(source) {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(source)
+        .with_context(|| format!("failed to inspect source '{}'", source.display()))?;
+
+    if metadata.is_file() {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create '{}'", parent.display()))?;
+        }
+        fs::copy(source, target).with_context(|| {
+            format!(
+                "failed to copy source file '{}' to '{}'",
+                source.display(),
+                target.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    fs::create_dir_all(target)
+        .with_context(|| format!("failed to create '{}'", target.display()))?;
+
+    for entry in fs::read_dir(source)
+        .with_context(|| format!("failed to read directory '{}'", source.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in '{}'", source.display()))?;
+        let from = entry.path();
+        if skip(&from) {
+            continue;
+        }
+
+        let to = target.join(entry.file_name());
+        copy_dir_all_filtered(&from, &to, skip)?;
+    }
+
+    Ok(())
+}
+
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -398,4 +538,111 @@ fn confirm(prompt: &str) -> Result<bool> {
 
     let normalized = line.trim().to_ascii_lowercase();
     Ok(normalized == "y" || normalized == "yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_temp_dir(label: &str) -> PathBuf {
+        let unique = format!(
+            "axonyx-create-{}-{}",
+            label,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&dir).expect("temp dir should create");
+        dir
+    }
+
+    #[test]
+    fn site_template_enables_ui_module() {
+        let files = template::template_files(
+            template::AppTemplate::Site,
+            "demo-site",
+            "axonyx-runtime = { git = \"https://example.com/runtime\" }",
+            "runtime note",
+        );
+
+        let axonyx_toml = files
+            .iter()
+            .find(|file| file.relative_path == "Axonyx.toml")
+            .expect("Axonyx.toml should exist");
+
+        assert!(axonyx_toml.contents.contains("enabled = [\"ui\"]"));
+    }
+
+    #[test]
+    fn create_site_template_vendors_ui_and_scaffolds_foundry_layout() {
+        let workspace = make_temp_dir("site-template");
+        let target_dir = workspace.join("demo-site");
+        let ui_root = workspace.join("local-ui");
+
+        fs::create_dir_all(ui_root.join("src/ax/foundry")).expect("ui ax dir should exist");
+        fs::create_dir_all(ui_root.join("src/css")).expect("ui css dir should exist");
+        fs::write(ui_root.join("README.md"), "# Axonyx UI\n").expect("ui readme should write");
+        fs::write(
+            ui_root.join("src/ax/foundry/SectionCard.ax"),
+            "page SectionCard\n  Card title: title\n    Slot\n",
+        )
+        .expect("ui component should write");
+        fs::write(
+            ui_root.join("src/css/index.css"),
+            "@import './tokens.css';\n",
+        )
+        .expect("ui index css should write");
+        fs::write(
+            ui_root.join("src/css/tokens.css"),
+            ":root { --ax-text: #fff; }\n",
+        )
+        .expect("ui tokens css should write");
+
+        let previous_ui_source = std::env::var_os("AXONYX_UI_SOURCE");
+        std::env::set_var("AXONYX_UI_SOURCE", &ui_root);
+
+        let cli = Cli {
+            project_name: "demo-site".to_string(),
+            yes: true,
+            force: false,
+            git: false,
+            template: AppTemplate::Site,
+            runtime_source: RuntimeSource::Git,
+            runtime_git_url: DEFAULT_RUNTIME_GIT_URL.to_string(),
+            runtime_package: DEFAULT_RUNTIME_PACKAGE.to_string(),
+            runtime_version: DEFAULT_RUNTIME_VERSION.to_string(),
+        };
+
+        let result = create_app(&target_dir, &cli);
+
+        if let Some(value) = previous_ui_source {
+            std::env::set_var("AXONYX_UI_SOURCE", value);
+        } else {
+            std::env::remove_var("AXONYX_UI_SOURCE");
+        }
+
+        result.expect("site template should scaffold");
+
+        assert!(target_dir
+            .join("vendor/axonyx-ui/src/ax/foundry/SectionCard.ax")
+            .exists());
+        assert!(target_dir.join("public/css/axonyx-ui/index.css").exists());
+
+        let layout =
+            fs::read_to_string(target_dir.join("app/layout.ax")).expect("layout should read");
+        assert!(layout.contains("@axonyx/ui/foundry/SiteShell.ax"));
+        assert!(layout.contains("<Theme>silver</Theme>"));
+        assert!(layout.contains("/css/axonyx-ui/index.css"));
+
+        let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
+        assert!(page.contains("@axonyx/ui/foundry/SectionCard.ax"));
+
+        let axonyx_toml =
+            fs::read_to_string(target_dir.join("Axonyx.toml")).expect("config should read");
+        assert!(axonyx_toml.contains("enabled = [\"ui\"]"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
 }

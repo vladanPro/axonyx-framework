@@ -1,12 +1,34 @@
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
 page DocsHome
-  Container max: "xl"
-    Grid cols: 3, gap: "lg"
-      Card title: "Getting Started"
-        Copy -> "Explain install, scaffold, runtime sources, and the first Axonyx page loop."
-        a href: "/getting-started" -> "Open section"
-      Card title: "Reference"
-        Copy -> "Document components, layout rules, metadata directives, and runtime behavior."
-        a href: "/reference" -> "Open section"
-      Card title: "Examples"
-        Copy -> "Collect small complete examples that show how Axonyx should feel in practice."
-        a href: "/examples" -> "Open section"
+
+<Head>
+  <Title>{{APP_NAME}} | Docs</Title>
+</Head>
+
+<Container max="xl">
+  <ContentGrid cols={3} gap="lg">
+    <SectionCard title="Getting Started">
+      <Copy>
+        Explain install, scaffold, runtime sources, and the first Axonyx page
+        loop.
+      </Copy>
+      <a href="/getting-started">Open section</a>
+    </SectionCard>
+    <SectionCard title="Reference">
+      <Copy>
+        Document components, layout rules, metadata directives, and runtime
+        behavior.
+      </Copy>
+      <a href="/reference">Open section</a>
+    </SectionCard>
+    <SectionCard title="Examples">
+      <Copy>
+        Collect small complete examples that show how Axonyx should feel in
+        practice.
+      </Copy>
+      <a href="/examples">Open section</a>
+    </SectionCard>
+  </ContentGrid>
+</Container>
