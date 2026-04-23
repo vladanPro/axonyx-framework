@@ -1665,7 +1665,10 @@ fn load_preview_import_source(root: &Path, source: &str) -> Option<String> {
 }
 
 fn resolve_preview_import_path(root: &Path, source: &str) -> Option<PathBuf> {
-    resolve_app_import_path(root, source).or_else(|| resolve_axonyx_ui_import_path(root, source))
+    resolve_component_override_import_path(root, source)
+        .or_else(|| resolve_package_override_import_path(root, source))
+        .or_else(|| resolve_app_import_path(root, source))
+        .or_else(|| resolve_axonyx_ui_import_path(root, source))
 }
 
 fn resolve_app_import_path(root: &Path, source: &str) -> Option<PathBuf> {
@@ -1685,26 +1688,50 @@ fn resolve_app_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+fn resolve_component_override_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+    let target = axonyx_config_string(root, "component_overrides", source)?;
+    resolve_config_path(root, &target)
+}
+
+fn resolve_package_override_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+    let overrides = axonyx_config_table(root, "package_overrides")?;
+    let mut matches = overrides
+        .iter()
+        .filter_map(|(package, value)| {
+            let target = value.as_str()?;
+            let relative = source
+                .strip_prefix(package)
+                .and_then(|rest| rest.strip_prefix('/'))?;
+            Some((package.len(), target, relative))
+        })
+        .collect::<Vec<_>>();
+
+    matches.sort_by(|left, right| right.0.cmp(&left.0));
+    let (_, target, relative) = matches.into_iter().next()?;
+
+    let mut base = resolve_config_base_path(root, target)?;
+    let ax_root = base.join("src").join("ax");
+    if ax_root.exists() {
+        base = ax_root;
+    }
+
+    Some(join_import_relative(base, relative))
+}
+
 fn resolve_axonyx_ui_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     let relative = source.strip_prefix("@axonyx/ui/")?;
-    for base in axonyx_ui_import_bases(root) {
-        let mut path = base;
-        for segment in relative.split('/') {
-            if !segment.is_empty() {
-                path.push(segment);
-            }
-        }
+    let mut fallback = None;
 
-        if path.extension().is_none() {
-            path.set_extension("ax");
-        }
+    for base in axonyx_ui_import_bases(root) {
+        let path = join_import_relative(base, relative);
+        fallback.get_or_insert_with(|| path.clone());
 
         if path.exists() {
             return Some(path);
         }
     }
 
-    None
+    fallback
 }
 
 fn axonyx_ui_import_bases(root: &Path) -> Vec<PathBuf> {
@@ -1725,6 +1752,65 @@ fn axonyx_ui_import_bases(root: &Path) -> Vec<PathBuf> {
     }
 
     bases
+}
+
+fn join_import_relative(mut base: PathBuf, relative: &str) -> PathBuf {
+    for segment in relative.split('/') {
+        if !segment.is_empty() {
+            base.push(segment);
+        }
+    }
+
+    if base.extension().is_none() {
+        base.set_extension("ax");
+    }
+
+    base
+}
+
+fn resolve_config_path(root: &Path, target: &str) -> Option<PathBuf> {
+    if target.starts_with("@/") {
+        return resolve_app_import_path(root, target);
+    }
+
+    if target.starts_with("@axonyx/ui/") {
+        return resolve_axonyx_ui_import_path(root, target);
+    }
+
+    let path = PathBuf::from(target);
+    let mut path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+
+    if path.extension().is_none() {
+        path.set_extension("ax");
+    }
+
+    Some(path)
+}
+
+fn resolve_config_base_path(root: &Path, target: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(target);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
+}
+
+fn axonyx_config_string(root: &Path, table: &str, key: &str) -> Option<String> {
+    axonyx_config_table(root, table)?
+        .get(key)?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
+fn axonyx_config_table(root: &Path, table: &str) -> Option<toml::map::Map<String, toml::Value>> {
+    let source = fs::read_to_string(root.join("Axonyx.toml")).ok()?;
+    let value = source.parse::<toml::Value>().ok()?;
+    value.get(table)?.as_table().cloned()
 }
 
 fn inject_dev_client(html: &str, request_path: &str) -> String {
@@ -2568,6 +2654,98 @@ import { SiteCard } from "@/components/SiteCard.ax"
 
 page Home
 <SiteCard />
+"#,
+            Some(&root),
+        );
+
+        assert!(diagnostics.is_empty());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn component_override_resolves_exact_import_source() {
+        let root = make_temp_dir("component-override");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[component_overrides]
+"@axonyx/ui/foundry/SectionCard.ax" = "@/components/SiteCard.ax"
+"#,
+        )
+        .expect("config should write");
+
+        let resolved =
+            resolve_preview_import_path(root.as_path(), "@axonyx/ui/foundry/SectionCard.ax")
+                .expect("override should resolve");
+
+        assert_eq!(resolved, root.join("app/components/SiteCard.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn package_override_resolves_package_namespace_import() {
+        let root = make_temp_dir("package-override");
+        fs::create_dir_all(root.join("vendor/custom-ui/src/ax/foundry"))
+            .expect("custom ui dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[package_overrides]
+"@axonyx/ui" = "./vendor/custom-ui"
+"#,
+        )
+        .expect("config should write");
+
+        let resolved =
+            resolve_preview_import_path(root.as_path(), "@axonyx/ui/foundry/SectionCard.ax")
+                .expect("package override should resolve");
+
+        assert_eq!(
+            resolved,
+            root.join("vendor/custom-ui/src/ax/foundry/SectionCard.ax")
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_component_override_import() {
+        let root = make_temp_dir("check-component-override");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[component_overrides]
+"@axonyx/ui/foundry/SectionCard.ax" = "@/components/SiteCard.ax"
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/components/SiteCard.ax"),
+            "page SectionCard\n<Card />\n",
+        )
+        .expect("override component should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+<SectionCard />
 "#,
             Some(&root),
         );
