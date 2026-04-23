@@ -10,12 +10,16 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
-use axonyx_core::ax_parser_auto_prelude::parse_ax_auto;
+use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
+use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
+use axonyx_core::ax_parser_prelude::AxParseError;
+use axonyx_core::ax_parser_v2_prelude::AxParseV2Error;
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
     preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 const DOCS_LAYOUT_AX: &str = include_str!("../templates/docs/app/docs/layout.ax.tpl");
 const DOCS_HOME_AX: &str = include_str!("../templates/docs/app/docs/page.ax.tpl");
@@ -36,6 +40,7 @@ pub struct Cli {
 enum Commands {
     Add(AddArgs),
     Build(BuildArgs),
+    Check(CheckArgs),
     Dev(DevArgs),
     Run(RunArgs),
 }
@@ -48,6 +53,17 @@ struct AddArgs {
 
 #[derive(Debug, Parser, Default)]
 struct BuildArgs {}
+
+#[derive(Debug, Parser)]
+struct CheckArgs {
+    /// Check a single .ax file instead of all app/routes/jobs sources.
+    #[arg(long)]
+    file: Option<PathBuf>,
+
+    /// Output format for diagnostics.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+}
 
 #[derive(Debug, Parser)]
 struct DevArgs {
@@ -67,6 +83,12 @@ struct RunArgs {
 #[derive(Debug, Subcommand)]
 enum RunCommands {
     Dev(DevArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CheckFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -113,6 +135,16 @@ enum BackendBuildStatus {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CheckDiagnostic {
+    file: String,
+    line: usize,
+    column: usize,
+    severity: &'static str,
+    code: &'static str,
+    message: String,
+}
+
 pub fn main_entry() {
     if let Err(error) = run() {
         eprintln!("error: {error:#}");
@@ -126,6 +158,7 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Add(args) => add_module(args.module),
         Commands::Build(args) => build_command(args),
+        Commands::Check(args) => check_command(args),
         Commands::Dev(args) => run_dev_server(args),
         Commands::Run(args) => run_command(args),
     }
@@ -152,10 +185,246 @@ fn build_command(_args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
+fn check_command(args: CheckArgs) -> Result<()> {
+    let diagnostics = if let Some(file) = args.file {
+        check_ax_file(&file)?
+    } else {
+        let root = app_root()?;
+        check_app_sources(&root)?
+    };
+
+    match args.format {
+        CheckFormat::Text => print_check_text(&diagnostics),
+        CheckFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&diagnostics)?);
+        }
+    }
+
+    if diagnostics.is_empty() {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
 fn run_command(args: RunArgs) -> Result<()> {
     match args.command {
         RunCommands::Dev(args) => run_dev_server(args),
     }
+}
+
+fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let mut files = Vec::new();
+    collect_ax_files(&root.join("app"), &mut files)?;
+    collect_ax_files(&root.join("routes"), &mut files)?;
+    collect_ax_files(&root.join("jobs"), &mut files)?;
+
+    let mut diagnostics = Vec::new();
+    for file in files {
+        diagnostics.extend(check_ax_file(&file)?);
+    }
+
+    Ok(diagnostics)
+}
+
+fn collect_ax_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read '{}'", dir.display()))? {
+        let entry =
+            entry.with_context(|| format!("failed to read entry in '{}'", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed to inspect '{}'", path.display()))?;
+
+        if file_type.is_dir() {
+            collect_ax_files(&path, out)?;
+            continue;
+        }
+
+        if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("ax") {
+            out.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn check_ax_file(path: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
+    Ok(check_ax_source(path, &source))
+}
+
+fn check_ax_source(path: &Path, source: &str) -> Vec<CheckDiagnostic> {
+    let result = if looks_like_backend_ax(source) {
+        parse_backend_ax(source)
+            .map(|_| ())
+            .map_err(CheckParseError::Backend)
+    } else {
+        parse_ax_auto(source)
+            .map(|_| ())
+            .map_err(CheckParseError::Page)
+    };
+
+    match result {
+        Ok(()) => Vec::new(),
+        Err(error) => vec![diagnostic_from_parse_error(path, error)],
+    }
+}
+
+fn looks_like_backend_ax(source: &str) -> bool {
+    source.lines().map(str::trim_start).any(|line| {
+        line.starts_with("route ") || line.starts_with("loader ") || line.starts_with("action ")
+    })
+}
+
+enum CheckParseError {
+    Page(AxAutoParseError),
+    Backend(AxBackendParseError),
+}
+
+fn diagnostic_from_parse_error(path: &Path, error: CheckParseError) -> CheckDiagnostic {
+    let (line, code, message) = match error {
+        CheckParseError::Page(error) => (
+            line_from_auto_parse_error(&error).unwrap_or(1),
+            "axonyx-parse",
+            message_from_auto_parse_error(&error),
+        ),
+        CheckParseError::Backend(error) => (
+            line_from_backend_parse_error(&error).unwrap_or(1),
+            "axonyx-backend-parse",
+            error.to_string(),
+        ),
+    };
+
+    CheckDiagnostic {
+        file: display_path(path),
+        line,
+        column: 1,
+        severity: "error",
+        code,
+        message,
+    }
+}
+
+fn message_from_auto_parse_error(error: &AxAutoParseError) -> String {
+    match error {
+        AxAutoParseError::V1(error) => error.to_string(),
+        AxAutoParseError::V2(error) => error.to_string(),
+        AxAutoParseError::Convert(error) => error.to_string(),
+    }
+}
+
+fn line_from_auto_parse_error(error: &AxAutoParseError) -> Option<usize> {
+    match error {
+        AxAutoParseError::V1(error) => line_from_ax_parse_error(error),
+        AxAutoParseError::V2(error) => line_from_ax_parse_v2_error(error),
+        AxAutoParseError::Convert(error) => line_from_convert_error(error),
+    }
+}
+
+fn line_from_ax_parse_error(error: &AxParseError) -> Option<usize> {
+    match error {
+        AxParseError::EmptyDocument => Some(1),
+        AxParseError::TabsNotSupported { line }
+        | AxParseError::InvalidIndentation { line }
+        | AxParseError::InvalidPage { line }
+        | AxParseError::UnexpectedIndentation { line }
+        | AxParseError::InvalidDataBinding { line }
+        | AxParseError::InvalidEach { line }
+        | AxParseError::InvalidPipelineStage { line }
+        | AxParseError::InvalidComponent { line }
+        | AxParseError::InvalidTitle { line }
+        | AxParseError::InvalidTheme { line }
+        | AxParseError::InvalidHeadTag { line, .. }
+        | AxParseError::InvalidExpression { line, .. } => Some(*line),
+    }
+}
+
+fn line_from_ax_parse_v2_error(error: &AxParseV2Error) -> Option<usize> {
+    match error {
+        AxParseV2Error::EmptyDocument | AxParseV2Error::MissingPage => Some(1),
+        AxParseV2Error::InvalidImport { line }
+        | AxParseV2Error::MissingImportFrom { line }
+        | AxParseV2Error::EmptyImportList { line }
+        | AxParseV2Error::InvalidPage { line }
+        | AxParseV2Error::DuplicatePage { line }
+        | AxParseV2Error::InvalidTag { line }
+        | AxParseV2Error::UnterminatedTag { line }
+        | AxParseV2Error::UnterminatedString { line }
+        | AxParseV2Error::UnterminatedExpression { line }
+        | AxParseV2Error::UnexpectedClosingTag { line, .. }
+        | AxParseV2Error::MismatchedClosingTag { line, .. }
+        | AxParseV2Error::MissingAttributeValue { line, .. } => Some(*line),
+    }
+}
+
+fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
+    match error {
+        AxConvertV2Error::InvalidExpression { error, .. } => line_from_ax_parse_error(error),
+        AxConvertV2Error::MissingControlAttr { .. }
+        | AxConvertV2Error::InvalidBindingAttr { .. }
+        | AxConvertV2Error::ControlBranchAttrsNotSupported { .. }
+        | AxConvertV2Error::DuplicateControlBranch { .. }
+        | AxConvertV2Error::UnexpectedControlBranch { .. }
+        | AxConvertV2Error::InvalidHeadChild
+        | AxConvertV2Error::UnsupportedHeadTag { .. }
+        | AxConvertV2Error::HeadValueAttrsNotSupported { .. }
+        | AxConvertV2Error::HeadValueRequiresSingleChild { .. }
+        | AxConvertV2Error::HeadValueInvalidChild { .. }
+        | AxConvertV2Error::HeadTagChildrenNotSupported { .. } => Some(1),
+    }
+}
+
+fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
+    match error {
+        AxBackendParseError::EmptyDocument => Some(1),
+        AxBackendParseError::TabsNotSupported { line }
+        | AxBackendParseError::InvalidIndentation { line }
+        | AxBackendParseError::UnexpectedIndentation { line }
+        | AxBackendParseError::InvalidBlock { line }
+        | AxBackendParseError::InvalidDataBinding { line }
+        | AxBackendParseError::InvalidInputSection { line }
+        | AxBackendParseError::InvalidField { line }
+        | AxBackendParseError::InvalidMutation { line }
+        | AxBackendParseError::InvalidAssignment { line }
+        | AxBackendParseError::InvalidReturn { line }
+        | AxBackendParseError::InvalidSend { line }
+        | AxBackendParseError::InvalidQuerySource { line }
+        | AxBackendParseError::InvalidQueryClause { line }
+        | AxBackendParseError::InvalidQueryNumber { line }
+        | AxBackendParseError::InvalidExpression { line, .. } => Some(*line),
+    }
+}
+
+fn print_check_text(diagnostics: &[CheckDiagnostic]) {
+    if diagnostics.is_empty() {
+        println!("Axonyx check passed.");
+        return;
+    }
+
+    for diagnostic in diagnostics {
+        println!(
+            "{}:{}:{}: {}: {}",
+            diagnostic.file,
+            diagnostic.line,
+            diagnostic.column,
+            diagnostic.severity,
+            diagnostic.message
+        );
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 fn app_root() -> Result<PathBuf> {
@@ -2150,5 +2419,25 @@ page SectionCard
         assert_ne!(before, after);
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_reports_page_parse_error_line() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
+        let diagnostics = check_ax_source(&path, "page Home\n<Copy></Card>\n");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-parse");
+    }
+
+    #[test]
+    fn check_ax_source_reports_backend_parse_error_line() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/posts.ax");
+        let diagnostics = check_ax_source(&path, "route GET \"/api/posts\"\n    return posts\n");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-backend-parse");
     }
 }
