@@ -1,6 +1,8 @@
+import { Button } from "@axonyx/ui/foundry/Button.ax"
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
 page DocsHome
 
@@ -19,31 +21,37 @@ page DocsHome
       Use this starter to explain your framework, product, or internal platform
       without rebuilding the shell patterns from scratch.
     </Copy>
-    <a slot="actions" href="/getting-started">Get started</a>
-    <a slot="actions" href="/reference">Open reference</a>
+    <Button slot="actions" href="/getting-started" variant="primary">Get started</Button>
+    <Button slot="actions" href="/reference" variant="ghost">Open reference</Button>
   </PageHeader>
 
   <ContentGrid cols={3} gap="lg">
     <SectionCard title="Getting Started">
-      <Copy>
-        Explain install, scaffold, runtime sources, and the first Axonyx page
-        loop.
-      </Copy>
-      <a href="/getting-started">Open section</a>
+      <Stack gap="md" align="start">
+        <Copy>
+          Explain install, scaffold, runtime sources, and the first Axonyx page
+          loop.
+        </Copy>
+        <Button href="/getting-started" variant="primary">Open section</Button>
+      </Stack>
     </SectionCard>
     <SectionCard title="Reference">
-      <Copy>
-        Document components, layout rules, metadata directives, and runtime
-        behavior.
-      </Copy>
-      <a href="/reference">Open section</a>
+      <Stack gap="md" align="start">
+        <Copy>
+          Document components, layout rules, metadata directives, and runtime
+          behavior.
+        </Copy>
+        <Button href="/reference" variant="ghost">Open section</Button>
+      </Stack>
     </SectionCard>
     <SectionCard title="Examples">
-      <Copy>
-        Collect small complete examples that show how Axonyx should feel in
-        practice.
-      </Copy>
-      <a href="/examples">Open section</a>
+      <Stack gap="md" align="start">
+        <Copy>
+          Collect small complete examples that show how Axonyx should feel in
+          practice.
+        </Copy>
+        <Button href="/examples" variant="ghost">Open section</Button>
+      </Stack>
     </SectionCard>
   </ContentGrid>
 </Container>

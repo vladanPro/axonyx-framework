@@ -1,3 +1,4 @@
+import { Button } from "@axonyx/ui/foundry/Button.ax"
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
 import { CommandList } from "@axonyx/ui/foundry/CommandList.ax"
 import { DocsCallout } from "@axonyx/ui/foundry/DocsCallout.ax"
@@ -5,6 +6,7 @@ import { DocsCodeBlock } from "@axonyx/ui/foundry/DocsCodeBlock.ax"
 import { DocsNav } from "@axonyx/ui/foundry/DocsNav.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
 page Home
 
@@ -23,16 +25,19 @@ page Home
       Keep structure in .ax, let Rust stay underneath, and use CSS for most of
       the presentation layer.
     </Copy>
-    <a slot="actions" href="/posts">Open posts</a>
-    <a slot="actions" href="/">Refresh homepage</a>
+    <Button slot="actions" href="/posts" variant="primary">Open posts</Button>
+    <Button slot="actions" href="/" variant="ghost">Refresh homepage</Button>
   </PageHeader>
 
   <ContentGrid cols={2} gap="lg">
     <SectionCard title="Write pages that stay readable">
-      <Copy>
-        Route pages can stay focused on content and composition while Foundry
-        components carry more of the repeated visual contract.
-      </Copy>
+      <Stack gap="md" align="start">
+        <Copy>
+          Route pages can stay focused on content and composition while Foundry
+          components carry more of the repeated visual contract.
+        </Copy>
+        <Button href="/posts" variant="ghost">Open posts</Button>
+      </Stack>
     </SectionCard>
     <SectionCard title="Ship the kinds of sites we actually want">
       <Copy>

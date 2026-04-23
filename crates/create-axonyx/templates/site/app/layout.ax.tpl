@@ -1,3 +1,4 @@
+import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
 import { HeroCard } from "@axonyx/ui/foundry/HeroCard.ax"
 import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
 
@@ -32,8 +33,8 @@ page RootLayout
       stay reusable.
     </Copy>
     <nav class="docs-nav">
-      <a href="/">Home</a>
-      <a href="/posts">Posts</a>
+      <TextLink href="/">Home</TextLink>
+      <TextLink href="/posts">Posts</TextLink>
     </nav>
   </HeroCard>
   <Slot />
