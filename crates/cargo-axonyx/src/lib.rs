@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use axonyx_core::ax_ast_prelude::AxImport;
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
@@ -221,7 +222,7 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
 
     let mut diagnostics = Vec::new();
     for file in files {
-        diagnostics.extend(check_ax_file(&file)?);
+        diagnostics.extend(check_ax_file_with_root(&file, Some(root))?);
     }
 
     Ok(diagnostics)
@@ -254,26 +255,104 @@ fn collect_ax_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn check_ax_file(path: &Path) -> Result<Vec<CheckDiagnostic>> {
-    let source = fs::read_to_string(path)
-        .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
-    Ok(check_ax_source(path, &source))
+    let root = find_app_root_for_path(path);
+    check_ax_file_with_root(path, root.as_deref())
 }
 
-fn check_ax_source(path: &Path, source: &str) -> Vec<CheckDiagnostic> {
-    let result = if looks_like_backend_ax(source) {
-        parse_backend_ax(source)
-            .map(|_| ())
-            .map_err(CheckParseError::Backend)
-    } else {
-        parse_ax_auto(source)
-            .map(|_| ())
-            .map_err(CheckParseError::Page)
+fn check_ax_file_with_root(path: &Path, root: Option<&Path>) -> Result<Vec<CheckDiagnostic>> {
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
+    Ok(check_ax_source_with_root(path, &source, root))
+}
+
+fn check_ax_source_with_root(
+    path: &Path,
+    source: &str,
+    root: Option<&Path>,
+) -> Vec<CheckDiagnostic> {
+    if looks_like_backend_ax(source) {
+        return match parse_backend_ax(source) {
+            Ok(_) => Vec::new(),
+            Err(error) => vec![diagnostic_from_parse_error(
+                path,
+                CheckParseError::Backend(error),
+            )],
+        };
+    }
+
+    let document = match parse_ax_auto(source) {
+        Ok(document) => document,
+        Err(error) => {
+            return vec![diagnostic_from_parse_error(
+                path,
+                CheckParseError::Page(error),
+            )]
+        }
     };
 
-    match result {
-        Ok(()) => Vec::new(),
-        Err(error) => vec![diagnostic_from_parse_error(path, error)],
+    let mut diagnostics = Vec::new();
+    if let Some(root) = root {
+        diagnostics.extend(check_imports(root, path, source, &document.imports));
     }
+    diagnostics
+}
+
+fn find_app_root_for_path(path: &Path) -> Option<PathBuf> {
+    let mut current = path.parent()?;
+
+    loop {
+        if current.join("Axonyx.toml").exists() {
+            return Some(current.to_path_buf());
+        }
+
+        current = current.parent()?;
+    }
+}
+
+fn check_imports(
+    root: &Path,
+    path: &Path,
+    source: &str,
+    imports: &[AxImport],
+) -> Vec<CheckDiagnostic> {
+    imports
+        .iter()
+        .filter_map(|import_decl| {
+            let resolved = resolve_preview_import_path(root, &import_decl.source);
+            if resolved.as_ref().is_some_and(|path| path.exists()) {
+                return None;
+            }
+
+            let line = import_source_line(source, &import_decl.source);
+            let detail = resolved
+                .as_ref()
+                .map(|path| format!(" expected '{}'", display_path(path)))
+                .unwrap_or_default();
+
+            Some(CheckDiagnostic {
+                file: display_path(path),
+                line,
+                column: 1,
+                severity: "error",
+                code: "axonyx-import",
+                message: format!(
+                    "unable to resolve import `{}`{}",
+                    import_decl.source, detail
+                ),
+            })
+        })
+        .collect()
+}
+
+fn import_source_line(source: &str, import_source: &str) -> usize {
+    let double_quoted = format!("\"{import_source}\"");
+    let single_quoted = format!("'{import_source}'");
+
+    source
+        .lines()
+        .position(|line| line.contains(&double_quoted) || line.contains(&single_quoted))
+        .map(|index| index + 1)
+        .unwrap_or(1)
 }
 
 fn looks_like_backend_ax(source: &str) -> bool {
@@ -2424,7 +2503,7 @@ page SectionCard
     #[test]
     fn check_ax_source_reports_page_parse_error_line() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
-        let diagnostics = check_ax_source(&path, "page Home\n<Copy></Card>\n");
+        let diagnostics = check_ax_source_with_root(&path, "page Home\n<Copy></Card>\n", None);
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 2);
@@ -2434,10 +2513,67 @@ page SectionCard
     #[test]
     fn check_ax_source_reports_backend_parse_error_line() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/posts.ax");
-        let diagnostics = check_ax_source(&path, "route GET \"/api/posts\"\n    return posts\n");
+        let diagnostics =
+            check_ax_source_with_root(&path, "route GET \"/api/posts\"\n    return posts\n", None);
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 2);
         assert_eq!(diagnostics[0].code, "axonyx-backend-parse");
+    }
+
+    #[test]
+    fn check_ax_source_reports_missing_app_import() {
+        let root = make_temp_dir("check-missing-app-import");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SiteCard } from "@/components/SiteCard.ax"
+
+page Home
+<SiteCard />
+"#,
+            Some(&root),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-import");
+        assert!(diagnostics[0].message.contains("@/components/SiteCard.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_existing_app_import() {
+        let root = make_temp_dir("check-existing-app-import");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/components/SiteCard.ax"),
+            "page SiteCard\n<Card />\n",
+        )
+        .expect("component should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SiteCard } from "@/components/SiteCard.ax"
+
+page Home
+<SiteCard />
+"#,
+            Some(&root),
+        );
+
+        assert!(diagnostics.is_empty());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 }
