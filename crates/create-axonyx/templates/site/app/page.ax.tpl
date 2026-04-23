@@ -1,4 +1,7 @@
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
+import { DocsCallout } from "@axonyx/ui/foundry/DocsCallout.ax"
+import { DocsNav } from "@axonyx/ui/foundry/DocsNav.ax"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
 page Home
@@ -8,15 +11,25 @@ page Home
 </Head>
 
 <Container max="xl">
+  <PageHeader title="{{APP_NAME}}">
+    <Copy slot="eyebrow">Site Starter</Copy>
+    <Copy tone="lead">
+      This site starter uses real @axonyx/ui imports, silver theme styling,
+      and route files that stay easy to scan.
+    </Copy>
+    <Copy>
+      Keep structure in .ax, let Rust stay underneath, and use CSS for most of
+      the presentation layer.
+    </Copy>
+    <a slot="actions" href="/posts">Open posts</a>
+    <a slot="actions" href="/">Refresh homepage</a>
+  </PageHeader>
+
   <ContentGrid cols={2} gap="lg">
     <SectionCard title="Write pages that stay readable">
-      <Copy tone="lead">
-        This site starter uses real @axonyx/ui imports, silver theme styling,
-        and route files that stay easy to scan.
-      </Copy>
       <Copy>
-        Keep structure in .ax, let Rust stay underneath, and use CSS for most
-        of the presentation layer.
+        Route pages can stay focused on content and composition while Foundry
+        components carry more of the repeated visual contract.
       </Copy>
     </SectionCard>
     <SectionCard title="Ship the kinds of sites we actually want">
@@ -51,5 +64,23 @@ page Home
         site needs backend behavior.
       </Copy>
     </SectionCard>
+  </ContentGrid>
+
+  <ContentGrid cols={2} gap="lg">
+    <DocsCallout title="Current Best Fit">
+      <Copy slot="eyebrow">Signal</Copy>
+      <Copy>
+        This starter is strongest for framework sites, product pages, launch
+        surfaces, and other content-first experiences with minimal JS needs.
+      </Copy>
+    </DocsCallout>
+    <DocsNav title="Where To Go Next">
+      <Copy>
+        After the homepage, start shaping nested routes, connect real assets,
+        and then decide whether the project needs posts, APIs, or jobs.
+      </Copy>
+      <a slot="actions" href="/posts">Open posts route</a>
+      <a slot="actions" href="/">Keep iterating</a>
+    </DocsNav>
   </ContentGrid>
 </Container>
