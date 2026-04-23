@@ -645,6 +645,12 @@ mod tests {
         assert!(axonyx_toml.contains("[package_overrides]"));
         assert!(axonyx_toml.contains("\"@axonyx/ui\" = \"./vendor/axonyx-ui\""));
 
+        let posts_page = fs::read_to_string(target_dir.join("app/posts/page.ax"))
+            .expect("posts page should read");
+        assert!(posts_page.contains("<If when={load PostsList}>"));
+        assert!(posts_page.contains("<Each items={load PostsList} as=\"post\">"));
+        assert!(posts_page.contains("<Else>"));
+
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
 }
