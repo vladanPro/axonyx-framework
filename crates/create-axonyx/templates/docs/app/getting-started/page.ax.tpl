@@ -1,4 +1,6 @@
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
+import { DocsSection } from "@axonyx/ui/foundry/DocsSection.ax"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
 page GettingStarted
@@ -8,11 +10,18 @@ page GettingStarted
 </Head>
 
 <Container max="xl">
-  <SectionCard title="Getting Started">
+  <PageHeader title="Getting Started">
+    <Copy slot="eyebrow">Quick Start</Copy>
     <Copy tone="lead">
       Start by generating the app, running cargo ax run dev, and editing
       app/page.ax or a nested route page.
     </Copy>
+    <Copy>
+      This docs template already includes the vendored UI package, silver theme,
+      and route structure so the first edits can stay focused on content.
+    </Copy>
+    <a slot="actions" href="/reference">Read reference</a>
+    <a slot="actions" href="/examples">See examples</a>
     <ContentGrid cols={2} gap="md">
       <SectionCard title="Scaffold">
         <Copy>
@@ -39,5 +48,17 @@ page GettingStarted
         </Copy>
       </SectionCard>
     </ContentGrid>
-  </SectionCard>
+  </PageHeader>
+
+  <DocsSection title="Good First Files">
+    <Copy slot="eyebrow">Route Shape</Copy>
+    <Copy>app/layout.ax defines the shell, metadata, and shared navigation.</Copy>
+    <Copy>app/page.ax is the main homepage route.</Copy>
+    <Copy>
+      app/*/page.ax extends the site with route folders that stay easy to scan.
+    </Copy>
+    <Copy slot="aside" tone="muted">Start in layout, then move into page-level routes.</Copy>
+    <Copy slot="aside" tone="muted">Keep assets in public/ and backend handlers in routes/ or jobs/ only when needed.</Copy>
+    <a slot="actions" href="/reference">Open route reference</a>
+  </DocsSection>
 </Container>
