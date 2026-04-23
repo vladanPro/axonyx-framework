@@ -319,11 +319,12 @@ fn check_imports(
         .iter()
         .filter_map(|import_decl| {
             let resolved = resolve_preview_import_path(root, &import_decl.source);
-            if resolved.as_ref().is_some_and(|path| path.exists()) {
-                return None;
+            let line = import_source_line(source, &import_decl.source);
+
+            if let Some(import_path) = resolved.as_ref().filter(|path| path.exists()) {
+                return validate_import_target(path, line, &import_decl.source, import_path);
             }
 
-            let line = import_source_line(source, &import_decl.source);
             let detail = resolved
                 .as_ref()
                 .map(|path| format!(" expected '{}'", display_path(path)))
@@ -342,6 +343,32 @@ fn check_imports(
             })
         })
         .collect()
+}
+
+fn validate_import_target(
+    importing_path: &Path,
+    import_line: usize,
+    import_source: &str,
+    import_path: &Path,
+) -> Option<CheckDiagnostic> {
+    let source = fs::read_to_string(import_path).ok()?;
+    let error = parse_ax_auto(&source).err()?;
+    let target_line = line_from_auto_parse_error(&error).unwrap_or(1);
+
+    Some(CheckDiagnostic {
+        file: display_path(importing_path),
+        line: import_line,
+        column: 1,
+        severity: "error",
+        code: "axonyx-import-parse",
+        message: format!(
+            "import `{}` resolved to '{}' but that file is not valid .ax (line {}: {})",
+            import_source,
+            display_path(import_path),
+            target_line,
+            message_from_auto_parse_error(&error)
+        ),
+    })
 }
 
 fn import_source_line(source: &str, import_source: &str) -> usize {
@@ -2787,6 +2814,93 @@ page Home
         );
 
         assert!(diagnostics.is_empty());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_reports_invalid_component_override_target() {
+        let root = make_temp_dir("check-invalid-component-override");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[component_overrides]
+"@axonyx/ui/foundry/SectionCard.ax" = "@/components/SiteCard.ax"
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/components/SiteCard.ax"),
+            "page SectionCard\n<Copy></Card>\n",
+        )
+        .expect("override component should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+<SectionCard />
+"#,
+            Some(&root),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-import-parse");
+        assert!(diagnostics[0].message.contains("SiteCard.ax"));
+        assert!(diagnostics[0].message.contains("line 2"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_reports_invalid_package_override_target() {
+        let root = make_temp_dir("check-invalid-package-override");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("vendor/custom-ui/src/ax/foundry"))
+            .expect("custom ui dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[package_overrides]
+"@axonyx/ui" = "./vendor/custom-ui"
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("vendor/custom-ui/src/ax/foundry/SectionCard.ax"),
+            "page SectionCard\n<Copy></Card>\n",
+        )
+        .expect("override component should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+<SectionCard />
+"#,
+            Some(&root),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-import-parse");
+        assert!(diagnostics[0]
+            .message
+            .contains("vendor/custom-ui/src/ax/foundry/SectionCard.ax"));
+        assert!(diagnostics[0].message.contains("line 2"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
