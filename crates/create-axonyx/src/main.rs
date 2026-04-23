@@ -642,6 +642,8 @@ mod tests {
         let axonyx_toml =
             fs::read_to_string(target_dir.join("Axonyx.toml")).expect("config should read");
         assert!(axonyx_toml.contains("enabled = [\"ui\"]"));
+        assert!(axonyx_toml.contains("[package_overrides]"));
+        assert!(axonyx_toml.contains("\"@axonyx/ui\" = \"./vendor/axonyx-ui\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

@@ -748,6 +748,11 @@ fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     sync_ui_css_snapshot(&vendor_root, root)?;
     ensure_ui_layout_setup(root)?;
     enable_module(&axonyx_toml.to_path_buf(), "ui")?;
+    ensure_package_override(
+        &axonyx_toml.to_path_buf(),
+        "@axonyx/ui",
+        "./vendor/axonyx-ui",
+    )?;
 
     if installed {
         println!("Vendored axonyx-ui into '{}'.", vendor_root.display());
@@ -1012,6 +1017,57 @@ fn write_if_missing(root: &Path, relative: &str, contents: &str) -> Result<()> {
 }
 
 fn enable_module(axonyx_toml: &PathBuf, module_name: &str) -> Result<()> {
+    update_axonyx_toml(axonyx_toml, |root_table| {
+        let modules = root_table
+            .entry("modules")
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+
+        let modules_table = modules
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("[modules] must be a TOML table"))?;
+
+        let enabled = modules_table
+            .entry("enabled")
+            .or_insert_with(|| toml::Value::Array(Vec::new()));
+
+        let enabled_array = enabled
+            .as_array_mut()
+            .ok_or_else(|| anyhow::anyhow!("[modules].enabled must be an array"))?;
+
+        if !enabled_array
+            .iter()
+            .any(|item| item.as_str() == Some(module_name))
+        {
+            enabled_array.push(toml::Value::String(module_name.to_string()));
+        }
+
+        Ok(())
+    })
+}
+
+fn ensure_package_override(axonyx_toml: &PathBuf, package_name: &str, target: &str) -> Result<()> {
+    update_axonyx_toml(axonyx_toml, |root_table| {
+        let overrides = root_table
+            .entry("package_overrides")
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+
+        let overrides_table = overrides
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("[package_overrides] must be a TOML table"))?;
+
+        overrides_table.insert(
+            package_name.to_string(),
+            toml::Value::String(target.to_string()),
+        );
+
+        Ok(())
+    })
+}
+
+fn update_axonyx_toml(
+    axonyx_toml: &PathBuf,
+    update: impl FnOnce(&mut toml::map::Map<String, toml::Value>) -> Result<()>,
+) -> Result<()> {
     let source = fs::read_to_string(axonyx_toml)
         .with_context(|| format!("failed to read '{}'", axonyx_toml.display()))?;
     let mut value = source
@@ -1021,29 +1077,7 @@ fn enable_module(axonyx_toml: &PathBuf, module_name: &str) -> Result<()> {
     let root_table = value
         .as_table_mut()
         .ok_or_else(|| anyhow::anyhow!("Axonyx.toml root must be a TOML table"))?;
-
-    let modules = root_table
-        .entry("modules")
-        .or_insert_with(|| toml::Value::Table(Default::default()));
-
-    let modules_table = modules
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("[modules] must be a TOML table"))?;
-
-    let enabled = modules_table
-        .entry("enabled")
-        .or_insert_with(|| toml::Value::Array(Vec::new()));
-
-    let enabled_array = enabled
-        .as_array_mut()
-        .ok_or_else(|| anyhow::anyhow!("[modules].enabled must be an array"))?;
-
-    if !enabled_array
-        .iter()
-        .any(|item| item.as_str() == Some(module_name))
-    {
-        enabled_array.push(toml::Value::String(module_name.to_string()));
-    }
+    update(root_table)?;
 
     let rendered = toml::to_string_pretty(&value).context("failed to render Axonyx.toml")?;
     fs::write(axonyx_toml, rendered)
@@ -2259,6 +2293,8 @@ mod tests {
         let axonyx_toml =
             fs::read_to_string(app_root.join("Axonyx.toml")).expect("config should read back");
         assert!(axonyx_toml.contains("\"ui\""));
+        assert!(axonyx_toml.contains("[package_overrides]"));
+        assert!(axonyx_toml.contains("\"@axonyx/ui\" = \"./vendor/axonyx-ui\""));
 
         let layout =
             fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read back");

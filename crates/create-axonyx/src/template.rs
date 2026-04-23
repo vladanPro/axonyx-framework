@@ -67,9 +67,7 @@ pub fn template_files(
 
     let axonyx_toml = match template {
         AppTemplate::Minimal => APP_AXONYX_TOML.to_string(),
-        AppTemplate::Site | AppTemplate::Docs => {
-            APP_AXONYX_TOML.replace("enabled = []", "enabled = [\"ui\"]")
-        }
+        AppTemplate::Site | AppTemplate::Docs => ui_ready_axonyx_toml(),
     };
 
     let mut files = vec![
@@ -240,4 +238,16 @@ pub fn template_files(
 fn apply_vars(source: &str, vars: &[(&str, &str)]) -> String {
     vars.iter()
         .fold(source.to_string(), |acc, (k, v)| acc.replace(k, v))
+}
+
+fn ui_ready_axonyx_toml() -> String {
+    let mut source = APP_AXONYX_TOML.replace("enabled = []", "enabled = [\"ui\"]");
+    source.push_str(
+        r#"
+
+[package_overrides]
+"@axonyx/ui" = "./vendor/axonyx-ui"
+"#,
+    );
+    source
 }
