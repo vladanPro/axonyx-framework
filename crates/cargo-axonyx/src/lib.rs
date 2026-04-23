@@ -607,6 +607,7 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::InvalidBindingAttr { .. }
         | AxConvertV2Error::ControlBranchAttrsNotSupported { .. }
         | AxConvertV2Error::DuplicateControlBranch { .. }
+        | AxConvertV2Error::ControlBranchMustBeLast { .. }
         | AxConvertV2Error::UnexpectedControlBranch { .. }
         | AxConvertV2Error::InvalidHeadChild
         | AxConvertV2Error::UnsupportedHeadTag { .. }
