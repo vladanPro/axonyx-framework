@@ -322,7 +322,7 @@ fn check_imports(
             let line = import_source_line(source, &import_decl.source);
 
             if let Some(import_path) = resolved.as_ref().filter(|path| path.exists()) {
-                return validate_import_target(path, line, &import_decl.source, import_path);
+                return validate_import_target(root, path, line, &import_decl.source, import_path);
             }
 
             let detail = resolved
@@ -346,29 +346,160 @@ fn check_imports(
 }
 
 fn validate_import_target(
+    root: &Path,
     importing_path: &Path,
     import_line: usize,
     import_source: &str,
     import_path: &Path,
 ) -> Option<CheckDiagnostic> {
-    let source = fs::read_to_string(import_path).ok()?;
-    let error = parse_ax_auto(&source).err()?;
-    let target_line = line_from_auto_parse_error(&error).unwrap_or(1);
+    let mut stack = vec![canonical_path(importing_path)];
+    let error = validate_import_path_recursive(root, import_path, &mut stack).err()?;
+
+    let (code, message) = match error {
+        ImportValidationError::Parse {
+            path,
+            line,
+            message,
+        } if same_path(&path, import_path) => (
+            "axonyx-import-parse",
+            format!(
+                "import `{}` resolved to '{}' but that file is not valid .ax (line {}: {})",
+                import_source,
+                display_path(import_path),
+                line,
+                message
+            ),
+        ),
+        ImportValidationError::Parse {
+            path,
+            line,
+            message,
+        } => (
+            "axonyx-import-chain",
+            format!(
+                "import `{}` resolved to '{}' but its import chain is broken: '{}' is not valid .ax (line {}: {})",
+                import_source,
+                display_path(import_path),
+                display_path(&path),
+                line,
+                message
+            ),
+        ),
+        ImportValidationError::Missing {
+            from_path,
+            import_source: nested_source,
+            expected,
+        } => {
+            let detail = expected
+                .as_ref()
+                .map(|path| format!(" expected '{}'", display_path(path)))
+                .unwrap_or_default();
+            (
+                "axonyx-import-chain",
+                format!(
+                    "import `{}` resolved to '{}' but its import chain is broken: '{}' imports `{}`{}",
+                    import_source,
+                    display_path(import_path),
+                    display_path(&from_path),
+                    nested_source,
+                    detail
+                ),
+            )
+        }
+        ImportValidationError::Cycle { chain } => (
+            "axonyx-import-cycle",
+            format!(
+                "import `{}` resolved to '{}' but its import chain contains a cycle: {}",
+                import_source,
+                display_path(import_path),
+                chain
+                    .iter()
+                    .map(|path| format!("'{}'", display_path(path)))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ),
+        ),
+    };
 
     Some(CheckDiagnostic {
         file: display_path(importing_path),
         line: import_line,
         column: 1,
         severity: "error",
-        code: "axonyx-import-parse",
-        message: format!(
-            "import `{}` resolved to '{}' but that file is not valid .ax (line {}: {})",
-            import_source,
-            display_path(import_path),
-            target_line,
-            message_from_auto_parse_error(&error)
-        ),
+        code,
+        message,
     })
+}
+
+#[derive(Debug)]
+enum ImportValidationError {
+    Missing {
+        from_path: PathBuf,
+        import_source: String,
+        expected: Option<PathBuf>,
+    },
+    Parse {
+        path: PathBuf,
+        line: usize,
+        message: String,
+    },
+    Cycle {
+        chain: Vec<PathBuf>,
+    },
+}
+
+fn validate_import_path_recursive(
+    root: &Path,
+    path: &Path,
+    stack: &mut Vec<PathBuf>,
+) -> Result<(), ImportValidationError> {
+    let canonical = canonical_path(path);
+    if let Some(index) = stack.iter().position(|entry| same_path(entry, &canonical)) {
+        let mut chain = stack[index..].to_vec();
+        chain.push(canonical);
+        return Err(ImportValidationError::Cycle { chain });
+    }
+
+    let source = fs::read_to_string(path).map_err(|_| ImportValidationError::Missing {
+        from_path: path.to_path_buf(),
+        import_source: String::new(),
+        expected: Some(path.to_path_buf()),
+    })?;
+    let document = parse_ax_auto(&source).map_err(|error| ImportValidationError::Parse {
+        path: path.to_path_buf(),
+        line: line_from_auto_parse_error(&error).unwrap_or(1),
+        message: message_from_auto_parse_error(&error),
+    })?;
+
+    stack.push(canonical);
+
+    for import_decl in document.imports {
+        let resolved = resolve_preview_import_path(root, &import_decl.source);
+        let Some(import_path) = resolved.as_ref().filter(|path| path.exists()) else {
+            stack.pop();
+            return Err(ImportValidationError::Missing {
+                from_path: path.to_path_buf(),
+                import_source: import_decl.source,
+                expected: resolved,
+            });
+        };
+
+        if let Err(error) = validate_import_path_recursive(root, import_path, stack) {
+            stack.pop();
+            return Err(error);
+        }
+    }
+
+    stack.pop();
+    Ok(())
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    canonical_path(left) == canonical_path(right)
 }
 
 fn import_source_line(source: &str, import_source: &str) -> usize {
@@ -2901,6 +3032,93 @@ page Home
             .message
             .contains("vendor/custom-ui/src/ax/foundry/SectionCard.ax"));
         assert!(diagnostics[0].message.contains("line 2"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_reports_nested_missing_import_chain() {
+        let root = make_temp_dir("check-nested-missing-import-chain");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/components/SiteCard.ax"),
+            r#"
+import { InnerCard } from "@/components/InnerCard.ax"
+
+page SiteCard
+<InnerCard />
+"#,
+        )
+        .expect("component should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SiteCard } from "@/components/SiteCard.ax"
+
+page Home
+<SiteCard />
+"#,
+            Some(&root),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-import-chain");
+        assert!(diagnostics[0].message.contains("SiteCard.ax"));
+        assert!(diagnostics[0].message.contains("InnerCard.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_reports_import_cycle() {
+        let root = make_temp_dir("check-import-cycle");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/components/SiteCard.ax"),
+            r#"
+import { InnerCard } from "@/components/InnerCard.ax"
+
+page SiteCard
+<InnerCard />
+"#,
+        )
+        .expect("site card should write");
+        fs::write(
+            root.join("app/components/InnerCard.ax"),
+            r#"
+import { SiteCard } from "@/components/SiteCard.ax"
+
+page InnerCard
+<SiteCard />
+"#,
+        )
+        .expect("inner card should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SiteCard } from "@/components/SiteCard.ax"
+
+page Home
+<SiteCard />
+"#,
+            Some(&root),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-import-cycle");
+        assert!(diagnostics[0].message.contains("SiteCard.ax"));
+        assert!(diagnostics[0].message.contains("InnerCard.ax"));
+        assert!(diagnostics[0].message.contains("cycle"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
