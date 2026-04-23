@@ -1,5 +1,7 @@
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
+import { CommandList } from "@axonyx/ui/foundry/CommandList.ax"
 import { DocsCallout } from "@axonyx/ui/foundry/DocsCallout.ax"
+import { DocsCodeBlock } from "@axonyx/ui/foundry/DocsCodeBlock.ax"
 import { DocsNav } from "@axonyx/ui/foundry/DocsNav.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
@@ -82,5 +84,30 @@ page Home
       <a slot="actions" href="/posts">Open posts route</a>
       <a slot="actions" href="/">Keep iterating</a>
     </DocsNav>
+  </ContentGrid>
+
+  <ContentGrid cols={2} gap="lg">
+    <CommandList title="Core Commands">
+      <Copy slot="eyebrow">Site Loop</Copy>
+      <ol>
+        <li>
+          Start the local route-aware dev loop.
+          <code>cargo ax run dev</code>
+        </li>
+        <li>
+          Generate a static preview when needed.
+          <code>cargo run</code>
+        </li>
+        <li>
+          Inspect and edit the route source.
+          <code>app/page.ax</code>
+        </li>
+      </ol>
+      <a slot="actions" href="/posts">Open posts route</a>
+    </CommandList>
+    <DocsCodeBlock title="Home Route Shape">
+      <Copy slot="eyebrow">Example</Copy>
+      {"page Home\n\n<Container max=\"xl\">\n  <PageHeader title=\"{{APP_NAME}}\">\n    <Copy tone=\"lead\">Your first site section.</Copy>\n  </PageHeader>\n</Container>"}
+    </DocsCodeBlock>
   </ContentGrid>
 </Container>

@@ -1,5 +1,7 @@
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
+import { CommandList } from "@axonyx/ui/foundry/CommandList.ax"
 import { DocsSection } from "@axonyx/ui/foundry/DocsSection.ax"
+import { DocsCodeBlock } from "@axonyx/ui/foundry/DocsCodeBlock.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
@@ -61,4 +63,33 @@ page GettingStarted
     <Copy slot="aside" tone="muted">Keep assets in public/ and backend handlers in routes/ or jobs/ only when needed.</Copy>
     <a slot="actions" href="/reference">Open route reference</a>
   </DocsSection>
+
+  <ContentGrid cols={2} gap="lg">
+    <CommandList title="Core Commands">
+      <Copy slot="eyebrow">CLI Loop</Copy>
+      <ol>
+        <li>
+          Generate the project.
+          <code>create-axonyx {{APP_SLUG}} --template docs</code>
+        </li>
+        <li>
+          Move into the app directory.
+          <code>cd {{APP_SLUG}}</code>
+        </li>
+        <li>
+          Start local development.
+          <code>cargo ax run dev</code>
+        </li>
+        <li>
+          Or generate a quick preview file.
+          <code>cargo run</code>
+        </li>
+      </ol>
+      <a slot="actions" href="/reference">See CLI reference</a>
+    </CommandList>
+    <DocsCodeBlock title="Starter Layout Shape">
+      <Copy slot="eyebrow">Example</Copy>
+      {"import { SiteShell } from \"@axonyx/ui/foundry/SiteShell.ax\"\n\npage SiteLayout\n\n<Head>\n  <Title>{{APP_NAME}}</Title>\n  <Theme>silver</Theme>\n</Head>\n\n<SiteShell max=\"xl\">\n  <Slot />\n</SiteShell>"}
+    </DocsCodeBlock>
+  </ContentGrid>
 </Container>
