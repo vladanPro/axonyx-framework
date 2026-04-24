@@ -15,6 +15,7 @@ use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseErr
 use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
 use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::AxParseV2Error;
+use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
     preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
@@ -552,6 +553,7 @@ fn message_from_auto_parse_error(error: &AxAutoParseError) -> String {
     match error {
         AxAutoParseError::V1(error) => error.to_string(),
         AxAutoParseError::V2(error) => error.to_string(),
+        AxAutoParseError::Semantic(error) => error.to_string(),
         AxAutoParseError::Convert(error) => error.to_string(),
     }
 }
@@ -560,6 +562,7 @@ fn line_from_auto_parse_error(error: &AxAutoParseError) -> Option<usize> {
     match error {
         AxAutoParseError::V1(error) => line_from_ax_parse_error(error),
         AxAutoParseError::V2(error) => line_from_ax_parse_v2_error(error),
+        AxAutoParseError::Semantic(error) => line_from_semantic_error(error),
         AxAutoParseError::Convert(error) => line_from_convert_error(error),
     }
 }
@@ -615,6 +618,14 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::HeadValueRequiresSingleChild { .. }
         | AxConvertV2Error::HeadValueInvalidChild { .. }
         | AxConvertV2Error::HeadTagChildrenNotSupported { .. } => Some(1),
+    }
+}
+
+fn line_from_semantic_error(error: &AxSemanticV2Error) -> Option<usize> {
+    match error {
+        AxSemanticV2Error::ReservedImportName { .. }
+        | AxSemanticV2Error::HeadTagOutsideHead { .. }
+        | AxSemanticV2Error::HeadOutsideTopLevel => Some(1),
     }
 }
 
@@ -2789,6 +2800,27 @@ page SectionCard
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 2);
         assert_eq!(diagnostics[0].code, "axonyx-parse");
+    }
+
+    #[test]
+    fn check_ax_source_reports_reserved_import_name() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+import { Link } from "@axonyx/ui/foundry/Link.ax"
+
+page Home
+<Link href="/">Home</Link>
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 1);
+        assert_eq!(diagnostics[0].code, "axonyx-parse");
+        assert!(diagnostics[0].message.contains("reserved"));
+        assert!(diagnostics[0].message.contains("Link"));
     }
 
     #[test]
