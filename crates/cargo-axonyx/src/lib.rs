@@ -1793,7 +1793,7 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
     let import_resolver = |source: &str| load_preview_import_source(&state.root, source);
 
-    preview_ax_route_with_request_context_and_imports(
+    let html = preview_ax_route_with_request_context_and_imports(
         &layout_refs,
         &loader_refs,
         &action_refs,
@@ -1809,13 +1809,19 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
             route.request_path,
             route.page_path.display()
         )
-    })
+    })?;
+
+    Ok(apply_theme_config(&state.root, html))
 }
 
 fn route_version(root: &Path, route: &ResolvedRoute) -> Result<String> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut visited = std::collections::BTreeSet::new();
     route.request_path.hash(&mut hasher);
+    let config_path = root.join("Axonyx.toml");
+    if config_path.exists() {
+        hash_file(&config_path, &mut hasher)?;
+    }
 
     hash_ax_file_with_imports(root, &route.page_path, &mut hasher, &mut visited)?;
     for path in &route.layout_paths {
@@ -1829,6 +1835,61 @@ fn route_version(root: &Path, route: &ResolvedRoute) -> Result<String> {
     }
 
     Ok(format!("{:x}", hasher.finish()))
+}
+
+fn apply_theme_config(root: &Path, html: String) -> String {
+    let Some(theme_table) = axonyx_config_table(root, "theme") else {
+        return html;
+    };
+
+    let mut html = html;
+
+    if let Some(active) = theme_table
+        .get("active")
+        .and_then(toml::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        html = ensure_html_theme_attr(&html, active.trim());
+    }
+
+    if let Some(stylesheet) = theme_table
+        .get("stylesheet")
+        .and_then(toml::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        html = ensure_head_stylesheet(&html, stylesheet.trim());
+    }
+
+    html
+}
+
+fn ensure_html_theme_attr(html: &str, theme: &str) -> String {
+    if html.contains("data-theme=") {
+        return html.to_string();
+    }
+
+    html.replacen(
+        "<html",
+        &format!("<html data-theme=\"{}\"", html_escape(theme)),
+        1,
+    )
+}
+
+fn ensure_head_stylesheet(html: &str, stylesheet: &str) -> String {
+    if html.contains(stylesheet) {
+        return html.to_string();
+    }
+
+    let tag = format!(
+        "<link rel=\"stylesheet\" href=\"{}\">",
+        html_escape(stylesheet)
+    );
+
+    if html.contains("</head>") {
+        return html.replacen("</head>", &format!("{tag}</head>"), 1);
+    }
+
+    html.to_string()
 }
 
 fn hash_file(path: &Path, hasher: &mut impl Hasher) -> Result<()> {
@@ -2655,6 +2716,90 @@ page Home
         assert!(html.contains("Hello from import"));
         assert!(html.contains("Inner body"));
         assert!(!html.contains("data-import-source"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn render_route_applies_theme_config_when_head_has_no_theme() {
+        let root = make_temp_dir("theme-config-render");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[theme]
+active = "silver"
+stylesheet = "/css/axonyx-ui/index.css"
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+<Copy>Hello theme</Copy>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html = render_route_html(&state, &route).expect("route should render");
+
+        assert!(html.contains(r#"<html data-theme="silver" lang="en">"#));
+        assert!(html.contains(r#"<link rel="stylesheet" href="/css/axonyx-ui/index.css">"#));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn render_route_keeps_explicit_head_theme_over_config_theme() {
+        let root = make_temp_dir("theme-config-explicit");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[theme]
+active = "silver"
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+<Head>
+  <Theme>gold</Theme>
+</Head>
+
+<Copy>Hello explicit theme</Copy>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html = render_route_html(&state, &route).expect("route should render");
+
+        assert!(html.contains(r#"data-theme="gold""#));
+        assert!(!html.contains(r#"data-theme="silver""#));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
