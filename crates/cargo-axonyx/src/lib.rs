@@ -592,6 +592,7 @@ fn line_from_ax_parse_v2_error(error: &AxParseV2Error) -> Option<usize> {
         | AxParseV2Error::MissingImportFrom { line }
         | AxParseV2Error::EmptyImportList { line }
         | AxParseV2Error::InvalidPage { line }
+        | AxParseV2Error::InvalidComponent { line }
         | AxParseV2Error::DuplicatePage { line }
         | AxParseV2Error::InvalidTag { line }
         | AxParseV2Error::UnterminatedTag { line }
@@ -624,6 +625,9 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
 fn line_from_semantic_error(error: &AxSemanticV2Error) -> Option<usize> {
     match error {
         AxSemanticV2Error::ReservedImportName { .. }
+        | AxSemanticV2Error::ReservedComponentName { .. }
+        | AxSemanticV2Error::DuplicateComponentName { .. }
+        | AxSemanticV2Error::ComponentNameConflictsWithImport { .. }
         | AxSemanticV2Error::HeadTagOutsideHead { .. }
         | AxSemanticV2Error::HeadOutsideTopLevel => Some(1),
     }
