@@ -36,3 +36,25 @@ The goal is to make these three developer stories feel real:
 1. generate an app
 2. depend on a stable runtime package
 3. author UI and backend behavior in Axonyx-native shapes
+
+## Recommended Authoring Path
+
+For framework work today, the recommended Axonyx path is:
+
+- JSX-like `.ax` files
+- `app/layout.ax` and `app/page.ax` as the main route entrypoints
+- nested app routes for site structure
+- `loader.ax` and `actions.ax` for route-local backend behavior
+- imports from local components and `@axonyx/ui`
+
+That is the path already exercised by the current CLI, route rendering flow, and import
+resolution logic.
+
+## Legacy vs Current
+
+Axonyx still contains older indentation-first `.ax` parsing because it is useful for
+compatibility, reference material, and transition work.
+
+But if we are deciding how to write new pages, new examples, or new starter templates,
+the preferred answer should be the JSX-like `.ax` direction rather than the indentation
+syntax.

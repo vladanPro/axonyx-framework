@@ -51,6 +51,16 @@ Available templates today:
 - `site`
 - `docs`
 
+Recommended authoring path today:
+
+- JSX-like `.ax` files in `app/**/page.ax` and `app/**/layout.ax`
+- nested app routes plus route-local `loader.ax` and `actions.ax`
+- imports from local app components via `@/components/...`
+- imports from Axonyx UI packages via `@axonyx/ui/...`
+
+Legacy indentation-first `.ax` syntax still exists for compatibility and reference work,
+but new examples and new framework authoring should prefer the JSX-like `.ax` direction.
+
 Example:
 
 ```bash
@@ -145,6 +155,13 @@ The first structured docs index now lives in:
 ```text
 docs/README.md
 ```
+
+Recommended reading order for the current framework path:
+
+- `docs/overview.md`
+- `docs/ax-v2-authoring.md`
+- `docs/templates.md`
+- `docs/backend-authoring.md`
 
 ## Reactive Component Draft
 

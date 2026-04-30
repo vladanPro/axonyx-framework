@@ -8,6 +8,18 @@ This starter is oriented around a marketing or presentation site shape with a st
 
 The `site` template already vendors `axonyx-ui` into `vendor/axonyx-ui`, syncs the Foundry CSS into `public/css/axonyx-ui`, and wires the `silver` theme in `app/layout.ax`.
 
+## Authoring Direction
+
+This starter follows the recommended AX v2 authoring path:
+
+- JSX-like `.ax` files
+- `app/layout.ax` and `app/page.ax` route entrypoints
+- nested app routes for site sections
+- imports from `@/components/...` and `@axonyx/ui/...`
+
+Older indentation-first `.ax` syntax still exists for compatibility, but new site pages
+should be authored in JSX-like `.ax`.
+
 ## Run
 
 ```bash
@@ -25,6 +37,13 @@ cargo ax run dev
 ```
 
 That serves the current app routes locally with nested layout composition and dev-time browser refresh. The older `cargo axonyx dev` path can still stay as a compatibility alias.
+
+Suggested first edit:
+
+- open `app/page.ax`
+- change hero copy or card titles
+- run `cargo ax run dev`
+- reload `http://127.0.0.1:3000`
 
 ## Starter Shape
 
