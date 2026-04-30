@@ -80,3 +80,12 @@ Generated apps currently include:
 - `jobs/` for scheduled or background-style backend authoring
 - `src/generated/` for generated backend Rust output
 - `src/db/` and `src/domain/` as early integration seams
+
+## Next Step To Close Core
+
+After the first run loop works, use the proof checklist to verify the full framework story:
+
+- [Proof App Checklist](./proof-app-checklist.md)
+
+That checklist is the fastest path to confirm that your project is not only scaffolded, but
+also aligned with the current AX v2 route, import, loader/action, and dev-server flow.

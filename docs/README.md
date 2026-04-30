@@ -6,7 +6,9 @@ This folder is the first structured documentation layer for the Axonyx framework
 
 - [Overview](./overview.md)
 - [AX v2 Authoring](./ax-v2-authoring.md)
+- [v0.1 Stable Surface](./v0-1-stable-surface.md)
 - [Getting Started](./getting-started.md)
+- [Proof App Checklist](./proof-app-checklist.md)
 - [Runtime Sources](./runtime-sources.md)
 - [Templates](./templates.md)
 - [Backend Authoring](./backend-authoring.md)
