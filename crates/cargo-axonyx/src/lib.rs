@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use axonyx_core::ax_backend_ast_prelude::AxBackendBlock;
 use axonyx_core::ax_ast_prelude::AxImport;
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
@@ -177,7 +178,9 @@ struct CheckDiagnostic {
 
 #[derive(Debug, Clone, Serialize)]
 struct RouteManifestItem {
+    kind: &'static str,
     route: String,
+    method: Option<String>,
     file: String,
     layouts: Vec<String>,
     loader: Option<String>,
@@ -877,6 +880,18 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
 }
 
 fn collect_app_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>> {
+    let mut routes = collect_page_route_manifest(root)?;
+    routes.extend(collect_backend_route_manifest(root)?);
+    routes.sort_by(|left, right| {
+        left.route
+            .cmp(&right.route)
+            .then_with(|| left.kind.cmp(right.kind))
+            .then_with(|| left.method.cmp(&right.method))
+    });
+    Ok(routes)
+}
+
+fn collect_page_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>> {
     let app_root = root.join("app");
     if !app_root.exists() {
         return Ok(Vec::new());
@@ -884,7 +899,6 @@ fn collect_app_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>> {
 
     let mut routes = Vec::new();
     collect_app_route_manifest_from(root, &app_root, &app_root, &mut routes)?;
-    routes.sort_by(|left, right| left.route.cmp(&right.route));
     Ok(routes)
 }
 
@@ -952,7 +966,9 @@ fn app_route_manifest_item(
     let actions_path = page_dir.join("actions.ax");
 
     Ok(RouteManifestItem {
+        kind: "page",
         route,
+        method: None,
         file: display_relative_path(root, page_path),
         layouts,
         loader: loader_path
@@ -963,6 +979,45 @@ fn app_route_manifest_item(
             .then(|| display_relative_path(root, &actions_path)),
         params,
     })
+}
+
+fn collect_backend_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>> {
+    let routes_root = root.join("routes");
+    if !routes_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sources = Vec::new();
+    collect_backend_sources_in_dir(&routes_root, &routes_root, &mut sources, true)?;
+
+    let mut routes = Vec::new();
+    for (relative_path, source) in sources {
+        let document = parse_backend_ax(&source).with_context(|| {
+            format!(
+                "failed to parse backend route source '{}'",
+                routes_root.join(&relative_path).display()
+            )
+        })?;
+
+        for block in document.blocks {
+            let AxBackendBlock::Route(route) = block else {
+                continue;
+            };
+
+            routes.push(RouteManifestItem {
+                kind: "api",
+                route: route.path.clone(),
+                method: Some(route.method),
+                file: format!("routes/{relative_path}"),
+                layouts: Vec::new(),
+                loader: None,
+                actions: None,
+                params: route_params_from_pattern(&route.path),
+            });
+        }
+    }
+
+    Ok(routes)
 }
 
 fn route_pattern_from_segments(segments: &[&str]) -> String {
@@ -982,19 +1037,36 @@ fn route_pattern_from_segments(segments: &[&str]) -> String {
     format!("/{route}")
 }
 
+fn route_params_from_pattern(pattern: &str) -> Vec<String> {
+    pattern
+        .split('/')
+        .filter_map(|segment| {
+            segment
+                .strip_prefix(':')
+                .filter(|name| !name.is_empty())
+                .or_else(|| parse_dynamic_app_segment(segment))
+                .map(str::to_string)
+        })
+        .collect()
+}
+
 fn display_relative_path(root: &Path, path: &Path) -> String {
     display_path(path.strip_prefix(root).unwrap_or(path))
 }
 
 fn print_routes_text(routes: &[RouteManifestItem]) {
     if routes.is_empty() {
-        println!("No app routes found in app/**/page.ax.");
+        println!("No routes found in app/**/page.ax or routes/**/*.ax.");
         return;
     }
 
-    println!("App routes:");
+    println!("Routes:");
     for route in routes {
-        let mut details = vec![format!("file={}", route.file)];
+        let mut details = vec![format!("kind={}", route.kind)];
+        if let Some(method) = &route.method {
+            details.push(format!("method={method}"));
+        }
+        details.push(format!("file={}", route.file));
         if !route.layouts.is_empty() {
             details.push(format!("layouts={}", route.layouts.len()));
         }
@@ -2631,10 +2703,13 @@ mod tests {
         let routes = collect_app_route_manifest(&root).expect("manifest should collect");
 
         assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].kind, "page");
         assert_eq!(routes[0].route, "/");
+        assert_eq!(routes[0].method, None);
         assert_eq!(routes[0].file, "app/page.ax");
         assert_eq!(routes[0].layouts, vec!["app/layout.ax"]);
 
+        assert_eq!(routes[1].kind, "page");
         assert_eq!(routes[1].route, "/posts/:slug");
         assert_eq!(routes[1].params, vec!["slug"]);
         assert_eq!(routes[1].layouts.len(), 2);
@@ -2646,6 +2721,38 @@ mod tests {
             routes[1].actions.as_deref(),
             Some("app/posts/[slug]/actions.ax")
         );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn route_manifest_includes_backend_api_routes() {
+        let root = make_temp_dir("backend-route-manifest");
+        fs::create_dir_all(root.join("routes/api")).expect("api routes dir should exist");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts"
+  return ok
+
+route POST "/api/posts/:slug"
+  return ok
+"#,
+        )
+        .expect("route source should write");
+
+        let routes = collect_app_route_manifest(&root).expect("manifest should collect");
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].kind, "api");
+        assert_eq!(routes[0].method.as_deref(), Some("GET"));
+        assert_eq!(routes[0].route, "/api/posts");
+        assert_eq!(routes[0].file, "routes/api/posts.ax");
+
+        assert_eq!(routes[1].kind, "api");
+        assert_eq!(routes[1].method.as_deref(), Some("POST"));
+        assert_eq!(routes[1].route, "/api/posts/:slug");
+        assert_eq!(routes[1].params, vec!["slug"]);
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

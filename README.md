@@ -150,8 +150,8 @@ cargo ax routes
 cargo ax routes --format json
 ```
 
-This lists `app/**/page.ax` routes, dynamic params, nested layout count, and route-local
-`loader.ax` / `actions.ax` files.
+This lists `app/**/page.ax` page routes, `routes/**/*.ax` backend routes, dynamic params,
+nested layout count, and route-local `loader.ax` / `actions.ax` files.
 
 ## Planned global CLI flow
 
