@@ -3,6 +3,10 @@ name = "cargo-axonyx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Cargo helper commands for Axonyx apps"
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
 autobins = false
 
 [[bin]]
