@@ -20,23 +20,23 @@ This starter follows the recommended AX v2 authoring path:
 Older indentation-first `.ax` syntax still exists for compatibility, but new site pages
 should be authored in JSX-like `.ax`.
 
-## Run
+## Build And Run
 
 ```bash
-cargo run
-```
-
-This generates a first page preview at `target/axonyx-preview.html`.
-
-The preview composes `app/layout.ax` around `app/page.ax`, so the first loop already follows the intended Axonyx app structure.
-
-If `cargo-axonyx` is installed, you can also run:
-
-```bash
+cargo ax check
+cargo ax build
 cargo ax run dev
 ```
 
-That serves the current app routes locally with nested layout composition and dev-time browser refresh. The older `cargo axonyx dev` path can still stay as a compatibility alias.
+This validates `.ax` sources, regenerates `src/generated/backend.rs`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+
+```bash
+cargo ax run start --host 0.0.0.0 --port 3000
+```
+
+Use `run start` for a production-style process without the dev live-reload client. On hosted platforms, pass the platform `PORT` value to `--port`.
+
+The older `cargo run` preview loop still generates `target/axonyx-preview.html`, but new site work should prefer the `cargo ax` route-aware loop.
 
 Suggested first edit:
 

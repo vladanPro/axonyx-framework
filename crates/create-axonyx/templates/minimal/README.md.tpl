@@ -6,21 +6,23 @@ Generated with `create-axonyx`.
 
 If you selected the registry runtime source before the package is published, switch to `--runtime-source git` or `--runtime-source path` until the first public release is available.
 
-## Run
+## Build And Run
 
 ```bash
-cargo run
-```
-
-This generates a first page preview at `target/axonyx-preview.html`.
-
-If `cargo-axonyx` is installed, you can also start the local dev server:
-
-```bash
+cargo ax check
+cargo ax build
 cargo ax run dev
 ```
 
-This serves the current `.ax` routes at `http://127.0.0.1:3000` and refreshes the browser when `app/**/page.ax` or `app/**/layout.ax` changes. The older `cargo axonyx dev` path can still stay as a compatibility alias.
+This validates `.ax` sources, regenerates `src/generated/backend.rs`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+
+```bash
+cargo ax run start --host 0.0.0.0 --port 3000
+```
+
+Use `run start` for a production-style process without the dev live-reload client. On hosted platforms, pass the platform `PORT` value to `--port`.
+
+The older `cargo run` preview loop still generates `target/axonyx-preview.html`, but new app work should prefer the `cargo ax` route-aware loop.
 
 ## Authoring Direction
 
@@ -36,8 +38,8 @@ but new app work should prefer JSX-like `.ax`.
 Use it as the smallest "Hello Axonyx" loop:
 
 1. edit `app/layout.ax` or `app/page.ax`
-2. run `cargo run`
-3. refresh `target/axonyx-preview.html`
+2. run `cargo ax run dev`
+3. reload `http://127.0.0.1:3000`
 
 Suggested first edit:
 

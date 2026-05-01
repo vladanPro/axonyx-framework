@@ -20,21 +20,23 @@ This starter follows the recommended AX v2 authoring path:
 Older indentation-first `.ax` syntax still exists for compatibility, but new docs pages
 should be authored in JSX-like `.ax`.
 
-## Run
+## Build And Run
 
 ```bash
-cargo run
-```
-
-This generates a first page preview at `target/axonyx-preview.html`.
-
-If `cargo-axonyx` is installed, you can also run:
-
-```bash
+cargo ax check
+cargo ax build
 cargo ax run dev
 ```
 
-That serves docs routes locally with nested layout composition, static assets from `public/`, and dev-time browser refresh.
+This validates `.ax` sources, regenerates `src/generated/backend.rs`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+
+```bash
+cargo ax run start --host 0.0.0.0 --port 3000
+```
+
+Use `run start` for a production-style process without the dev live-reload client. On hosted platforms, pass the platform `PORT` value to `--port`.
+
+The older `cargo run` preview loop still generates `target/axonyx-preview.html`, but new docs work should prefer the `cargo ax` route-aware loop.
 
 Suggested first edit:
 

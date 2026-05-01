@@ -119,7 +119,9 @@ fn run() -> Result<()> {
     println!("Success! Axonyx app created at {}", target_dir.display());
     println!("Next steps:");
     println!("  cd {}", cli.project_name);
-    println!("  cargo run");
+    println!("  cargo ax check");
+    println!("  cargo ax build");
+    println!("  cargo ax run dev");
     println!("Template: {:?}", cli.template);
     Ok(())
 }
