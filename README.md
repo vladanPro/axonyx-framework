@@ -143,6 +143,16 @@ For route-aware local serving with an automatic backend compile at startup:
 cargo ax run dev
 ```
 
+To inspect the route tree that Axonyx sees:
+
+```bash
+cargo ax routes
+cargo ax routes --format json
+```
+
+This lists `app/**/page.ax` routes, dynamic params, nested layout count, and route-local
+`loader.ax` / `actions.ax` files.
+
 ## Planned global CLI flow
 
 Once published, we target:
