@@ -85,6 +85,7 @@ struct RunArgs {
 #[derive(Debug, Subcommand)]
 enum RunCommands {
     Dev(DevArgs),
+    Start(DevArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -118,6 +119,25 @@ struct StaticAsset {
 struct DevServerState {
     root: PathBuf,
     preview_store: Mutex<AxPreviewStore>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerMode {
+    Dev,
+    Start,
+}
+
+impl ServerMode {
+    fn inject_dev_client(self) -> bool {
+        matches!(self, ServerMode::Dev)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ServerMode::Dev => "dev",
+            ServerMode::Start => "start",
+        }
+    }
 }
 
 struct HttpRequest {
@@ -212,6 +232,7 @@ fn check_command(args: CheckArgs) -> Result<()> {
 fn run_command(args: RunArgs) -> Result<()> {
     match args.command {
         RunCommands::Dev(args) => run_dev_server(args),
+        RunCommands::Start(args) => run_start_server(args),
     }
 }
 
@@ -516,7 +537,10 @@ fn import_source_line(source: &str, import_source: &str) -> usize {
 
 fn looks_like_backend_ax(source: &str) -> bool {
     source.lines().map(str::trim_start).any(|line| {
-        line.starts_with("route ") || line.starts_with("loader ") || line.starts_with("action ")
+        line.starts_with("route ")
+            || line.starts_with("loader ")
+            || line.starts_with("action ")
+            || line.starts_with("job ")
     })
 }
 
@@ -716,32 +740,43 @@ fn add_module(module: ModuleKind) -> Result<()> {
 }
 
 fn run_dev_server(args: DevArgs) -> Result<()> {
+    run_http_server(args, ServerMode::Dev)
+}
+
+fn run_start_server(args: DevArgs) -> Result<()> {
+    run_http_server(args, ServerMode::Start)
+}
+
+fn run_http_server(args: DevArgs, mode: ServerMode) -> Result<()> {
     let root = app_root()?;
     let backend_status = compile_backend_from_app_root(&root)?;
 
     let bind = format!("{}:{}", args.host, args.port);
-    let listener =
-        TcpListener::bind(&bind).with_context(|| format!("failed to bind dev server at {bind}"))?;
+    let listener = TcpListener::bind(&bind)
+        .with_context(|| format!("failed to bind Axonyx server at {bind}"))?;
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(AxPreviewStore::default()),
     });
 
     print_backend_build_status(&backend_status);
-    println!("Axonyx dev server listening at http://{bind}");
+    println!("Axonyx {} server listening at http://{bind}", mode.label());
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
     );
+    if mode == ServerMode::Dev {
+        println!("Live reload polling is enabled.");
+    }
     println!("Press Ctrl+C to stop.");
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(error) = handle_connection(stream, &shared_state) {
-                    eprintln!("dev server error: {error:#}");
+                if let Err(error) = handle_connection(stream, &shared_state, mode) {
+                    eprintln!("Axonyx {} server error: {error:#}", mode.label());
                 }
             }
-            Err(error) => eprintln!("dev server connection error: {error}"),
+            Err(error) => eprintln!("Axonyx {} server connection error: {error}", mode.label()),
         }
     }
 
@@ -1261,7 +1296,11 @@ fn update_axonyx_toml(
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream, state: &DevServerState) -> Result<()> {
+fn handle_connection(
+    mut stream: TcpStream,
+    state: &DevServerState,
+    mode: ServerMode,
+) -> Result<()> {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .context("failed to set read timeout")?;
@@ -1292,7 +1331,10 @@ fn handle_connection(mut stream: TcpStream, state: &DevServerState) -> Result<()
         return Ok(());
     }
 
-    if request.method == "GET" && request.target.starts_with("/__axonyx/version") {
+    if mode == ServerMode::Dev
+        && request.method == "GET"
+        && request.target.starts_with("/__axonyx/version")
+    {
         let request_path = extract_version_path(&request.target).unwrap_or_else(|| "/".to_string());
         let Some(route) = resolve_route(&state.root, &request_path)? else {
             write_response(
@@ -1354,8 +1396,10 @@ fn handle_connection(mut stream: TcpStream, state: &DevServerState) -> Result<()
         return Ok(());
     };
 
-    let html = render_route_html(state, &route)?;
-    let html = inject_dev_client(&html, &route.request_path);
+    let mut html = render_route_html(state, &route)?;
+    if mode.inject_dev_client() {
+        html = inject_dev_client(&html, &route.request_path);
+    }
     write_response(
         &mut stream,
         "200 OK",

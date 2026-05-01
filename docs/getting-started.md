@@ -34,7 +34,16 @@ cargo ax run dev
 - `routes/**/*.ax`
 - `jobs/**/*.ax`
 
-`cargo ax run dev` now runs that backend sync once before starting the local route-aware dev server.
+`cargo ax run dev` now runs that backend sync once before starting the local route-aware dev server with live reload polling.
+
+For a production-style local run, use:
+
+```bash
+cargo ax build
+cargo ax run start --host 0.0.0.0 --port 3000
+```
+
+`cargo ax run start` serves the same Axonyx app routes and public assets without injecting the dev live-reload client. On a host such as Render, use the platform `PORT` value in the start command.
 
 ## Runtime Source Defaults
 

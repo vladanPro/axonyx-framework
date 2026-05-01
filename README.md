@@ -20,7 +20,7 @@ Repository URLs and local workspace folders are now aligned to `axonyx-*`.
 Current package roles inside this repo:
 
 - `create-axonyx`: CLI that scaffolds a new Axonyx app
-- `cargo-axonyx`: local CLI for `add` and `run dev`
+- `cargo-axonyx`: local CLI for `add`, `build`, `check`, `run dev`, and `run start`
 - runtime crates are imported from the `vendor/axonyx-runtime` submodule
 
 Generated apps can now target either:
@@ -100,6 +100,18 @@ and regenerates:
 
 ```text
 src/generated/backend.rs
+```
+
+Then run the route-aware server:
+
+```bash
+cargo ax run dev
+```
+
+For a production-style process without dev live reload:
+
+```bash
+cargo ax run start --host 0.0.0.0 --port 3000
 ```
 
 ### 1c) Create a new Axonyx app against the standalone runtime repo
