@@ -282,8 +282,72 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     for file in files {
         diagnostics.extend(check_ax_file_with_root(&file, Some(root))?);
     }
+    diagnostics.extend(check_route_manifest(root)?);
 
     Ok(diagnostics)
+}
+
+fn check_route_manifest(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let routes = collect_app_route_manifest(root)?;
+    let mut seen = std::collections::BTreeMap::<String, RouteManifestItem>::new();
+    let mut diagnostics = Vec::new();
+
+    for route in routes {
+        let key = route_conflict_key(&route);
+        if let Some(existing) = seen.get(&key) {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&root.join(&route.file)),
+                line: 1,
+                column: 1,
+                severity: "error",
+                code: "axonyx-route-duplicate",
+                message: format!(
+                    "duplicate {} route `{}` also defined in '{}'",
+                    route.kind,
+                    route_display_name(&route),
+                    existing.file
+                ),
+            });
+        } else {
+            seen.insert(key, route);
+        }
+    }
+
+    Ok(diagnostics)
+}
+
+fn route_conflict_key(route: &RouteManifestItem) -> String {
+    let canonical_route = canonical_route_conflict_pattern(&route.route);
+    match route.kind {
+        "api" => format!(
+            "api:{}:{}",
+            route.method.as_deref().unwrap_or("*"),
+            canonical_route
+        ),
+        _ => format!("page:{canonical_route}"),
+    }
+}
+
+fn canonical_route_conflict_pattern(route: &str) -> String {
+    route
+        .split('/')
+        .map(|segment| {
+            if segment.starts_with(':') && segment.len() > 1 {
+                ":param"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn route_display_name(route: &RouteManifestItem) -> String {
+    route
+        .method
+        .as_ref()
+        .map(|method| format!("{method} {}", route.route))
+        .unwrap_or_else(|| route.route.clone())
 }
 
 fn collect_ax_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -2753,6 +2817,65 @@ route POST "/api/posts/:slug"
         assert_eq!(routes[1].method.as_deref(), Some("POST"));
         assert_eq!(routes[1].route, "/api/posts/:slug");
         assert_eq!(routes[1].params, vec!["slug"]);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_duplicate_page_route_patterns() {
+        let root = make_temp_dir("duplicate-page-routes");
+        fs::create_dir_all(root.join("app/posts/[slug]")).expect("slug route should exist");
+        fs::create_dir_all(root.join("app/posts/[id]")).expect("id route should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/[slug]/page.ax"),
+            "page PostBySlug\n<Copy>{params.slug}</Copy>\n",
+        )
+        .expect("slug page should write");
+        fs::write(
+            root.join("app/posts/[id]/page.ax"),
+            "page PostById\n<Copy>{params.id}</Copy>\n",
+        )
+        .expect("id page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-route-duplicate");
+        assert!(diagnostics[0].message.contains("/posts/:"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_duplicate_backend_api_routes() {
+        let root = make_temp_dir("duplicate-api-routes");
+        fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts"
+  return ok
+"#,
+        )
+        .expect("first route should write");
+        fs::write(
+            root.join("routes/api/posts-copy.ax"),
+            r#"
+route GET "/api/posts"
+  return ok
+"#,
+        )
+        .expect("second route should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-route-duplicate");
+        assert!(diagnostics[0].message.contains("GET /api/posts"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

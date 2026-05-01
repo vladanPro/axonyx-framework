@@ -102,6 +102,14 @@ and regenerates:
 src/generated/backend.rs
 ```
 
+For validation while authoring:
+
+```bash
+cargo ax check
+```
+
+This validates page/backend `.ax` files, import chains, and duplicate page/API route patterns.
+
 Then run the route-aware server:
 
 ```bash
