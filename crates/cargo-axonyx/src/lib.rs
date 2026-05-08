@@ -56,7 +56,11 @@ struct AddArgs {
 }
 
 #[derive(Debug, Parser, Default)]
-struct BuildArgs {}
+struct BuildArgs {
+    /// Output directory for static HTML and public assets.
+    #[arg(long, default_value = "dist")]
+    out_dir: PathBuf,
+}
 
 #[derive(Debug, Parser)]
 struct CheckArgs {
@@ -166,6 +170,18 @@ enum BackendBuildStatus {
     },
 }
 
+enum StaticBuildStatus {
+    Generated {
+        route_count: usize,
+        skipped_dynamic_count: usize,
+        output_dir: PathBuf,
+    },
+    NoPages {
+        skipped_dynamic_count: usize,
+        output_dir: PathBuf,
+    },
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct CheckDiagnostic {
     file: String,
@@ -222,10 +238,12 @@ fn normalized_cli_args() -> Vec<OsString> {
     args
 }
 
-fn build_command(_args: BuildArgs) -> Result<()> {
+fn build_command(args: BuildArgs) -> Result<()> {
     let root = app_root()?;
     let status = compile_backend_from_app_root(&root)?;
+    let static_status = build_static_site_from_app_root(&root, &args.out_dir)?;
     print_backend_build_status(&status);
+    print_static_build_status(&static_status);
     Ok(())
 }
 
@@ -939,6 +957,123 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
                 "No backend .ax sources found; leaving generated backend at {}",
                 output_path.display()
             );
+        }
+    }
+}
+
+fn build_static_site_from_app_root(root: &Path, out_dir: &Path) -> Result<StaticBuildStatus> {
+    let output_dir = resolve_output_dir(root, out_dir);
+    let routes = collect_page_route_manifest(root)?;
+    let static_routes = routes
+        .iter()
+        .filter(|route| route.params.is_empty())
+        .collect::<Vec<_>>();
+    let skipped_dynamic_count = routes.len().saturating_sub(static_routes.len());
+
+    if !output_dir.exists() {
+        fs::create_dir_all(&output_dir)
+            .with_context(|| format!("failed to create '{}'", output_dir.display()))?;
+    }
+
+    copy_public_assets_to_dist(root, &output_dir)?;
+
+    if static_routes.is_empty() {
+        return Ok(StaticBuildStatus::NoPages {
+            skipped_dynamic_count,
+            output_dir,
+        });
+    }
+
+    let state = DevServerState {
+        root: root.to_path_buf(),
+        preview_store: Mutex::new(AxPreviewStore::default()),
+    };
+
+    for route in &static_routes {
+        let resolved = resolve_route(root, &route.route)?
+            .ok_or_else(|| anyhow::anyhow!("failed to resolve route '{}'", route.route))?;
+        let html = render_route_html(&state, &resolved)?;
+        let output_path = static_route_output_path(&output_dir, &route.route)?;
+
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create '{}'", parent.display()))?;
+        }
+
+        fs::write(&output_path, html)
+            .with_context(|| format!("failed to write '{}'", output_path.display()))?;
+    }
+
+    Ok(StaticBuildStatus::Generated {
+        route_count: static_routes.len(),
+        skipped_dynamic_count,
+        output_dir,
+    })
+}
+
+fn resolve_output_dir(root: &Path, out_dir: &Path) -> PathBuf {
+    if out_dir.is_absolute() {
+        out_dir.to_path_buf()
+    } else {
+        root.join(out_dir)
+    }
+}
+
+fn copy_public_assets_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
+    let public_dir = root.join("public");
+    if !public_dir.exists() {
+        return Ok(());
+    }
+
+    copy_dir_all_filtered(&public_dir, output_dir, |_| false)
+}
+
+fn static_route_output_path(output_dir: &Path, route: &str) -> Result<PathBuf> {
+    let normalized = normalize_request_path(route)?;
+    let segments = path_segments(&normalized);
+
+    if segments.is_empty() {
+        return Ok(output_dir.join("index.html"));
+    }
+
+    Ok(segments
+        .iter()
+        .fold(output_dir.to_path_buf(), |current, segment| {
+            current.join(segment)
+        })
+        .join("index.html"))
+}
+
+fn print_static_build_status(status: &StaticBuildStatus) {
+    match status {
+        StaticBuildStatus::Generated {
+            route_count,
+            skipped_dynamic_count,
+            output_dir,
+        } => {
+            println!(
+                "Generated static site from {route_count} page route(s) into {}",
+                output_dir.display()
+            );
+            if *skipped_dynamic_count > 0 {
+                println!(
+                    "Skipped {skipped_dynamic_count} dynamic page route(s); provide params through a future prerender config."
+                );
+            }
+        }
+        StaticBuildStatus::NoPages {
+            skipped_dynamic_count,
+            output_dir,
+        } => {
+            println!(
+                "No static page routes found; copied public assets into {}",
+                output_dir.display()
+            );
+            if *skipped_dynamic_count > 0 {
+                println!(
+                    "Skipped {skipped_dynamic_count} dynamic page route(s); provide params through a future prerender config."
+                );
+            }
         }
     }
 }
@@ -2331,8 +2466,11 @@ fn resolve_package_override_import_path(root: &Path, source: &str) -> Option<Pat
 
     let mut base = resolve_config_base_path(root, target)?;
     let ax_root = base.join("src").join("ax");
+    let src_root = base.join("src");
     if ax_root.exists() {
         base = ax_root;
+    } else if src_root.exists() {
+        base = src_root;
     }
 
     Some(join_import_relative(base, relative))
@@ -2358,6 +2496,7 @@ fn axonyx_ui_import_bases(root: &Path) -> Vec<PathBuf> {
     let mut bases = Vec::new();
 
     bases.push(root.join("vendor").join("axonyx-ui").join("src").join("ax"));
+    bases.push(root.join("vendor").join("axonyx-ui").join("src"));
 
     if let Some(workspace_root) = root.parent() {
         bases.push(
@@ -2368,7 +2507,15 @@ fn axonyx_ui_import_bases(root: &Path) -> Vec<PathBuf> {
                 .join("src")
                 .join("ax"),
         );
+        bases.push(
+            workspace_root
+                .join("axonyx-framework")
+                .join("vendor")
+                .join("axonyx-ui")
+                .join("src"),
+        );
         bases.push(workspace_root.join("axonyx-ui").join("src").join("ax"));
+        bases.push(workspace_root.join("axonyx-ui").join("src"));
     }
 
     bases
@@ -2952,6 +3099,109 @@ route GET "/api/posts"
     }
 
     #[test]
+    fn build_static_site_generates_html_and_copies_public_assets() {
+        let root = make_temp_dir("static-build");
+        fs::create_dir_all(root.join("app/docs")).expect("docs dir should exist");
+        fs::create_dir_all(root.join("public/css")).expect("public css dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/layout.ax"),
+            r#"
+page RootLayout
+<Head>
+  <Title>Demo</Title>
+</Head>
+<Slot />
+"#,
+        )
+        .expect("layout should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+<Copy>Home page</Copy>
+"#,
+        )
+        .expect("home page should write");
+        fs::write(
+            root.join("app/docs/page.ax"),
+            r#"
+page Docs
+<Copy>Docs page</Copy>
+"#,
+        )
+        .expect("docs page should write");
+        fs::write(root.join("public/css/site.css"), "body { color: red; }")
+            .expect("asset should write");
+
+        let status =
+            build_static_site_from_app_root(&root, Path::new("dist")).expect("static build works");
+
+        match status {
+            StaticBuildStatus::Generated {
+                route_count,
+                skipped_dynamic_count,
+                output_dir,
+            } => {
+                assert_eq!(route_count, 2);
+                assert_eq!(skipped_dynamic_count, 0);
+                assert_eq!(output_dir, root.join("dist"));
+            }
+            StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
+        }
+
+        let home = fs::read_to_string(root.join("dist/index.html")).expect("home html should exist");
+        let docs =
+            fs::read_to_string(root.join("dist/docs/index.html")).expect("docs html should exist");
+        assert!(home.contains("Home page"));
+        assert!(docs.contains("Docs page"));
+        assert!(root.join("dist/css/site.css").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_skips_dynamic_routes_until_prerender_config_exists() {
+        let root = make_temp_dir("static-build-dynamic");
+        fs::create_dir_all(root.join("app/blog/[slug]")).expect("blog dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/blog/[slug]/page.ax"),
+            r#"
+page BlogPost
+<Copy>Dynamic post</Copy>
+"#,
+        )
+        .expect("dynamic page should write");
+
+        let status =
+            build_static_site_from_app_root(&root, Path::new("dist")).expect("static build works");
+
+        match status {
+            StaticBuildStatus::NoPages {
+                skipped_dynamic_count,
+                output_dir,
+            } => {
+                assert_eq!(output_dir, root.join("dist"));
+                assert_eq!(skipped_dynamic_count, 1);
+            }
+            StaticBuildStatus::Generated {
+                route_count,
+                skipped_dynamic_count,
+                ..
+            } => {
+                assert_eq!(route_count, 0);
+                assert_eq!(skipped_dynamic_count, 1);
+            }
+        }
+        assert!(!root.join("dist/blog/[slug]/index.html").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn strips_cargo_subcommand_prefix_for_ax() {
         let args = vec![
             OsString::from("cargo-ax.exe"),
@@ -3391,6 +3641,54 @@ page Home
     }
 
     #[test]
+    fn renders_page_with_imported_axonyx_ui_component_from_src_foundry_layout() {
+        let workspace = make_temp_dir("ui-package-src-foundry");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/foundry")).expect("ui foundry dir should exist");
+        fs::write(
+            ui_root.join("src/foundry/SectionCard.ax"),
+            r#"
+page SectionCard
+<Card title={title}>
+  <Slot />
+</Card>
+"#,
+        )
+        .expect("ui component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+
+<SectionCard title="Imported from src/foundry">
+  <Copy>Modern package layout</Copy>
+</SectionCard>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html =
+            render_route_html(&state, &route).expect("src/foundry package route should render");
+
+        assert!(html.contains("Imported from src/foundry"));
+        assert!(html.contains("Modern package layout"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn route_version_changes_when_imported_axonyx_ui_component_changes() {
         let workspace = make_temp_dir("ui-package-version");
         let root = workspace.join("axonyx-site");
@@ -3584,6 +3882,35 @@ name = "demo"
         assert_eq!(
             resolved,
             root.join("vendor/custom-ui/src/ax/foundry/SectionCard.ax")
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn package_override_resolves_package_namespace_import_from_src_layout() {
+        let root = make_temp_dir("package-override-src-layout");
+        fs::create_dir_all(root.join("vendor/custom-ui/src/foundry"))
+            .expect("custom ui dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[package_overrides]
+"@axonyx/ui" = "./vendor/custom-ui"
+"#,
+        )
+        .expect("config should write");
+
+        let resolved =
+            resolve_preview_import_path(root.as_path(), "@axonyx/ui/foundry/SectionCard.ax")
+                .expect("package override should resolve");
+
+        assert_eq!(
+            resolved,
+            root.join("vendor/custom-ui/src/foundry/SectionCard.ax")
         );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
