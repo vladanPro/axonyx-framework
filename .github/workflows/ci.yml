@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  framework:
+    name: Framework Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Test framework workspace
+        run: cargo test
+
+      - name: Smoke core loop
+        shell: pwsh
+        run: ./scripts/smoke-core-loop.ps1 -Template site
+
+  runtime:
+    name: Runtime Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test runtime workspace
+        working-directory: vendor/axonyx-runtime
+        run: cargo test
+
+  package:
+    name: Package Rehearsal
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Package runtime crates
+        working-directory: vendor/axonyx-runtime
+        run: |
+          cargo package -p axonyx-macros --no-verify
+          cargo package -p axonyx-core --no-verify
+          cargo package -p axonyx-runtime --no-verify
+
+      - name: Package framework CLI crates
+        run: |
+          cargo package -p create-axonyx --no-verify
+          cargo package -p cargo-axonyx --no-verify
