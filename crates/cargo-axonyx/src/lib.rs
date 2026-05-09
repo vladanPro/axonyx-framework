@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use axonyx_core::ax_backend_ast_prelude::AxBackendBlock;
 use axonyx_core::ax_ast_prelude::AxImport;
+use axonyx_core::ax_backend_ast_prelude::AxBackendBlock;
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
@@ -60,6 +60,10 @@ struct BuildArgs {
     /// Output directory for static HTML and public assets.
     #[arg(long, default_value = "dist")]
     out_dir: PathBuf,
+
+    /// Remove the output directory before generating build artifacts.
+    #[arg(long)]
+    clean: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -129,6 +133,12 @@ struct StaticAsset {
     body: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrerenderRoute {
+    route: String,
+    params: Vec<std::collections::BTreeMap<String, String>>,
+}
+
 struct DevServerState {
     root: PathBuf,
     preview_store: Mutex<AxPreviewStore>,
@@ -160,6 +170,7 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
+#[derive(Debug)]
 enum BackendBuildStatus {
     Generated {
         source_count: usize,
@@ -170,9 +181,11 @@ enum BackendBuildStatus {
     },
 }
 
+#[derive(Debug)]
 enum StaticBuildStatus {
     Generated {
         route_count: usize,
+        prerendered_count: usize,
         skipped_dynamic_count: usize,
         output_dir: PathBuf,
     },
@@ -241,7 +254,7 @@ fn normalized_cli_args() -> Vec<OsString> {
 fn build_command(args: BuildArgs) -> Result<()> {
     let root = app_root()?;
     let status = compile_backend_from_app_root(&root)?;
-    let static_status = build_static_site_from_app_root(&root, &args.out_dir)?;
+    let static_status = build_static_site_from_app_root(&root, &args.out_dir, args.clean)?;
     print_backend_build_status(&status);
     print_static_build_status(&static_status);
     Ok(())
@@ -961,25 +974,35 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
     }
 }
 
-fn build_static_site_from_app_root(root: &Path, out_dir: &Path) -> Result<StaticBuildStatus> {
+fn build_static_site_from_app_root(
+    root: &Path,
+    out_dir: &Path,
+    clean: bool,
+) -> Result<StaticBuildStatus> {
     let output_dir = resolve_output_dir(root, out_dir);
     let routes = collect_page_route_manifest(root)?;
     let static_routes = routes
         .iter()
         .filter(|route| route.params.is_empty())
         .collect::<Vec<_>>();
-    let skipped_dynamic_count = routes.len().saturating_sub(static_routes.len());
+    let dynamic_routes = routes
+        .iter()
+        .filter(|route| !route.params.is_empty())
+        .collect::<Vec<_>>();
+    let prerender_routes = load_prerender_routes(root)?;
 
-    if !output_dir.exists() {
-        fs::create_dir_all(&output_dir)
-            .with_context(|| format!("failed to create '{}'", output_dir.display()))?;
+    if clean {
+        clean_output_dir(root, &output_dir)?;
     }
+
+    fs::create_dir_all(&output_dir)
+        .with_context(|| format!("failed to create '{}'", output_dir.display()))?;
 
     copy_public_assets_to_dist(root, &output_dir)?;
 
-    if static_routes.is_empty() {
+    if static_routes.is_empty() && prerender_routes.is_empty() {
         return Ok(StaticBuildStatus::NoPages {
-            skipped_dynamic_count,
+            skipped_dynamic_count: dynamic_routes.len(),
             output_dir,
         });
     }
@@ -1004,11 +1027,176 @@ fn build_static_site_from_app_root(root: &Path, out_dir: &Path) -> Result<Static
             .with_context(|| format!("failed to write '{}'", output_path.display()))?;
     }
 
+    let prerendered_count = build_prerendered_routes(
+        root,
+        &output_dir,
+        &state,
+        &dynamic_routes,
+        &prerender_routes,
+    )?;
+    let skipped_dynamic_count = dynamic_routes.len().saturating_sub(
+        prerender_routes
+            .iter()
+            .filter(|entry| {
+                dynamic_routes
+                    .iter()
+                    .any(|route| route.route == entry.route)
+            })
+            .count(),
+    );
+
     Ok(StaticBuildStatus::Generated {
         route_count: static_routes.len(),
+        prerendered_count,
         skipped_dynamic_count,
         output_dir,
     })
+}
+
+fn clean_output_dir(root: &Path, output_dir: &Path) -> Result<()> {
+    if !output_dir.exists() {
+        return Ok(());
+    }
+
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("failed to resolve app root '{}'", root.display()))?;
+    let output_dir = output_dir
+        .canonicalize()
+        .with_context(|| format!("failed to resolve output dir '{}'", output_dir.display()))?;
+
+    if output_dir == root || !output_dir.starts_with(&root) {
+        bail!(
+            "--clean refuses to remove '{}' because it is not a child of app root '{}'",
+            output_dir.display(),
+            root.display()
+        );
+    }
+
+    fs::remove_dir_all(&output_dir)
+        .with_context(|| format!("failed to clean '{}'", output_dir.display()))?;
+    Ok(())
+}
+
+fn build_prerendered_routes(
+    root: &Path,
+    output_dir: &Path,
+    state: &DevServerState,
+    dynamic_routes: &[&RouteManifestItem],
+    prerender_routes: &[PrerenderRoute],
+) -> Result<usize> {
+    let mut count = 0;
+
+    for entry in prerender_routes {
+        let Some(route) = dynamic_routes
+            .iter()
+            .find(|route| route.route == entry.route)
+        else {
+            bail!(
+                "prerender route '{}' does not match a dynamic page route",
+                entry.route
+            );
+        };
+
+        for params in &entry.params {
+            let concrete_route = concrete_route_from_params(&route.route, params)?;
+            let resolved = resolve_route(root, &concrete_route)?.ok_or_else(|| {
+                anyhow::anyhow!("failed to resolve prerender route '{}'", concrete_route)
+            })?;
+            let html = render_route_html(state, &resolved)?;
+            let output_path = static_route_output_path(output_dir, &concrete_route)?;
+
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create '{}'", parent.display()))?;
+            }
+
+            fs::write(&output_path, html)
+                .with_context(|| format!("failed to write '{}'", output_path.display()))?;
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+fn concrete_route_from_params(
+    route: &str,
+    params: &std::collections::BTreeMap<String, String>,
+) -> Result<String> {
+    let mut segments = Vec::new();
+
+    for segment in route.trim_start_matches('/').split('/') {
+        if let Some(name) = segment.strip_prefix(':').filter(|name| !name.is_empty()) {
+            let value = params
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("missing prerender param '{name}' for '{route}'"))?;
+            let value = value.trim_matches('/');
+            if value.is_empty() || value.contains('/') || value == "." || value == ".." {
+                bail!("invalid prerender param '{name}' value '{value}' for '{route}'");
+            }
+            segments.push(value.to_string());
+        } else if !segment.is_empty() {
+            segments.push(segment.to_string());
+        }
+    }
+
+    if segments.is_empty() {
+        Ok("/".to_string())
+    } else {
+        Ok(format!("/{}", segments.join("/")))
+    }
+}
+
+fn load_prerender_routes(root: &Path) -> Result<Vec<PrerenderRoute>> {
+    let Some(routes_value) = axonyx_config_value(root, "prerender", "routes") else {
+        return Ok(Vec::new());
+    };
+
+    let routes = routes_value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("[prerender].routes must be an array"))?;
+    let mut out = Vec::new();
+
+    for route_value in routes {
+        let table = route_value
+            .as_table()
+            .ok_or_else(|| anyhow::anyhow!("each [prerender].routes item must be a table"))?;
+        let route = table
+            .get("route")
+            .and_then(toml::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("prerender route item is missing route"))?
+            .trim()
+            .to_string();
+        let params_value = table
+            .get("params")
+            .ok_or_else(|| anyhow::anyhow!("prerender route '{route}' is missing params"))?;
+        let params_array = params_value
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("prerender route '{route}' params must be an array"))?;
+        let mut params = Vec::new();
+
+        for params_value in params_array {
+            let params_table = params_value.as_table().ok_or_else(|| {
+                anyhow::anyhow!("prerender route '{route}' params entries must be tables")
+            })?;
+            let mut params_map = std::collections::BTreeMap::new();
+
+            for (name, value) in params_table {
+                let value = value.as_str().ok_or_else(|| {
+                    anyhow::anyhow!("prerender route '{route}' param '{name}' must be a string")
+                })?;
+                params_map.insert(name.to_string(), value.to_string());
+            }
+
+            params.push(params_map);
+        }
+
+        out.push(PrerenderRoute { route, params });
+    }
+
+    Ok(out)
 }
 
 fn resolve_output_dir(root: &Path, out_dir: &Path) -> PathBuf {
@@ -1048,6 +1236,7 @@ fn print_static_build_status(status: &StaticBuildStatus) {
     match status {
         StaticBuildStatus::Generated {
             route_count,
+            prerendered_count,
             skipped_dynamic_count,
             output_dir,
         } => {
@@ -1055,6 +1244,9 @@ fn print_static_build_status(status: &StaticBuildStatus) {
                 "Generated static site from {route_count} page route(s) into {}",
                 output_dir.display()
             );
+            if *prerendered_count > 0 {
+                println!("Prerendered {prerendered_count} dynamic page variant(s).");
+            }
             if *skipped_dynamic_count > 0 {
                 println!(
                     "Skipped {skipped_dynamic_count} dynamic page route(s); provide params through a future prerender config."
@@ -2574,6 +2766,10 @@ fn axonyx_config_string(root: &Path, table: &str, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn axonyx_config_value(root: &Path, table: &str, key: &str) -> Option<toml::Value> {
+    axonyx_config_table(root, table)?.get(key).cloned()
+}
+
 fn axonyx_config_table(root: &Path, table: &str) -> Option<toml::map::Map<String, toml::Value>> {
     let source = fs::read_to_string(root.join("Axonyx.toml")).ok()?;
     let value = source.parse::<toml::Value>().ok()?;
@@ -3135,23 +3331,26 @@ page Docs
         fs::write(root.join("public/css/site.css"), "body { color: red; }")
             .expect("asset should write");
 
-        let status =
-            build_static_site_from_app_root(&root, Path::new("dist")).expect("static build works");
+        let status = build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect("static build works");
 
         match status {
             StaticBuildStatus::Generated {
                 route_count,
+                prerendered_count,
                 skipped_dynamic_count,
                 output_dir,
             } => {
                 assert_eq!(route_count, 2);
+                assert_eq!(prerendered_count, 0);
                 assert_eq!(skipped_dynamic_count, 0);
                 assert_eq!(output_dir, root.join("dist"));
             }
             StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
         }
 
-        let home = fs::read_to_string(root.join("dist/index.html")).expect("home html should exist");
+        let home =
+            fs::read_to_string(root.join("dist/index.html")).expect("home html should exist");
         let docs =
             fs::read_to_string(root.join("dist/docs/index.html")).expect("docs html should exist");
         assert!(home.contains("Home page"));
@@ -3176,8 +3375,8 @@ page BlogPost
         )
         .expect("dynamic page should write");
 
-        let status =
-            build_static_site_from_app_root(&root, Path::new("dist")).expect("static build works");
+        let status = build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect("static build works");
 
         match status {
             StaticBuildStatus::NoPages {
@@ -3189,14 +3388,110 @@ page BlogPost
             }
             StaticBuildStatus::Generated {
                 route_count,
+                prerendered_count,
                 skipped_dynamic_count,
                 ..
             } => {
                 assert_eq!(route_count, 0);
+                assert_eq!(prerendered_count, 0);
                 assert_eq!(skipped_dynamic_count, 1);
             }
         }
         assert!(!root.join("dist/blog/[slug]/index.html").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_prerenders_dynamic_routes_from_config() {
+        let root = make_temp_dir("static-build-prerender");
+        fs::create_dir_all(root.join("app/blog/[slug]")).expect("blog dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[prerender]
+routes = [
+  { route = "/blog/:slug", params = [{ slug = "hello-axonyx" }, { slug = "foundry-ui" }] },
+]
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/blog/[slug]/page.ax"),
+            r#"
+page BlogPost
+<Copy>Post slug: {params.slug}</Copy>
+"#,
+        )
+        .expect("dynamic page should write");
+
+        let status = build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect("static build works");
+
+        match status {
+            StaticBuildStatus::Generated {
+                route_count,
+                prerendered_count,
+                skipped_dynamic_count,
+                output_dir,
+            } => {
+                assert_eq!(route_count, 0);
+                assert_eq!(prerendered_count, 2);
+                assert_eq!(skipped_dynamic_count, 0);
+                assert_eq!(output_dir, root.join("dist"));
+            }
+            StaticBuildStatus::NoPages { .. } => panic!("prerender pages should be generated"),
+        }
+
+        let hello = fs::read_to_string(root.join("dist/blog/hello-axonyx/index.html"))
+            .expect("hello page should exist");
+        let foundry = fs::read_to_string(root.join("dist/blog/foundry-ui/index.html"))
+            .expect("foundry page should exist");
+        assert!(hello.contains("hello-axonyx"));
+        assert!(foundry.contains("foundry-ui"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_clean_removes_previous_output() {
+        let root = make_temp_dir("static-build-clean");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("dist/stale")).expect("stale dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(root.join("dist/stale/file.txt"), "old").expect("stale file should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+<Copy>Fresh build</Copy>
+"#,
+        )
+        .expect("page should write");
+
+        build_static_site_from_app_root(&root, Path::new("dist"), true)
+            .expect("static build should clean");
+
+        assert!(!root.join("dist/stale/file.txt").exists());
+        assert!(root.join("dist/index.html").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_clean_refuses_to_remove_app_root() {
+        let root = make_temp_dir("static-build-clean-root");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+
+        let error = build_static_site_from_app_root(&root, Path::new("."), true)
+            .expect_err("clean should refuse app root");
+
+        assert!(error.to_string().contains("--clean refuses to remove"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

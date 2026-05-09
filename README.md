@@ -89,7 +89,7 @@ From an app root:
 cargo ax build
 ```
 
-This scans:
+This scans backend-oriented `.ax` sources:
 
 - `app/**/loader.ax`
 - `app/**/actions.ax`
@@ -100,6 +100,43 @@ and regenerates:
 
 ```text
 src/generated/backend.rs
+```
+
+It also renders static page routes from `app/**/page.ax` into:
+
+```text
+dist/
+  index.html
+  docs/index.html
+  ...
+```
+
+Use a clean static output build when preparing deploy artifacts:
+
+```bash
+cargo ax build --clean
+```
+
+To choose another output directory:
+
+```bash
+cargo ax build --out-dir public-build --clean
+```
+
+Dynamic page routes are skipped unless they are listed in `Axonyx.toml`:
+
+```toml
+[prerender]
+routes = [
+  { route = "/blog/:slug", params = [{ slug = "hello-axonyx" }, { slug = "foundry-ui" }] },
+]
+```
+
+That renders:
+
+```text
+dist/blog/hello-axonyx/index.html
+dist/blog/foundry-ui/index.html
 ```
 
 For validation while authoring:

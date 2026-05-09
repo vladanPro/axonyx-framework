@@ -24,11 +24,29 @@ should be authored in JSX-like `.ax`.
 
 ```bash
 cargo ax check
-cargo ax build
+cargo ax build --clean
 cargo ax run dev
 ```
 
-This validates `.ax` sources, regenerates `src/generated/backend.rs`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+This validates `.ax` sources, regenerates `src/generated/backend.rs`, writes static HTML into `dist/`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+
+Static build output:
+
+```text
+dist/
+  index.html
+  posts/index.html
+  ...
+```
+
+Dynamic routes can be prerendered through `Axonyx.toml`:
+
+```toml
+[prerender]
+routes = [
+  { route = "/posts/:slug", params = [{ slug = "hello-axonyx" }, { slug = "foundry-ui" }] },
+]
+```
 
 ```bash
 cargo ax run start --host 0.0.0.0 --port 3000
