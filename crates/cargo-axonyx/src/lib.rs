@@ -1700,6 +1700,7 @@ fn scaffold_docs_module(root: &Path) -> Result<()> {
 fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     let vendor_root = root.join("vendor").join("axonyx-ui");
     let installed = ensure_ui_vendor(root, &vendor_root)?;
+    ensure_ui_cargo_dependency(root)?;
     sync_ui_css_snapshot(&vendor_root, root)?;
     ensure_ui_layout_setup(root)?;
     enable_module(&axonyx_toml.to_path_buf(), "ui")?;
@@ -1719,9 +1720,56 @@ fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     }
 
     println!("Synced Foundry CSS into 'public/css/axonyx-ui'.");
+    println!("Ensured Cargo dependency: axonyx-ui = {{ path = \"vendor/axonyx-ui\" }}.");
     println!("Updated app/layout.ax with silver theme and stylesheet link when needed.");
     println!("You can now import components such as:");
     println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard.ax\"");
+    Ok(())
+}
+
+fn ensure_ui_cargo_dependency(root: &Path) -> Result<()> {
+    let cargo_toml = root.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Ok(());
+    }
+
+    ensure_cargo_dependency_path(&cargo_toml, "axonyx-ui", "vendor/axonyx-ui")
+}
+
+fn ensure_cargo_dependency_path(
+    cargo_toml: &Path,
+    dependency_name: &str,
+    dependency_path: &str,
+) -> Result<()> {
+    let source = fs::read_to_string(cargo_toml)
+        .with_context(|| format!("failed to read '{}'", cargo_toml.display()))?;
+    let mut value = source
+        .parse::<toml::Value>()
+        .with_context(|| format!("failed to parse '{}'", cargo_toml.display()))?;
+    let root_table = value
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("Cargo.toml root must be a TOML table"))?;
+    let dependencies = root_table
+        .entry("dependencies")
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    let dependencies_table = dependencies
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[dependencies] must be a TOML table"))?;
+
+    if dependencies_table.contains_key(dependency_name) {
+        return Ok(());
+    }
+
+    let mut dependency = toml::map::Map::new();
+    dependency.insert(
+        "path".to_string(),
+        toml::Value::String(dependency_path.to_string()),
+    );
+    dependencies_table.insert(dependency_name.to_string(), toml::Value::Table(dependency));
+
+    let rendered = toml::to_string_pretty(&value).context("failed to render Cargo.toml")?;
+    fs::write(cargo_toml, rendered)
+        .with_context(|| format!("failed to write '{}'", cargo_toml.display()))?;
     Ok(())
 }
 
@@ -4040,6 +4088,19 @@ page Home
         )
         .expect("config should write");
         fs::write(
+            app_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.0"
+"#,
+        )
+        .expect("cargo manifest should write");
+        fs::write(
             app_root.join("app/layout.ax"),
             "page RootLayout\n  title \"Demo\"\n  Slot\n",
         )
@@ -4079,6 +4140,11 @@ page Home
             fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read back");
         assert!(layout.contains("theme \"silver\""));
         assert!(layout.contains("/_ax/pkg/axonyx-ui/index.css"));
+
+        let cargo_toml =
+            fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
+        assert!(cargo_toml.contains("[dependencies.axonyx-ui]"));
+        assert!(cargo_toml.contains("path = \"vendor/axonyx-ui\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

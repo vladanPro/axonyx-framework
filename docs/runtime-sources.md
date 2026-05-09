@@ -58,3 +58,13 @@ import { Button } from "@axonyx/ui/foundry/Button.ax"
 from an `axonyx-ui` Cargo dependency when that package exposes `Axonyx.package.toml`.
 Local `component_overrides`, `package_overrides`, and vendored development copies still win first,
 so apps can customize or dogfood UI components without changing the public import path.
+
+Before `axonyx-ui` is published to crates.io, the default local setup is:
+
+```toml
+[dependencies.axonyx-ui]
+path = "vendor/axonyx-ui"
+```
+
+That gives the app the same Cargo package shape as the future registry flow,
+while still keeping local examples and templates self-contained.

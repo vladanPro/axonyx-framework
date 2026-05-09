@@ -241,7 +241,31 @@ fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
 fn install_template_ui(target_dir: &Path) -> Result<()> {
     let vendor_root = target_dir.join("vendor").join("axonyx-ui");
     ensure_ui_vendor(&vendor_root)?;
+    ensure_ui_cargo_dependency(target_dir)?;
     sync_ui_css_snapshot(&vendor_root, target_dir)?;
+    Ok(())
+}
+
+fn ensure_ui_cargo_dependency(target_dir: &Path) -> Result<()> {
+    let cargo_toml = target_dir.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Ok(());
+    }
+
+    let source = fs::read_to_string(&cargo_toml)
+        .with_context(|| format!("failed to read '{}'", cargo_toml.display()))?;
+    if source.contains("[dependencies.axonyx-ui]") || source.contains("\naxonyx-ui =") {
+        return Ok(());
+    }
+
+    let mut updated = source;
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("\n[dependencies.axonyx-ui]\npath = \"vendor/axonyx-ui\"\n");
+
+    fs::write(&cargo_toml, updated)
+        .with_context(|| format!("failed to write '{}'", cargo_toml.display()))?;
     Ok(())
 }
 
@@ -715,6 +739,11 @@ mod tests {
         assert!(layout.contains("@axonyx/ui/foundry/SiteShell.ax"));
         assert!(layout.contains("<Theme>silver</Theme>"));
         assert!(layout.contains("/_ax/pkg/axonyx-ui/index.css"));
+
+        let cargo_toml =
+            fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
+        assert!(cargo_toml.contains("[dependencies.axonyx-ui]"));
+        assert!(cargo_toml.contains("path = \"vendor/axonyx-ui\""));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
         assert!(page.contains("@axonyx/ui/foundry/SectionCard.ax"));

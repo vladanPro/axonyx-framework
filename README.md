@@ -60,6 +60,9 @@ Recommended authoring path today:
 
 Axonyx UI imports can resolve from local overrides, vendored development copies,
 or an `axonyx-ui` Cargo dependency that exposes `Axonyx.package.toml`.
+Today, `cargo ax add ui` and the `site` / `docs` templates use a local path
+dependency into `vendor/axonyx-ui`; after the first crates.io release, that can
+move to a normal versioned dependency.
 
 Legacy indentation-first `.ax` syntax still exists for compatibility and reference work,
 but new examples and new framework authoring should prefer the JSX-like `.ax` direction.
