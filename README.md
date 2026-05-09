@@ -198,6 +198,24 @@ cargo ax routes --format json
 This lists `app/**/page.ax` page routes, `routes/**/*.ax` backend routes, dynamic params,
 nested layout count, and route-local `loader.ax` / `actions.ax` files.
 
+### 1e) Run the core loop smoke test
+
+From the framework repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/smoke-core-loop.ps1 -Template site
+```
+
+The smoke test creates a temporary app, uses the local framework and local `axonyx-ui`
+when available, then runs:
+
+```bash
+cargo ax check
+cargo ax build --clean
+```
+
+It passes only if `dist/index.html` is generated.
+
 ## Planned global CLI flow
 
 Once published, we target:

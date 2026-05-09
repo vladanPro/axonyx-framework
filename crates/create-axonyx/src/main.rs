@@ -120,7 +120,7 @@ fn run() -> Result<()> {
     println!("Next steps:");
     println!("  cd {}", cli.project_name);
     println!("  cargo ax check");
-    println!("  cargo ax build");
+    println!("  cargo ax build --clean");
     println!("  cargo ax run dev");
     println!("Template: {:?}", cli.template);
     Ok(())
