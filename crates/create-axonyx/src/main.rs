@@ -69,7 +69,7 @@ enum AppTemplate {
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("error: {err:#}");
+        print_create_error(&err);
         std::process::exit(1);
     }
 }
@@ -137,6 +137,62 @@ fn validate_project_name(name: &str) -> Result<()> {
         bail!("project name can contain only letters, digits, '-' and '_'");
     }
     Ok(())
+}
+
+fn print_create_error(error: &anyhow::Error) {
+    eprintln!("Axonyx could not create this app.");
+    eprintln!();
+    eprintln!("Problem:");
+    eprintln!("  {}", error);
+
+    if let Some(hint) = hint_for_create_error(error) {
+        eprintln!();
+        eprintln!("Hint:");
+        eprintln!("  {hint}");
+    }
+
+    let mut chain = error.chain();
+    let _ = chain.next();
+    let details = chain.map(ToString::to_string).collect::<Vec<_>>();
+    if !details.is_empty() {
+        eprintln!();
+        eprintln!("Details:");
+        for detail in details {
+            eprintln!("  - {detail}");
+        }
+    }
+}
+
+fn hint_for_create_error(error: &anyhow::Error) -> Option<&'static str> {
+    let combined = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if combined.contains("project name") {
+        return Some("Use a simple folder name such as `my-site`, `docs`, or `hello-axonyx`.");
+    }
+
+    if combined.contains("target directory") && combined.contains("already exists") {
+        return Some("Choose a new project name or pass `--force` if you intentionally want to replace the folder.");
+    }
+
+    if combined.contains("could not find axonyx-runtime workspace") {
+        return Some("Use `--runtime-source git`, or initialize the framework submodule with `git submodule update --init --recursive`.");
+    }
+
+    if combined.contains("failed to clone axonyx-ui")
+        || combined.contains("failed to launch git while vendoring axonyx-ui")
+    {
+        return Some("Set AXONYX_UI_SOURCE to a local axonyx-ui checkout, or check that Git can access the axonyx-ui repository.");
+    }
+
+    if combined.contains("failed to compile initial backend .ax sources") {
+        return Some("The template backend sources did not compile; this is likely a framework bug. Run the core smoke script to reproduce it.");
+    }
+
+    None
 }
 
 fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
@@ -575,6 +631,28 @@ mod tests {
             .expect("Axonyx.toml should exist");
 
         assert!(axonyx_toml.contents.contains("enabled = [\"ui\"]"));
+    }
+
+    #[test]
+    fn create_error_hint_detects_existing_target_directory() {
+        let error = anyhow::anyhow!(
+            "target directory 'demo-site' already exists (use --force to overwrite)"
+        );
+
+        assert_eq!(
+            hint_for_create_error(&error),
+            Some("Choose a new project name or pass `--force` if you intentionally want to replace the folder.")
+        );
+    }
+
+    #[test]
+    fn create_error_hint_detects_missing_local_runtime() {
+        let error = anyhow::anyhow!("could not find axonyx-runtime workspace");
+
+        assert_eq!(
+            hint_for_create_error(&error),
+            Some("Use `--runtime-source git`, or initialize the framework submodule with `git submodule update --init --recursive`.")
+        );
     }
 
     #[test]
