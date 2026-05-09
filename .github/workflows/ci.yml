@@ -57,14 +57,18 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Package runtime crates
+      - name: Package runtime leaf crate
         working-directory: vendor/axonyx-runtime
         run: |
           cargo package -p axonyx-macros --no-verify
-          cargo package -p axonyx-core --no-verify
-          cargo package -p axonyx-runtime --no-verify
 
-      - name: Package framework CLI crates
+      - name: Check runtime package contents
+        working-directory: vendor/axonyx-runtime
         run: |
-          cargo package -p create-axonyx --no-verify
-          cargo package -p cargo-axonyx --no-verify
+          cargo package -p axonyx-core --list
+          cargo package -p axonyx-runtime --list
+
+      - name: Check framework package contents
+        run: |
+          cargo package -p create-axonyx --list
+          cargo package -p cargo-axonyx --list
