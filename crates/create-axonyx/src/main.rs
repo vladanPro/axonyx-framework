@@ -714,7 +714,7 @@ mod tests {
             fs::read_to_string(target_dir.join("app/layout.ax")).expect("layout should read");
         assert!(layout.contains("@axonyx/ui/foundry/SiteShell.ax"));
         assert!(layout.contains("<Theme>silver</Theme>"));
-        assert!(layout.contains("/css/axonyx-ui/index.css"));
+        assert!(layout.contains("/_ax/pkg/axonyx-ui/index.css"));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
         assert!(page.contains("@axonyx/ui/foundry/SectionCard.ax"));

@@ -11,7 +11,7 @@ page DocsLayout
     content="{{APP_NAME}} is an Axonyx-powered documentation site."
   />
   <Link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <Link rel="stylesheet" href="/css/axonyx-ui/index.css" />
+  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
 </Head>
 
 <SiteShell max="xl">

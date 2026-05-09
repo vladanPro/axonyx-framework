@@ -6,7 +6,7 @@ Generated with `create-axonyx` using the `docs` template.
 
 This starter is focused on product docs, framework references, and example-driven documentation pages built directly in Axonyx.
 
-The `docs` template already vendors `axonyx-ui`, syncs the Foundry CSS snapshot into `public/css/axonyx-ui`, and starts with the `silver` theme wired in `app/layout.ax`.
+The `docs` template already vendors `axonyx-ui`, serves Foundry CSS through `/_ax/pkg/axonyx-ui/index.css`, and starts with the `silver` theme wired in `app/layout.ax`.
 
 ## Authoring Direction
 

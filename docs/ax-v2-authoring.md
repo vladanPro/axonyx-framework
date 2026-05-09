@@ -25,7 +25,7 @@ page Home
 <Head>
   <Title>Axonyx</Title>
   <Theme>silver</Theme>
-  <Link rel="stylesheet" href="/css/axonyx-ui/index.css" />
+  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
 </Head>
 
 <SiteHero />

@@ -1096,6 +1096,7 @@ fn build_static_site_from_app_root(
         .with_context(|| format!("failed to create '{}'", output_dir.display()))?;
 
     copy_public_assets_to_dist(root, &output_dir)?;
+    copy_package_assets_to_dist(root, &output_dir)?;
 
     if static_routes.is_empty() && prerender_routes.is_empty() {
         return Ok(StaticBuildStatus::NoPages {
@@ -1311,6 +1312,20 @@ fn copy_public_assets_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
     }
 
     copy_dir_all_filtered(&public_dir, output_dir, |_| false)
+}
+
+fn copy_package_assets_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
+    let Some(package_root) = resolve_package_asset_root(root, "axonyx-ui") else {
+        return Ok(());
+    };
+
+    let css_root = package_css_root(&package_root);
+    if !css_root.exists() {
+        return Ok(());
+    }
+
+    let target = output_dir.join("_ax").join("pkg").join("axonyx-ui");
+    copy_dir_all_filtered(&css_root, &target, |_| false)
 }
 
 fn static_route_output_path(output_dir: &Path, route: &str) -> Result<PathBuf> {
@@ -1858,7 +1873,9 @@ fn ensure_ui_layout_setup(root: &Path) -> Result<()> {
 
 fn ensure_ui_layout_setup_jsx(source: &str) -> String {
     const THEME_TAG: &str = "<Theme>silver</Theme>";
-    const STYLESHEET_TAG: &str = r#"<Link rel="stylesheet" href="/css/axonyx-ui/index.css" />"#;
+    const STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
+    const LEGACY_STYLESHEET_HREF: &str = "/css/axonyx-ui/index.css";
+    const STYLESHEET_TAG: &str = r#"<Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />"#;
 
     let mut updated = source.to_string();
 
@@ -1867,7 +1884,7 @@ fn ensure_ui_layout_setup_jsx(source: &str) -> String {
             updated = updated.replacen("<Head>", &format!("<Head>\n  {THEME_TAG}"), 1);
         }
 
-        if !updated.contains("/css/axonyx-ui/index.css") {
+        if !updated.contains(STYLESHEET_HREF) && !updated.contains(LEGACY_STYLESHEET_HREF) {
             updated = updated.replacen("</Head>", &format!("  {STYLESHEET_TAG}\n</Head>"), 1);
         }
 
@@ -1904,9 +1921,9 @@ fn ensure_ui_layout_setup_v1(source: &str) -> String {
     let has_theme = lines
         .iter()
         .any(|line| line.trim() == "theme \"silver\"" || line.trim_start().starts_with("theme "));
-    let has_stylesheet = lines
-        .iter()
-        .any(|line| line.contains("/css/axonyx-ui/index.css"));
+    let has_stylesheet = lines.iter().any(|line| {
+        line.contains("/_ax/pkg/axonyx-ui/index.css") || line.contains("/css/axonyx-ui/index.css")
+    });
 
     if has_theme && has_stylesheet {
         return source.to_string();
@@ -1933,7 +1950,7 @@ fn ensure_ui_layout_setup_v1(source: &str) -> String {
     }
     if !has_stylesheet {
         to_insert
-            .push("  link rel: \"stylesheet\", href: \"/css/axonyx-ui/index.css\"".to_string());
+            .push("  link rel: \"stylesheet\", href: \"/_ax/pkg/axonyx-ui/index.css\"".to_string());
     }
 
     lines.splice(insert_at..insert_at, to_insert);
@@ -2039,6 +2056,11 @@ fn handle_connection(
     };
 
     if request.method == "GET" {
+        if let Some(asset) = load_package_asset(&state.root, &request.target)? {
+            write_response(&mut stream, "200 OK", asset.content_type, &asset.body)?;
+            return Ok(());
+        }
+
         if let Some(asset) = load_public_asset(&state.root, &request.target)? {
             write_response(&mut stream, "200 OK", asset.content_type, &asset.body)?;
             return Ok(());
@@ -2391,6 +2413,112 @@ fn load_public_asset(root: &Path, request_path: &str) -> Result<Option<StaticAss
         content_type: content_type_for(&asset_path),
         body,
     }))
+}
+
+fn load_package_asset(root: &Path, request_path: &str) -> Result<Option<StaticAsset>> {
+    let normalized = normalize_request_path(request_path)?;
+    let segments = path_segments(&normalized);
+    if segments.len() < 4 || segments[0] != "_ax" || segments[1] != "pkg" {
+        return Ok(None);
+    }
+
+    let package_name = &segments[2];
+    let relative = segments[3..].join("/");
+    let Some(package_root) = resolve_package_asset_root(root, package_name) else {
+        return Ok(None);
+    };
+    let Some(asset_path) = package_asset_path(&package_root, &relative) else {
+        return Ok(None);
+    };
+
+    if !asset_path.exists() || !asset_path.is_file() {
+        return Ok(None);
+    }
+
+    let body = fs::read(&asset_path)
+        .with_context(|| format!("failed to read package asset '{}'", asset_path.display()))?;
+
+    Ok(Some(StaticAsset {
+        content_type: content_type_for(&asset_path),
+        body,
+    }))
+}
+
+fn resolve_package_asset_root(root: &Path, package_name: &str) -> Option<PathBuf> {
+    if package_name == "axonyx-ui" {
+        for package_root in axonyx_ui_package_roots(root) {
+            if package_root.exists() {
+                return Some(package_root);
+            }
+        }
+    }
+
+    cargo_package_root(root, package_name)
+}
+
+fn axonyx_ui_package_roots(root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![root.join("vendor").join("axonyx-ui")];
+
+    if let Some(workspace_root) = root.parent() {
+        roots.push(
+            workspace_root
+                .join("axonyx-framework")
+                .join("vendor")
+                .join("axonyx-ui"),
+        );
+        roots.push(workspace_root.join("axonyx-ui"));
+    }
+
+    roots
+}
+
+fn package_asset_path(package_root: &Path, relative: &str) -> Option<PathBuf> {
+    let relative_path = safe_relative_path(relative)?;
+    let css_root = package_css_root(package_root);
+    let css_entry = package_css_entry(package_root);
+
+    if relative_path.components().count() == 1
+        && css_entry
+            .file_name()
+            .is_some_and(|file_name| file_name == relative_path.as_os_str())
+    {
+        return Some(css_entry);
+    }
+
+    Some(css_root.join(relative_path))
+}
+
+fn package_css_root(package_root: &Path) -> PathBuf {
+    package_metadata_export(package_root, "css_root")
+        .map(|path| package_root.join(path))
+        .unwrap_or_else(|| package_root.join("src").join("css"))
+}
+
+fn package_css_entry(package_root: &Path) -> PathBuf {
+    package_metadata_export(package_root, "css_entry")
+        .map(|path| package_root.join(path))
+        .unwrap_or_else(|| package_root.join("src").join("css").join("index.css"))
+}
+
+fn package_metadata_export(package_root: &Path, key: &str) -> Option<String> {
+    let source = fs::read_to_string(package_root.join("Axonyx.package.toml")).ok()?;
+    let value = source.parse::<toml::Value>().ok()?;
+    value
+        .get("exports")
+        .and_then(|exports| exports.get(key))
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+}
+
+fn safe_relative_path(relative: &str) -> Option<PathBuf> {
+    let mut path = PathBuf::new();
+    for segment in relative.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return None;
+        }
+        path.push(segment);
+    }
+    Some(path)
 }
 
 fn resolve_route(root: &Path, request_path: &str) -> Result<Option<ResolvedRoute>> {
@@ -3187,6 +3315,50 @@ mod tests {
         path
     }
 
+    fn write_test_axonyx_ui_package(root: &Path, card_title: &str, css: &str) {
+        fs::create_dir_all(root.join("src/foundry")).expect("ui foundry dir should exist");
+        fs::create_dir_all(root.join("src/css")).expect("ui css dir should exist");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .expect("ui cargo manifest should write");
+        fs::write(root.join("src/lib.rs"), "").expect("ui lib should write");
+        fs::write(
+            root.join("Axonyx.package.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+namespace = "@axonyx/ui"
+
+[exports]
+ax_root = "src"
+css_root = "src/css"
+css_entry = "src/css/index.css"
+"#,
+        )
+        .expect("ui package metadata should write");
+        fs::write(
+            root.join("src/foundry/SectionCard.ax"),
+            format!(
+                r#"
+page SectionCard
+<Card title="{card_title}" />
+"#
+            ),
+        )
+        .expect("ui component should write");
+        fs::write(root.join("src/css/index.css"), css).expect("ui css should write");
+    }
+
     #[test]
     fn resolve_route_collects_nested_layouts() {
         let root = make_temp_dir("route");
@@ -3479,6 +3651,50 @@ route GET "/api/posts"
     }
 
     #[test]
+    fn loads_package_asset_from_cargo_dependency() {
+        let workspace = make_temp_dir("package-asset-cargo");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(&root).expect("app dir should exist");
+        write_test_axonyx_ui_package(&ui_root, "Cargo UI", "body { color: silver; }");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("app cargo manifest should write");
+
+        let asset = load_package_asset(&root, "/_ax/pkg/axonyx-ui/index.css")
+            .expect("package asset lookup should work")
+            .expect("package asset should exist");
+
+        assert_eq!(asset.content_type, "text/css; charset=utf-8");
+        assert_eq!(asset.body, b"body { color: silver; }");
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn package_asset_rejects_parent_segments() {
+        let root = make_temp_dir("package-asset-parent");
+
+        assert!(load_package_asset(&root, "/_ax/pkg/axonyx-ui/../secret.css").is_err());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn build_command_generates_backend_module_from_app_sources() {
         let root = make_temp_dir("build");
         fs::create_dir_all(root.join("routes").join("api")).expect("routes dir should exist");
@@ -3609,6 +3825,40 @@ page Docs
         assert!(home.contains("Home page"));
         assert!(docs.contains("Docs page"));
         assert!(root.join("dist/css/site.css").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_copies_package_css_assets() {
+        let root = make_temp_dir("static-build-package-css");
+        let ui_root = root.join("vendor/axonyx-ui");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        write_test_axonyx_ui_package(&ui_root, "Vendored UI", "body { color: gold; }");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+<Head>
+  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
+</Head>
+<Container>
+  <Copy>Static package CSS</Copy>
+</Container>
+"#,
+        )
+        .expect("page should write");
+
+        let status = build_static_site_from_app_root(&root, Path::new("dist"), true)
+            .expect("static site should build");
+
+        assert!(matches!(status, StaticBuildStatus::Generated { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("dist/_ax/pkg/axonyx-ui/index.css"))
+                .expect("package css should copy"),
+            "body { color: gold; }"
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -3828,7 +4078,7 @@ page Home
         let layout =
             fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read back");
         assert!(layout.contains("theme \"silver\""));
-        assert!(layout.contains("/css/axonyx-ui/index.css"));
+        assert!(layout.contains("/_ax/pkg/axonyx-ui/index.css"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -3848,7 +4098,9 @@ page Home
         let updated = ensure_ui_layout_setup_jsx(source);
 
         assert!(updated.contains("<Theme>silver</Theme>"));
-        assert!(updated.contains(r#"<Link rel="stylesheet" href="/css/axonyx-ui/index.css" />"#));
+        assert!(
+            updated.contains(r#"<Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />"#)
+        );
         assert!(updated.contains("<Title>Demo</Title>"));
     }
 

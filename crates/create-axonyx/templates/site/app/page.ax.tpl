@@ -55,8 +55,8 @@ page Home
   <ContentGrid cols={3} gap="lg">
     <SectionCard title="Foundry Ready">
       <Copy>
-        The scaffold vendors axonyx-ui into vendor/axonyx-ui and syncs its CSS
-        into public/css/axonyx-ui so the visual layer works immediately.
+        The scaffold vendors axonyx-ui into vendor/axonyx-ui and serves its CSS
+        through /_ax/pkg/axonyx-ui/index.css so the visual layer works immediately.
       </Copy>
     </SectionCard>
     <SectionCard title="Rust-First">
