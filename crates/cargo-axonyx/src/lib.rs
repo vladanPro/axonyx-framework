@@ -2712,6 +2712,8 @@ fn resolve_preview_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     resolve_component_override_import_path(root, source)
         .or_else(|| resolve_package_override_import_path(root, source))
         .or_else(|| resolve_app_import_path(root, source))
+        .or_else(|| resolve_axonyx_ui_existing_import_path(root, source))
+        .or_else(|| resolve_cargo_package_import_path(root, source))
         .or_else(|| resolve_axonyx_ui_import_path(root, source))
 }
 
@@ -2765,6 +2767,111 @@ fn resolve_package_override_import_path(root: &Path, source: &str) -> Option<Pat
     Some(join_import_relative(base, relative))
 }
 
+fn resolve_cargo_package_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+    let (namespace, relative) = split_package_import(source)?;
+    let package_name = cargo_package_name_for_namespace(root, namespace)?;
+    let package_root = cargo_package_root(root, &package_name)?;
+    let ax_root = cargo_package_ax_root(&package_root, namespace)
+        .unwrap_or_else(|| default_package_ax_root(&package_root));
+
+    Some(join_import_relative(ax_root, relative))
+}
+
+fn split_package_import(source: &str) -> Option<(&str, &str)> {
+    let mut parts = source.splitn(3, '/');
+    let scope = parts.next()?;
+    if !scope.starts_with('@') {
+        return None;
+    }
+
+    let package = parts.next()?;
+    let relative = parts.next()?;
+    let namespace_len = scope.len() + 1 + package.len();
+
+    Some((&source[..namespace_len], relative))
+}
+
+fn cargo_package_name_for_namespace(root: &Path, namespace: &str) -> Option<String> {
+    if let Some(value) = axonyx_config_value(root, "packages", namespace) {
+        if let Some(package_name) = value.as_str() {
+            return Some(package_name.to_string());
+        }
+
+        if let Some(package_name) = value
+            .as_table()
+            .and_then(|table| table.get("crate"))
+            .and_then(|value| value.as_str())
+        {
+            return Some(package_name.to_string());
+        }
+    }
+
+    match namespace {
+        "@axonyx/ui" => Some("axonyx-ui".to_string()),
+        _ => None,
+    }
+}
+
+fn cargo_package_root(root: &Path, package_name: &str) -> Option<PathBuf> {
+    let manifest_path = root.join("Cargo.toml");
+    if !manifest_path.exists() {
+        return None;
+    }
+
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .current_dir(root)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let metadata = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()?;
+    let packages = metadata.get("packages")?.as_array()?;
+    let manifest = packages
+        .iter()
+        .find(|package| package.get("name").and_then(|name| name.as_str()) == Some(package_name))?
+        .get("manifest_path")?
+        .as_str()?;
+
+    PathBuf::from(manifest).parent().map(Path::to_path_buf)
+}
+
+fn cargo_package_ax_root(package_root: &Path, namespace: &str) -> Option<PathBuf> {
+    let source = fs::read_to_string(package_root.join("Axonyx.package.toml")).ok()?;
+    let value = source.parse::<toml::Value>().ok()?;
+    let metadata_namespace = value
+        .get("package")
+        .and_then(|package| package.get("namespace"))
+        .and_then(|namespace| namespace.as_str())?;
+
+    if metadata_namespace != namespace {
+        return None;
+    }
+
+    let ax_root = value
+        .get("exports")
+        .and_then(|exports| exports.get("ax_root"))
+        .and_then(|ax_root| ax_root.as_str())?;
+
+    Some(package_root.join(ax_root))
+}
+
+fn default_package_ax_root(package_root: &Path) -> PathBuf {
+    let ax_root = package_root.join("src").join("ax");
+    if ax_root.exists() {
+        return ax_root;
+    }
+
+    package_root.join("src")
+}
+
 fn resolve_axonyx_ui_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     let relative = source.strip_prefix("@axonyx/ui/")?;
     let mut fallback = None;
@@ -2779,6 +2886,15 @@ fn resolve_axonyx_ui_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     }
 
     fallback
+}
+
+fn resolve_axonyx_ui_existing_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+    let relative = source.strip_prefix("@axonyx/ui/")?;
+
+    axonyx_ui_import_bases(root)
+        .into_iter()
+        .map(|base| join_import_relative(base, relative))
+        .find(|path| path.exists())
 }
 
 fn axonyx_ui_import_bases(root: &Path) -> Vec<PathBuf> {
@@ -2830,7 +2946,9 @@ fn resolve_config_path(root: &Path, target: &str) -> Option<PathBuf> {
     }
 
     if target.starts_with("@axonyx/ui/") {
-        return resolve_axonyx_ui_import_path(root, target);
+        return resolve_axonyx_ui_existing_import_path(root, target)
+            .or_else(|| resolve_cargo_package_import_path(root, target))
+            .or_else(|| resolve_axonyx_ui_import_path(root, target));
     }
 
     let path = PathBuf::from(target);
@@ -4114,6 +4232,192 @@ page Home
 
         assert!(html.contains("Imported from src/foundry"));
         assert!(html.contains("Modern package layout"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn renders_page_with_imported_axonyx_ui_component_from_cargo_dependency() {
+        let workspace = make_temp_dir("ui-package-cargo-dependency");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/foundry")).expect("ui foundry dir should exist");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("app cargo manifest should write");
+        fs::write(
+            ui_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .expect("ui cargo manifest should write");
+        fs::write(ui_root.join("src/lib.rs"), "").expect("ui lib should write");
+        fs::write(
+            ui_root.join("Axonyx.package.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+namespace = "@axonyx/ui"
+
+[exports]
+ax_root = "src"
+css_root = "src/css"
+css_entry = "src/css/index.css"
+"#,
+        )
+        .expect("ui package metadata should write");
+        fs::write(
+            ui_root.join("src/foundry/SectionCard.ax"),
+            r#"
+page SectionCard
+<Card title={title}>
+  <Slot />
+</Card>
+"#,
+        )
+        .expect("ui component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+
+<SectionCard title="Imported through Cargo">
+  <Copy>No package override needed</Copy>
+</SectionCard>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html =
+            render_route_html(&state, &route).expect("cargo package component route should render");
+
+        assert!(html.contains("Imported through Cargo"));
+        assert!(html.contains("No package override needed"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn vendored_axonyx_ui_component_wins_over_cargo_dependency() {
+        let workspace = make_temp_dir("ui-package-vendor-before-cargo");
+        let root = workspace.join("axonyx-site");
+        let cargo_ui_root = workspace.join("axonyx-ui");
+        let vendor_ui_root = root.join("vendor/axonyx-ui");
+        let cargo_ui_path = cargo_ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(cargo_ui_root.join("src/foundry")).expect("cargo ui dir should exist");
+        fs::create_dir_all(vendor_ui_root.join("src/foundry")).expect("vendor ui dir should exist");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{cargo_ui_path}" }}
+"#
+            ),
+        )
+        .expect("app cargo manifest should write");
+        fs::write(
+            cargo_ui_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .expect("ui cargo manifest should write");
+        fs::write(cargo_ui_root.join("src/lib.rs"), "").expect("ui lib should write");
+        fs::write(
+            cargo_ui_root.join("Axonyx.package.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+namespace = "@axonyx/ui"
+
+[exports]
+ax_root = "src"
+"#,
+        )
+        .expect("ui package metadata should write");
+        fs::write(
+            cargo_ui_root.join("src/foundry/SectionCard.ax"),
+            r#"
+page SectionCard
+<Card title="Cargo package" />
+"#,
+        )
+        .expect("cargo ui component should write");
+        fs::write(
+            vendor_ui_root.join("src/foundry/SectionCard.ax"),
+            r#"
+page SectionCard
+<Card title="Vendored package" />
+"#,
+        )
+        .expect("vendor ui component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+<SectionCard />
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html = render_route_html(&state, &route).expect("vendored package route should render");
+
+        assert!(html.contains("Vendored package"));
+        assert!(!html.contains("Cargo package"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

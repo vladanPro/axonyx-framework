@@ -58,6 +58,9 @@ Recommended authoring path today:
 - imports from local app components via `@/components/...`
 - imports from Axonyx UI packages via `@axonyx/ui/...`
 
+Axonyx UI imports can resolve from local overrides, vendored development copies,
+or an `axonyx-ui` Cargo dependency that exposes `Axonyx.package.toml`.
+
 Legacy indentation-first `.ax` syntax still exists for compatibility and reference work,
 but new examples and new framework authoring should prefer the JSX-like `.ax` direction.
 
