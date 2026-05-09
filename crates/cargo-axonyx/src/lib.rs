@@ -219,7 +219,7 @@ struct RouteManifestItem {
 
 pub fn main_entry() {
     if let Err(error) = run() {
-        eprintln!("error: {error:#}");
+        print_cli_error(&error);
         std::process::exit(1);
     }
 }
@@ -253,11 +253,28 @@ fn normalized_cli_args() -> Vec<OsString> {
 
 fn build_command(args: BuildArgs) -> Result<()> {
     let root = app_root()?;
+    ensure_no_check_diagnostics(&root)?;
     let status = compile_backend_from_app_root(&root)?;
     let static_status = build_static_site_from_app_root(&root, &args.out_dir, args.clean)?;
     print_backend_build_status(&status);
     print_static_build_status(&static_status);
     Ok(())
+}
+
+fn ensure_no_check_diagnostics(root: &Path) -> Result<()> {
+    let diagnostics = check_app_sources(root)?;
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+
+    let mut message = String::from("Axonyx diagnostics failed before build:\n");
+    for diagnostic in &diagnostics {
+        message.push_str("  ");
+        message.push_str(&format_check_diagnostic(diagnostic));
+        message.push('\n');
+    }
+
+    bail!("{}", message.trim_end());
 }
 
 fn check_command(args: CheckArgs) -> Result<()> {
@@ -818,15 +835,95 @@ fn print_check_text(diagnostics: &[CheckDiagnostic]) {
     }
 
     for diagnostic in diagnostics {
-        println!(
-            "{}:{}:{}: {}: {}",
-            diagnostic.file,
-            diagnostic.line,
-            diagnostic.column,
-            diagnostic.severity,
-            diagnostic.message
+        println!("{}", format_check_diagnostic(diagnostic));
+    }
+}
+
+fn format_check_diagnostic(diagnostic: &CheckDiagnostic) -> String {
+    format!(
+        "{}:{}:{}: {}[{}]: {}",
+        diagnostic.file,
+        diagnostic.line,
+        diagnostic.column,
+        diagnostic.severity,
+        diagnostic.code,
+        diagnostic.message
+    )
+}
+
+fn print_cli_error(error: &anyhow::Error) {
+    let message = error.to_string();
+
+    eprintln!("Axonyx could not finish this command.");
+    eprintln!();
+    eprintln!("Problem:");
+    eprintln!("  {}", translate_error_message(&message));
+
+    if let Some(hint) = hint_for_error(error) {
+        eprintln!();
+        eprintln!("Hint:");
+        eprintln!("  {hint}");
+    }
+
+    let mut chain = error.chain();
+    let _ = chain.next();
+    let details = chain.map(ToString::to_string).collect::<Vec<_>>();
+    if !details.is_empty() {
+        eprintln!();
+        eprintln!("Details:");
+        for detail in details {
+            eprintln!("  - {}", translate_error_message(&detail));
+        }
+    }
+}
+
+fn translate_error_message(message: &str) -> String {
+    message
+        .replace("preview", "Axonyx")
+        .replace("AxPreview", "Axonyx")
+}
+
+fn hint_for_error(error: &anyhow::Error) -> Option<&'static str> {
+    let combined = error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if combined.contains("Axonyx.toml was not found") {
+        return Some("Run the command from an Axonyx app root, or create one with create-axonyx.");
+    }
+
+    if combined.contains("Axonyx diagnostics failed") {
+        return Some(
+            "Run `cargo ax check` to see the same file-level diagnostics before building.",
         );
     }
+
+    if combined.contains("unable to resolve import") || combined.contains("failed to import") {
+        return Some(
+            "Check the import path, package_overrides, and whether the target .ax file exists.",
+        );
+    }
+
+    if combined.contains("[prerender]")
+        || combined.contains("prerender route")
+        || combined.contains("missing prerender param")
+    {
+        return Some(
+            "Check the [prerender] routes in Axonyx.toml. Dynamic params must be strings.",
+        );
+    }
+
+    if combined.contains("--clean refuses") {
+        return Some("Choose an output directory inside the app root, for example `cargo ax build --out-dir dist --clean`.");
+    }
+
+    if combined.contains("failed to render route") {
+        return Some("Run `cargo ax check`, then inspect the route's page.ax, layout.ax, loader.ax, and imports.");
+    }
+
+    None
 }
 
 fn display_path(path: &Path) -> String {
@@ -3292,6 +3389,44 @@ route GET "/api/posts"
         }
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_preflight_reports_file_level_diagnostics() {
+        let root = make_temp_dir("build-preflight-diagnostics");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { MissingCard } from "@/components/MissingCard.ax"
+
+page Home
+<MissingCard />
+"#,
+        )
+        .expect("page should write");
+
+        let error = ensure_no_check_diagnostics(&root).expect_err("diagnostics should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("Axonyx diagnostics failed before build"));
+        assert!(message.contains("app/page.ax"));
+        assert!(message.contains("axonyx-import"));
+        assert!(message.contains("@/components/MissingCard.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn cli_error_hint_detects_prerender_config_errors() {
+        let error = anyhow::anyhow!("prerender route '/blog/:slug' is missing params");
+
+        assert_eq!(
+            hint_for_error(&error),
+            Some("Check the [prerender] routes in Axonyx.toml. Dynamic params must be strings.")
+        );
     }
 
     #[test]
