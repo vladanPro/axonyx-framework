@@ -237,10 +237,12 @@ when available, then runs:
 
 ```bash
 cargo ax check
+cargo ax doctor --deny-warnings
 cargo ax build --clean
 ```
 
-It passes only if `dist/index.html` is generated.
+It passes only if the app has no strict doctor warnings/errors and `dist/index.html`
+is generated.
 
 ## Planned global CLI flow
 
