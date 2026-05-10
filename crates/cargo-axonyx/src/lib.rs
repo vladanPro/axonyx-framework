@@ -2718,30 +2718,58 @@ fn load_package_asset(root: &Path, request_path: &str) -> Result<Option<StaticAs
 
 fn resolve_package_asset_root(root: &Path, package_name: &str) -> Option<PathBuf> {
     if package_name == "axonyx-ui" {
-        for package_root in axonyx_ui_package_roots(root) {
-            if package_root.exists() {
-                return Some(package_root);
-            }
+        let app_vendor = root.join("vendor").join("axonyx-ui");
+        if app_vendor.exists() {
+            return Some(app_vendor);
         }
+
+        return cargo_package_root(root, package_name)
+            .or_else(|| axonyx_ui_workspace_package_root(root));
     }
 
     cargo_package_root(root, package_name)
 }
 
-fn axonyx_ui_package_roots(root: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![root.join("vendor").join("axonyx-ui")];
+fn axonyx_ui_workspace_package_root(root: &Path) -> Option<PathBuf> {
+    let workspace_root = root.parent()?;
+    [
+        workspace_root
+            .join("axonyx-framework")
+            .join("vendor")
+            .join("axonyx-ui"),
+        workspace_root.join("axonyx-ui"),
+    ]
+    .into_iter()
+    .find(|package_root| package_root.exists())
+}
 
-    if let Some(workspace_root) = root.parent() {
-        roots.push(
-            workspace_root
-                .join("axonyx-framework")
-                .join("vendor")
-                .join("axonyx-ui"),
-        );
-        roots.push(workspace_root.join("axonyx-ui"));
-    }
+fn axonyx_ui_workspace_import_bases(root: &Path) -> Vec<PathBuf> {
+    let Some(workspace_root) = root.parent() else {
+        return Vec::new();
+    };
 
-    roots
+    vec![
+        workspace_root
+            .join("axonyx-framework")
+            .join("vendor")
+            .join("axonyx-ui")
+            .join("src")
+            .join("ax"),
+        workspace_root
+            .join("axonyx-framework")
+            .join("vendor")
+            .join("axonyx-ui")
+            .join("src"),
+        workspace_root.join("axonyx-ui").join("src").join("ax"),
+        workspace_root.join("axonyx-ui").join("src"),
+    ]
+}
+
+fn axonyx_ui_app_import_bases(root: &Path) -> Vec<PathBuf> {
+    vec![
+        root.join("vendor").join("axonyx-ui").join("src").join("ax"),
+        root.join("vendor").join("axonyx-ui").join("src"),
+    ]
 }
 
 fn package_asset_path(package_root: &Path, relative: &str) -> Option<PathBuf> {
@@ -3112,9 +3140,9 @@ fn resolve_preview_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     resolve_component_override_import_path(root, source)
         .or_else(|| resolve_package_override_import_path(root, source))
         .or_else(|| resolve_app_import_path(root, source))
-        .or_else(|| resolve_axonyx_ui_existing_import_path(root, source))
+        .or_else(|| resolve_axonyx_ui_app_import_path(root, source))
         .or_else(|| resolve_cargo_package_import_path(root, source))
-        .or_else(|| resolve_axonyx_ui_import_path(root, source))
+        .or_else(|| resolve_axonyx_ui_workspace_import_path(root, source))
 }
 
 fn resolve_app_import_path(root: &Path, source: &str) -> Option<PathBuf> {
@@ -3272,11 +3300,11 @@ fn default_package_ax_root(package_root: &Path) -> PathBuf {
     package_root.join("src")
 }
 
-fn resolve_axonyx_ui_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+fn resolve_axonyx_ui_workspace_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     let relative = source.strip_prefix("@axonyx/ui/")?;
     let mut fallback = None;
 
-    for base in axonyx_ui_import_bases(root) {
+    for base in axonyx_ui_workspace_import_bases(root) {
         let path = join_import_relative(base, relative);
         fallback.get_or_insert_with(|| path.clone());
 
@@ -3288,42 +3316,13 @@ fn resolve_axonyx_ui_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     fallback
 }
 
-fn resolve_axonyx_ui_existing_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+fn resolve_axonyx_ui_app_import_path(root: &Path, source: &str) -> Option<PathBuf> {
     let relative = source.strip_prefix("@axonyx/ui/")?;
 
-    axonyx_ui_import_bases(root)
+    axonyx_ui_app_import_bases(root)
         .into_iter()
         .map(|base| join_import_relative(base, relative))
         .find(|path| path.exists())
-}
-
-fn axonyx_ui_import_bases(root: &Path) -> Vec<PathBuf> {
-    let mut bases = Vec::new();
-
-    bases.push(root.join("vendor").join("axonyx-ui").join("src").join("ax"));
-    bases.push(root.join("vendor").join("axonyx-ui").join("src"));
-
-    if let Some(workspace_root) = root.parent() {
-        bases.push(
-            workspace_root
-                .join("axonyx-framework")
-                .join("vendor")
-                .join("axonyx-ui")
-                .join("src")
-                .join("ax"),
-        );
-        bases.push(
-            workspace_root
-                .join("axonyx-framework")
-                .join("vendor")
-                .join("axonyx-ui")
-                .join("src"),
-        );
-        bases.push(workspace_root.join("axonyx-ui").join("src").join("ax"));
-        bases.push(workspace_root.join("axonyx-ui").join("src"));
-    }
-
-    bases
 }
 
 fn join_import_relative(mut base: PathBuf, relative: &str) -> PathBuf {
@@ -3346,9 +3345,9 @@ fn resolve_config_path(root: &Path, target: &str) -> Option<PathBuf> {
     }
 
     if target.starts_with("@axonyx/ui/") {
-        return resolve_axonyx_ui_existing_import_path(root, target)
+        return resolve_axonyx_ui_app_import_path(root, target)
             .or_else(|| resolve_cargo_package_import_path(root, target))
-            .or_else(|| resolve_axonyx_ui_import_path(root, target));
+            .or_else(|| resolve_axonyx_ui_workspace_import_path(root, target));
     }
 
     let path = PathBuf::from(target);
