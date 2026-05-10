@@ -1,8 +1,8 @@
 # Runtime Sources
 
-Generated Axonyx apps can currently point at the runtime in three different ways. The default generated flow is `git`.
+Generated Axonyx apps can point at the runtime in three different ways. The default generated flow is `registry`.
 
-## 1. `git`
+## 1. `registry`
 
 Best for current public use.
 
@@ -12,8 +12,8 @@ cargo run -p create-axonyx -- my-app --yes
 
 This points the generated app at:
 
-```text
-https://github.com/vladanPro/axonyx-runtime
+```toml
+axonyx-runtime = "0.1.0"
 ```
 
 ## 2. `path`
@@ -27,15 +27,19 @@ cargo run -p create-axonyx -- my-app --yes --runtime-source path
 This keeps iteration fast while the framework and runtime are evolving together.
 The generated dependency points at the checked out `vendor/axonyx-runtime` submodule by default, with a sibling workspace fallback during migration.
 
-## 3. `registry`
+## 3. `git`
 
-Best for the long-term package story.
+Best for testing an unreleased runtime branch.
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes --runtime-source registry
+cargo run -p create-axonyx -- my-app --yes --runtime-source git
 ```
 
-This mode is already scaffold-ready, but it should only be used once the runtime crates are actually published.
+This points the generated app at:
+
+```text
+https://github.com/vladanPro/axonyx-runtime
+```
 
 ## Mental Model
 
@@ -59,12 +63,11 @@ from an `axonyx-ui` Cargo dependency when that package exposes `Axonyx.package.t
 Local `component_overrides`, `package_overrides`, and vendored development copies still win first,
 so apps can customize or dogfood UI components without changing the public import path.
 
-Before `axonyx-ui` is published to crates.io, the default local setup is:
+The default generated UI setup is now:
 
 ```toml
-[dependencies.axonyx-ui]
-path = "vendor/axonyx-ui"
+axonyx-ui = "0.0.32"
 ```
 
-That gives the app the same Cargo package shape as the future registry flow,
-while still keeping local examples and templates self-contained.
+That gives the app a normal Cargo dependency while Axonyx resolves `.ax`
+components and package CSS through Cargo metadata.

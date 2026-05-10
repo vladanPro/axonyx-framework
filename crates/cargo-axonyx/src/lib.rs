@@ -30,7 +30,7 @@ const DOCS_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
-const AXONYX_UI_GIT_URL: &str = "https://github.com/vladanPro/axonyx-ui";
+const AXONYX_UI_VERSION: &str = "0.0.32";
 
 #[derive(Debug, Parser)]
 #[command(name = "ax")]
@@ -447,15 +447,22 @@ fn doctor_file_check(
 
 fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
-    let vendor_root = root.join("vendor/axonyx-ui");
+    let package_root = resolve_package_asset_root(root, "axonyx-ui");
 
-    checks.push(doctor_file_check(
-        vendor_root.exists(),
-        "ui-vendor",
-        "vendor/axonyx-ui found.",
-        "UI module is enabled but vendor/axonyx-ui is missing.",
-        Some("Run `cargo ax add ui` to vendor Axonyx UI and wire package imports."),
-    ));
+    checks.push(match package_root.as_ref() {
+        Some(root) => DoctorCheck {
+            code: "ui-package",
+            severity: DoctorSeverity::Ok,
+            message: format!("axonyx-ui package resolved at '{}'.", root.display()),
+            hint: None,
+        },
+        None => DoctorCheck {
+            code: "ui-package",
+            severity: DoctorSeverity::Warn,
+            message: "Axonyx UI package could not be resolved.".to_string(),
+            hint: Some("Run `cargo ax add ui` or add axonyx-ui to Cargo.toml."),
+        },
+    });
 
     checks.push(match cargo_source {
         Some(source) if cargo_manifest_has_dependency(source, "axonyx-ui") => DoctorCheck {
@@ -468,7 +475,7 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
             code: "ui-cargo-dependency",
             severity: DoctorSeverity::Warn,
             message: "UI module is present but axonyx-ui is not listed in Cargo.toml.".to_string(),
-            hint: Some("Run `cargo ax add ui` to add the local path dependency."),
+            hint: Some("Run `cargo ax add ui` to add the published axonyx-ui dependency."),
         },
         None => DoctorCheck {
             code: "ui-cargo-dependency",
@@ -479,21 +486,26 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
         },
     });
 
-    checks.push(match cargo_package_ax_root(&vendor_root, "@axonyx/ui") {
-        Some(_) => DoctorCheck {
-            code: "ui-package-metadata",
-            severity: DoctorSeverity::Ok,
-            message: "Axonyx UI package metadata found.".to_string(),
-            hint: None,
+    checks.push(
+        match package_root
+            .as_deref()
+            .and_then(|root| cargo_package_ax_root(root, "@axonyx/ui"))
+        {
+            Some(_) => DoctorCheck {
+                code: "ui-package-metadata",
+                severity: DoctorSeverity::Ok,
+                message: "Axonyx UI package metadata found.".to_string(),
+                hint: None,
+            },
+            None => DoctorCheck {
+                code: "ui-package-metadata",
+                severity: DoctorSeverity::Warn,
+                message: "Axonyx UI package metadata was not found or did not match @axonyx/ui."
+                    .to_string(),
+                hint: Some("Update axonyx-ui or rerun `cargo ax add ui`."),
+            },
         },
-        None => DoctorCheck {
-            code: "ui-package-metadata",
-            severity: DoctorSeverity::Warn,
-            message: "Axonyx UI package metadata was not found or did not match @axonyx/ui."
-                .to_string(),
-            hint: Some("Update the vendored axonyx-ui package or rerun `cargo ax add ui`."),
-        },
-    });
+    );
 
     let layout_source = fs::read_to_string(root.join("app/layout.ax")).ok();
     checks.push(match layout_source.as_deref() {
@@ -2032,29 +2044,11 @@ fn scaffold_docs_module(root: &Path) -> Result<()> {
 }
 
 fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
-    let vendor_root = root.join("vendor").join("axonyx-ui");
-    let installed = ensure_ui_vendor(root, &vendor_root)?;
     ensure_ui_cargo_dependency(root)?;
-    sync_ui_css_snapshot(&vendor_root, root)?;
     ensure_ui_layout_setup(root)?;
     enable_module(&axonyx_toml.to_path_buf(), "ui")?;
-    ensure_package_override(
-        &axonyx_toml.to_path_buf(),
-        "@axonyx/ui",
-        "./vendor/axonyx-ui",
-    )?;
 
-    if installed {
-        println!("Vendored axonyx-ui into '{}'.", vendor_root.display());
-    } else {
-        println!(
-            "axonyx-ui was already present at '{}'.",
-            vendor_root.display()
-        );
-    }
-
-    println!("Synced Foundry CSS into 'public/css/axonyx-ui'.");
-    println!("Ensured Cargo dependency: axonyx-ui = {{ path = \"vendor/axonyx-ui\" }}.");
+    println!("Ensured Cargo dependency: axonyx-ui = \"{AXONYX_UI_VERSION}\".");
     println!("Updated app/layout.ax with silver theme and stylesheet link when needed.");
     println!("You can now import components such as:");
     println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard.ax\"");
@@ -2067,13 +2061,13 @@ fn ensure_ui_cargo_dependency(root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    ensure_cargo_dependency_path(&cargo_toml, "axonyx-ui", "vendor/axonyx-ui")
+    ensure_cargo_dependency_version(&cargo_toml, "axonyx-ui", AXONYX_UI_VERSION)
 }
 
-fn ensure_cargo_dependency_path(
+fn ensure_cargo_dependency_version(
     cargo_toml: &Path,
     dependency_name: &str,
-    dependency_path: &str,
+    dependency_version: &str,
 ) -> Result<()> {
     let source = fs::read_to_string(cargo_toml)
         .with_context(|| format!("failed to read '{}'", cargo_toml.display()))?;
@@ -2094,86 +2088,15 @@ fn ensure_cargo_dependency_path(
         return Ok(());
     }
 
-    let mut dependency = toml::map::Map::new();
-    dependency.insert(
-        "path".to_string(),
-        toml::Value::String(dependency_path.to_string()),
+    dependencies_table.insert(
+        dependency_name.to_string(),
+        toml::Value::String(dependency_version.to_string()),
     );
-    dependencies_table.insert(dependency_name.to_string(), toml::Value::Table(dependency));
 
     let rendered = toml::to_string_pretty(&value).context("failed to render Cargo.toml")?;
     fs::write(cargo_toml, rendered)
         .with_context(|| format!("failed to write '{}'", cargo_toml.display()))?;
     Ok(())
-}
-
-fn ensure_ui_vendor(root: &Path, vendor_root: &Path) -> Result<bool> {
-    if vendor_root.exists() {
-        return Ok(false);
-    }
-
-    if let Some(source_root) = resolve_local_ui_source(root) {
-        copy_dir_all_filtered(&source_root, vendor_root, |path| {
-            path.file_name().is_some_and(|name| name == ".git")
-        })?;
-        return Ok(true);
-    }
-
-    if let Some(parent) = vendor_root.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create '{}'", parent.display()))?;
-    }
-
-    let status = Command::new("git")
-        .args(["clone", "--depth", "1", AXONYX_UI_GIT_URL])
-        .arg(vendor_root)
-        .status()
-        .context("failed to launch git while vendoring axonyx-ui")?;
-
-    if !status.success() {
-        bail!(
-            "failed to clone axonyx-ui from '{AXONYX_UI_GIT_URL}' into '{}'",
-            vendor_root.display()
-        );
-    }
-
-    let git_dir = vendor_root.join(".git");
-    if git_dir.exists() {
-        fs::remove_dir_all(&git_dir)
-            .with_context(|| format!("failed to clean '{}'", git_dir.display()))?;
-    }
-
-    Ok(true)
-}
-
-fn resolve_local_ui_source(root: &Path) -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("AXONYX_UI_SOURCE") {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    let mut candidates = vec![
-        root.join("vendor").join("axonyx-ui"),
-        root.join("..")
-            .join("axonyx-framework")
-            .join("vendor")
-            .join("axonyx-ui"),
-        root.join("..").join("axonyx-ui"),
-    ];
-
-    if let Some(parent) = root.parent() {
-        candidates.push(
-            parent
-                .join("axonyx-framework")
-                .join("vendor")
-                .join("axonyx-ui"),
-        );
-        candidates.push(parent.join("axonyx-ui"));
-    }
-
-    candidates.into_iter().find(|candidate| candidate.exists())
 }
 
 fn copy_dir_all_filtered(
@@ -2214,20 +2137,6 @@ fn copy_dir_all_filtered(
         )
     })?;
 
-    Ok(())
-}
-
-fn sync_ui_css_snapshot(vendor_root: &Path, app_root: &Path) -> Result<()> {
-    let css_source = vendor_root.join("src").join("css");
-    if !css_source.exists() {
-        bail!(
-            "vendored axonyx-ui did not contain '{}'",
-            css_source.display()
-        );
-    }
-
-    let css_target = app_root.join("public").join("css").join("axonyx-ui");
-    copy_dir_all_filtered(&css_source, &css_target, |_| false)?;
     Ok(())
 }
 
@@ -2379,25 +2288,6 @@ fn enable_module(axonyx_toml: &PathBuf, module_name: &str) -> Result<()> {
         {
             enabled_array.push(toml::Value::String(module_name.to_string()));
         }
-
-        Ok(())
-    })
-}
-
-fn ensure_package_override(axonyx_toml: &PathBuf, package_name: &str, target: &str) -> Result<()> {
-    update_axonyx_toml(axonyx_toml, |root_table| {
-        let overrides = root_table
-            .entry("package_overrides")
-            .or_insert_with(|| toml::Value::Table(Default::default()));
-
-        let overrides_table = overrides
-            .as_table_mut()
-            .ok_or_else(|| anyhow::anyhow!("[package_overrides] must be a TOML table"))?;
-
-        overrides_table.insert(
-            package_name.to_string(),
-            toml::Value::String(target.to_string()),
-        );
 
         Ok(())
     })
@@ -4408,14 +4298,11 @@ page Home
     }
 
     #[test]
-    fn add_ui_module_vendors_source_syncs_css_and_updates_layout() {
+    fn add_ui_module_adds_registry_dependency_and_updates_layout() {
         let workspace = make_temp_dir("add-ui");
         let app_root = workspace.join("demo-app");
-        let ui_root = workspace.join("axonyx-ui");
 
         fs::create_dir_all(app_root.join("app")).expect("app dir should exist");
-        fs::create_dir_all(ui_root.join("src/ax/foundry")).expect("ui ax dir should exist");
-        fs::create_dir_all(ui_root.join("src/css")).expect("ui css dir should exist");
         fs::write(
             app_root.join("Axonyx.toml"),
             "[app]\nname = \"demo\"\n\n[modules]\nenabled = []\n",
@@ -4439,36 +4326,16 @@ axonyx-runtime = "0.1.0"
             "page RootLayout\n  title \"Demo\"\n  Slot\n",
         )
         .expect("layout should write");
-        fs::write(ui_root.join("README.md"), "# Axonyx UI\n").expect("ui readme should write");
-        fs::write(
-            ui_root.join("src/ax/foundry/SectionCard.ax"),
-            "page SectionCard\n  Card title: title\n    Slot\n",
-        )
-        .expect("ui component should write");
-        fs::write(
-            ui_root.join("src/css/index.css"),
-            "@import './tokens.css';\n",
-        )
-        .expect("ui index css should write");
-        fs::write(
-            ui_root.join("src/css/tokens.css"),
-            ":root { --ax-text: #fff; }\n",
-        )
-        .expect("ui tokens css should write");
 
         add_ui_module(&app_root, &app_root.join("Axonyx.toml")).expect("ui module should add");
 
-        assert!(app_root
-            .join("vendor/axonyx-ui/src/ax/foundry/SectionCard.ax")
-            .exists());
-        assert!(app_root.join("public/css/axonyx-ui/index.css").exists());
-        assert!(app_root.join("public/css/axonyx-ui/tokens.css").exists());
+        assert!(!app_root.join("vendor/axonyx-ui").exists());
+        assert!(!app_root.join("public/css/axonyx-ui").exists());
 
         let axonyx_toml =
             fs::read_to_string(app_root.join("Axonyx.toml")).expect("config should read back");
         assert!(axonyx_toml.contains("\"ui\""));
-        assert!(axonyx_toml.contains("[package_overrides]"));
-        assert!(axonyx_toml.contains("\"@axonyx/ui\" = \"./vendor/axonyx-ui\""));
+        assert!(!axonyx_toml.contains("[package_overrides]"));
 
         let layout =
             fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read back");
@@ -4477,8 +4344,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("[dependencies.axonyx-ui]"));
-        assert!(cargo_toml.contains("path = \"vendor/axonyx-ui\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.32\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

@@ -8,8 +8,6 @@ param(
 $ErrorActionPreference = "Stop"
 
 $frameworkRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$workspaceRoot = Split-Path -Parent $frameworkRoot
-$uiSource = Join-Path $workspaceRoot "axonyx-ui"
 $ownsWorkDir = $false
 
 if ([string]::IsNullOrWhiteSpace($WorkDir)) {
@@ -27,11 +25,6 @@ Write-Host "  template: $Template"
 Write-Host "  workdir:  $WorkDir"
 
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
-
-if (Test-Path -LiteralPath $uiSource) {
-  $env:AXONYX_UI_SOURCE = $uiSource
-  Write-Host "  ui:       $uiSource"
-}
 
 try {
   try {
@@ -59,8 +52,6 @@ try {
   Write-Host "  output: $index"
 } finally {
   Set-Location $originalLocation
-
-  Remove-Item Env:\AXONYX_UI_SOURCE -ErrorAction SilentlyContinue
 
   if ($ownsWorkDir -and (Test-Path -LiteralPath $WorkDir)) {
     $resolved = Resolve-Path $WorkDir

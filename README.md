@@ -25,9 +25,9 @@ Current package roles inside this repo:
 
 Generated apps can now target either:
 
+- the published crates.io package, `axonyx-runtime = "0.1.0"`
 - a local Cargo `path` dependency into the checked out runtime workspace
 - the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
-- a future crates.io package release such as `axonyx-runtime = "0.1.0"`
 
 Current local flow:
 
@@ -45,7 +45,7 @@ Release planning lives in [docs/release-runbook.md](./docs/release-runbook.md).
 cargo run -p create-axonyx -- my-app --yes
 ```
 
-The default runtime source is now `git`, so generated apps work without needing the framework repo or its submodule layout.
+The default runtime source is now `registry`, so generated apps work from published crates.io packages without needing the framework repo or its submodule layout.
 
 Available templates today:
 
@@ -62,9 +62,8 @@ Recommended authoring path today:
 
 Axonyx UI imports can resolve from local overrides, vendored development copies,
 or an `axonyx-ui` Cargo dependency that exposes `Axonyx.package.toml`.
-Today, `cargo ax add ui` and the `site` / `docs` templates use a local path
-dependency into `vendor/axonyx-ui`; after the first crates.io release, that can
-move to a normal versioned dependency.
+Today, `cargo ax add ui` and the `site` / `docs` templates use the published
+`axonyx-ui` Cargo package by default.
 
 Legacy indentation-first `.ax` syntax still exists for compatibility and reference work,
 but new examples and new framework authoring should prefer the JSX-like `.ax` direction.
@@ -187,7 +186,7 @@ For a production-style process without dev live reload:
 cargo ax run start --host 0.0.0.0 --port 3000
 ```
 
-### 1c) Create a new Axonyx app against the standalone runtime repo
+### 1c) Create a new Axonyx app against crates.io
 
 ```bash
 cargo run -p create-axonyx -- my-app --yes
@@ -195,13 +194,13 @@ cargo run -p create-axonyx -- my-app --yes
 
 Use `--runtime-source path` only when contributing to Axonyx itself from the framework workspace.
 
-### 1d) Create a new Axonyx app against the future registry release
+### 1d) Create a new Axonyx app against a runtime Git repo
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes --runtime-source registry
+cargo run -p create-axonyx -- my-app --yes --runtime-source git
 ```
 
-Use the registry mode once `axonyx-runtime` is published. Until then, prefer `path` or `git`.
+Use `--runtime-source git` when testing an unreleased runtime branch.
 
 ### 2) Run the generated app
 

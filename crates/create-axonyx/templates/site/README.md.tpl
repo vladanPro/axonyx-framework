@@ -6,7 +6,7 @@ Generated with `create-axonyx` using the `site` template.
 
 This starter is oriented around a marketing or presentation site shape with a stronger landing page voice while keeping the same Axonyx runtime and backend authoring model.
 
-The `site` template already vendors `axonyx-ui` into `vendor/axonyx-ui`, serves Foundry CSS through `/_ax/pkg/axonyx-ui/index.css`, and wires the `silver` theme in `app/layout.ax`.
+The `site` template already depends on the published `axonyx-ui` Cargo package, serves Foundry CSS through `/_ax/pkg/axonyx-ui/index.css`, and wires the `silver` theme in `app/layout.ax`.
 
 ## Authoring Direction
 

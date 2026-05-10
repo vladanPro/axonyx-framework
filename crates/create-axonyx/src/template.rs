@@ -241,13 +241,5 @@ fn apply_vars(source: &str, vars: &[(&str, &str)]) -> String {
 }
 
 fn ui_ready_axonyx_toml() -> String {
-    let mut source = APP_AXONYX_TOML.replace("enabled = []", "enabled = [\"ui\"]");
-    source.push_str(
-        r#"
-
-[package_overrides]
-"@axonyx/ui" = "./vendor/axonyx-ui"
-"#,
-    );
-    source
+    APP_AXONYX_TOML.replace("enabled = []", "enabled = [\"ui\"]")
 }
