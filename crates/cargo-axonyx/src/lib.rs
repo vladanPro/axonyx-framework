@@ -45,6 +45,7 @@ enum Commands {
     Build(BuildArgs),
     Check(CheckArgs),
     Dev(DevArgs),
+    Doctor(DoctorArgs),
     Routes(RoutesArgs),
     Run(RunArgs),
 }
@@ -84,6 +85,13 @@ struct DevArgs {
 
     #[arg(long, default_value_t = 3000)]
     port: u16,
+}
+
+#[derive(Debug, Parser)]
+struct DoctorArgs {
+    /// Output format for health checks.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
 }
 
 #[derive(Debug, Parser)]
@@ -131,6 +139,22 @@ struct ResolvedRoute {
 struct StaticAsset {
     content_type: &'static str,
     body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DoctorSeverity {
+    Ok,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DoctorCheck {
+    code: &'static str,
+    severity: DoctorSeverity,
+    message: String,
+    hint: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +256,7 @@ fn run() -> Result<()> {
         Commands::Build(args) => build_command(args),
         Commands::Check(args) => check_command(args),
         Commands::Dev(args) => run_dev_server(args),
+        Commands::Doctor(args) => doctor_command(args),
         Commands::Routes(args) => routes_command(args),
         Commands::Run(args) => run_command(args),
     }
@@ -303,6 +328,220 @@ fn run_command(args: RunArgs) -> Result<()> {
     match args.command {
         RunCommands::Dev(args) => run_dev_server(args),
         RunCommands::Start(args) => run_start_server(args),
+    }
+}
+
+fn doctor_command(args: DoctorArgs) -> Result<()> {
+    let root = app_root()?;
+    let checks = doctor_checks(&root);
+
+    match args.format {
+        CheckFormat::Text => print_doctor_text(&checks),
+        CheckFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&checks)?);
+        }
+    }
+
+    if checks
+        .iter()
+        .any(|check| check.severity == DoctorSeverity::Error)
+    {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+
+    checks.push(doctor_file_check(
+        root.join("Axonyx.toml").exists(),
+        "axonyx-config",
+        "Axonyx.toml found.",
+        "Axonyx.toml is missing.",
+        Some("Run this command from an Axonyx app root or create an app with create-axonyx."),
+    ));
+    checks.push(doctor_file_check(
+        root.join("Cargo.toml").exists(),
+        "cargo-manifest",
+        "Cargo.toml found.",
+        "Cargo.toml is missing.",
+        Some("Axonyx apps need a Cargo manifest for runtime and package dependencies."),
+    ));
+    checks.push(doctor_file_check(
+        root.join("app").exists(),
+        "app-directory",
+        "app/ directory found.",
+        "app/ directory is missing.",
+        Some("Create app/page.ax or scaffold a template with create-axonyx."),
+    ));
+
+    let cargo_source = fs::read_to_string(root.join("Cargo.toml")).ok();
+    checks.push(match cargo_source.as_deref() {
+        Some(source) if cargo_manifest_has_dependency(source, "axonyx-runtime") => DoctorCheck {
+            code: "runtime-dependency",
+            severity: DoctorSeverity::Ok,
+            message: "axonyx-runtime dependency found.".to_string(),
+            hint: None,
+        },
+        Some(_) => DoctorCheck {
+            code: "runtime-dependency",
+            severity: DoctorSeverity::Error,
+            message: "axonyx-runtime dependency is missing.".to_string(),
+            hint: Some("Add axonyx-runtime to Cargo.toml or recreate the app with create-axonyx."),
+        },
+        None => DoctorCheck {
+            code: "runtime-dependency",
+            severity: DoctorSeverity::Warn,
+            message: "Could not inspect runtime dependency because Cargo.toml is missing."
+                .to_string(),
+            hint: None,
+        },
+    });
+
+    let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
+    let ui_enabled = axonyx_source
+        .as_deref()
+        .is_some_and(|source| source.contains("\"ui\"") || source.contains("'ui'"));
+    if ui_enabled || root.join("vendor/axonyx-ui").exists() {
+        checks.extend(doctor_ui_checks(root, cargo_source.as_deref()));
+    }
+
+    checks
+}
+
+fn doctor_file_check(
+    condition: bool,
+    code: &'static str,
+    ok_message: &str,
+    error_message: &str,
+    hint: Option<&'static str>,
+) -> DoctorCheck {
+    if condition {
+        DoctorCheck {
+            code,
+            severity: DoctorSeverity::Ok,
+            message: ok_message.to_string(),
+            hint: None,
+        }
+    } else {
+        DoctorCheck {
+            code,
+            severity: DoctorSeverity::Error,
+            message: error_message.to_string(),
+            hint,
+        }
+    }
+}
+
+fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    let vendor_root = root.join("vendor/axonyx-ui");
+
+    checks.push(doctor_file_check(
+        vendor_root.exists(),
+        "ui-vendor",
+        "vendor/axonyx-ui found.",
+        "UI module is enabled but vendor/axonyx-ui is missing.",
+        Some("Run `cargo ax add ui` to vendor Axonyx UI and wire package imports."),
+    ));
+
+    checks.push(match cargo_source {
+        Some(source) if cargo_manifest_has_dependency(source, "axonyx-ui") => DoctorCheck {
+            code: "ui-cargo-dependency",
+            severity: DoctorSeverity::Ok,
+            message: "axonyx-ui Cargo dependency found.".to_string(),
+            hint: None,
+        },
+        Some(_) => DoctorCheck {
+            code: "ui-cargo-dependency",
+            severity: DoctorSeverity::Warn,
+            message: "UI module is present but axonyx-ui is not listed in Cargo.toml.".to_string(),
+            hint: Some("Run `cargo ax add ui` to add the local path dependency."),
+        },
+        None => DoctorCheck {
+            code: "ui-cargo-dependency",
+            severity: DoctorSeverity::Warn,
+            message: "Could not inspect axonyx-ui dependency because Cargo.toml is missing."
+                .to_string(),
+            hint: None,
+        },
+    });
+
+    checks.push(match cargo_package_ax_root(&vendor_root, "@axonyx/ui") {
+        Some(_) => DoctorCheck {
+            code: "ui-package-metadata",
+            severity: DoctorSeverity::Ok,
+            message: "Axonyx UI package metadata found.".to_string(),
+            hint: None,
+        },
+        None => DoctorCheck {
+            code: "ui-package-metadata",
+            severity: DoctorSeverity::Warn,
+            message: "Axonyx UI package metadata was not found or did not match @axonyx/ui."
+                .to_string(),
+            hint: Some("Update the vendored axonyx-ui package or rerun `cargo ax add ui`."),
+        },
+    });
+
+    let layout_source = fs::read_to_string(root.join("app/layout.ax")).ok();
+    checks.push(match layout_source.as_deref() {
+        Some(source) if source.contains("/_ax/pkg/axonyx-ui/index.css") => DoctorCheck {
+            code: "ui-stylesheet",
+            severity: DoctorSeverity::Ok,
+            message: "Canonical Axonyx UI stylesheet link found.".to_string(),
+            hint: None,
+        },
+        Some(source) if source.contains("/css/axonyx-ui/index.css") => DoctorCheck {
+            code: "ui-stylesheet",
+            severity: DoctorSeverity::Warn,
+            message: "Legacy Axonyx UI stylesheet link found.".to_string(),
+            hint: Some("Prefer /_ax/pkg/axonyx-ui/index.css for package-served CSS."),
+        },
+        Some(_) => DoctorCheck {
+            code: "ui-stylesheet",
+            severity: DoctorSeverity::Warn,
+            message: "Axonyx UI stylesheet link is missing from app/layout.ax.".to_string(),
+            hint: Some("Run `cargo ax add ui` or add /_ax/pkg/axonyx-ui/index.css to <Head>."),
+        },
+        None => DoctorCheck {
+            code: "ui-stylesheet",
+            severity: DoctorSeverity::Warn,
+            message: "Could not inspect UI stylesheet because app/layout.ax is missing."
+                .to_string(),
+            hint: None,
+        },
+    });
+
+    checks
+}
+
+fn cargo_manifest_has_dependency(source: &str, dependency_name: &str) -> bool {
+    source
+        .parse::<toml::Value>()
+        .ok()
+        .and_then(|value| {
+            value
+                .get("dependencies")
+                .and_then(toml::Value::as_table)
+                .cloned()
+        })
+        .is_some_and(|dependencies| dependencies.contains_key(dependency_name))
+}
+
+fn print_doctor_text(checks: &[DoctorCheck]) {
+    println!("Axonyx doctor");
+    for check in checks {
+        let label = match check.severity {
+            DoctorSeverity::Ok => "ok",
+            DoctorSeverity::Warn => "warn",
+            DoctorSeverity::Error => "error",
+        };
+        println!("[{label}] {}: {}", check.code, check.message);
+        if let Some(hint) = check.hint {
+            println!("       hint: {hint}");
+        }
     }
 }
 
@@ -4145,6 +4384,106 @@ axonyx-runtime = "0.1.0"
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
         assert!(cargo_toml.contains("[dependencies.axonyx-ui]"));
         assert!(cargo_toml.contains("path = \"vendor/axonyx-ui\""));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_reports_healthy_ui_package_setup() {
+        let workspace = make_temp_dir("doctor-healthy-ui");
+        let app_root = workspace.join("demo-app");
+        let ui_root = app_root.join("vendor/axonyx-ui");
+
+        fs::create_dir_all(app_root.join("app")).expect("app dir should exist");
+        write_test_axonyx_ui_package(&ui_root, "Doctor UI", "body { color: silver; }");
+        fs::write(
+            app_root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[modules]\nenabled = [\"ui\"]\n",
+        )
+        .expect("config should write");
+        fs::write(
+            app_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.0"
+
+[dependencies.axonyx-ui]
+path = "vendor/axonyx-ui"
+"#,
+        )
+        .expect("cargo manifest should write");
+        fs::write(
+            app_root.join("app/layout.ax"),
+            r#"
+page RootLayout
+<Head>
+  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
+</Head>
+<Slot />
+"#,
+        )
+        .expect("layout should write");
+
+        let checks = doctor_checks(&app_root);
+
+        assert!(checks
+            .iter()
+            .all(|check| check.severity == DoctorSeverity::Ok));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_warns_when_ui_dependency_is_missing() {
+        let workspace = make_temp_dir("doctor-missing-ui-dependency");
+        let app_root = workspace.join("demo-app");
+        let ui_root = app_root.join("vendor/axonyx-ui");
+
+        fs::create_dir_all(app_root.join("app")).expect("app dir should exist");
+        write_test_axonyx_ui_package(&ui_root, "Doctor UI", "body { color: silver; }");
+        fs::write(
+            app_root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[modules]\nenabled = [\"ui\"]\n",
+        )
+        .expect("config should write");
+        fs::write(
+            app_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.0"
+"#,
+        )
+        .expect("cargo manifest should write");
+        fs::write(
+            app_root.join("app/layout.ax"),
+            r#"
+page RootLayout
+<Head>
+  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
+</Head>
+<Slot />
+"#,
+        )
+        .expect("layout should write");
+
+        let checks = doctor_checks(&app_root);
+        let ui_dependency = checks
+            .iter()
+            .find(|check| check.code == "ui-cargo-dependency")
+            .expect("ui dependency check should exist");
+
+        assert_eq!(ui_dependency.severity, DoctorSeverity::Warn);
+        assert!(ui_dependency.message.contains("axonyx-ui"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

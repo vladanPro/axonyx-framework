@@ -77,7 +77,21 @@ cargo run -p create-axonyx -- my-site --yes --template site
 cargo run -p create-axonyx -- my-docs --yes --template docs
 ```
 
-### 1a) Add a docs module into an existing Axonyx app
+### 1a) Check app health
+
+From an app root:
+
+```bash
+cargo ax doctor
+```
+
+Use JSON output when an editor or CI tool wants structured checks:
+
+```bash
+cargo ax doctor --format json
+```
+
+### 1b) Add a docs module into an existing Axonyx app
 
 From an app root:
 
