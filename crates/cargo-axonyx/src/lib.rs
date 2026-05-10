@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -31,6 +31,8 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_UI_VERSION: &str = "0.0.32";
+static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
+    OnceLock::new();
 
 #[derive(Debug, Parser)]
 #[command(name = "ax")]
@@ -3246,6 +3248,15 @@ fn cargo_package_root(root: &Path, package_name: &str) -> Option<PathBuf> {
         return None;
     }
 
+    let cache_key = format!("{}::{package_name}", manifest_path.to_string_lossy());
+    let cache =
+        CARGO_PACKAGE_ROOT_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(cache) = cache.lock() {
+        if let Some(package_root) = cache.get(&cache_key) {
+            return Some(package_root.clone());
+        }
+    }
+
     let output = Command::new("cargo")
         .arg("metadata")
         .arg("--format-version")
@@ -3268,7 +3279,12 @@ fn cargo_package_root(root: &Path, package_name: &str) -> Option<PathBuf> {
         .get("manifest_path")?
         .as_str()?;
 
-    PathBuf::from(manifest).parent().map(Path::to_path_buf)
+    let package_root = PathBuf::from(manifest).parent().map(Path::to_path_buf)?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(cache_key, package_root.clone());
+    }
+
+    Some(package_root)
 }
 
 fn cargo_package_ax_root(package_root: &Path, namespace: &str) -> Option<PathBuf> {
