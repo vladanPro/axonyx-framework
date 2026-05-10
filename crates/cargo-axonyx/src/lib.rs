@@ -92,6 +92,10 @@ struct DoctorArgs {
     /// Output format for health checks.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
+
+    /// Exit with a non-zero status when warnings are present.
+    #[arg(long)]
+    deny_warnings: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -155,6 +159,13 @@ struct DoctorCheck {
     severity: DoctorSeverity,
     message: String,
     hint: Option<&'static str>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DoctorSummary {
+    ok: usize,
+    warn: usize,
+    error: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,10 +353,7 @@ fn doctor_command(args: DoctorArgs) -> Result<()> {
         }
     }
 
-    if checks
-        .iter()
-        .any(|check| check.severity == DoctorSeverity::Error)
-    {
+    if doctor_should_fail(&checks, args.deny_warnings) {
         std::process::exit(1);
     }
 
@@ -597,6 +605,39 @@ fn print_doctor_text(checks: &[DoctorCheck]) {
             println!("       hint: {hint}");
         }
     }
+
+    let summary = doctor_summary(checks);
+    println!(
+        "Summary: {} ok, {} warning{}, {} error{}",
+        summary.ok,
+        summary.warn,
+        if summary.warn == 1 { "" } else { "s" },
+        summary.error,
+        if summary.error == 1 { "" } else { "s" }
+    );
+}
+
+fn doctor_should_fail(checks: &[DoctorCheck], deny_warnings: bool) -> bool {
+    checks
+        .iter()
+        .any(|check| check.severity == DoctorSeverity::Error)
+        || (deny_warnings
+            && checks
+                .iter()
+                .any(|check| check.severity == DoctorSeverity::Warn))
+}
+
+fn doctor_summary(checks: &[DoctorCheck]) -> DoctorSummary {
+    checks
+        .iter()
+        .fold(DoctorSummary::default(), |mut summary, check| {
+            match check.severity {
+                DoctorSeverity::Ok => summary.ok += 1,
+                DoctorSeverity::Warn => summary.warn += 1,
+                DoctorSeverity::Error => summary.error += 1,
+            }
+            summary
+        })
 }
 
 fn routes_command(args: RoutesArgs) -> Result<()> {
@@ -4541,6 +4582,32 @@ page RootLayout
         assert!(ui_dependency.message.contains("axonyx-ui"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_summary_counts_severities_and_deny_warnings_can_fail() {
+        let checks = vec![
+            DoctorCheck {
+                code: "ok-check",
+                severity: DoctorSeverity::Ok,
+                message: "ok".to_string(),
+                hint: None,
+            },
+            DoctorCheck {
+                code: "warn-check",
+                severity: DoctorSeverity::Warn,
+                message: "warn".to_string(),
+                hint: None,
+            },
+        ];
+
+        let summary = doctor_summary(&checks);
+
+        assert_eq!(summary.ok, 1);
+        assert_eq!(summary.warn, 1);
+        assert_eq!(summary.error, 0);
+        assert!(!doctor_should_fail(&checks, false));
+        assert!(doctor_should_fail(&checks, true));
     }
 
     #[test]

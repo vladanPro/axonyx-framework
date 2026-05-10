@@ -91,6 +91,12 @@ Use JSON output when an editor or CI tool wants structured checks:
 cargo ax doctor --format json
 ```
 
+Use strict mode in CI when warnings should block the run:
+
+```bash
+cargo ax doctor --deny-warnings
+```
+
 ### 1b) Add a docs module into an existing Axonyx app
 
 From an app root:
@@ -101,7 +107,7 @@ cargo run --manifest-path H:/CODE/axonyx/axonyx-framework/Cargo.toml -p cargo-ax
 
 This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonyx.toml`.
 
-### 1b) Build generated backend output from `.ax` sources
+### 1c) Build generated backend output from `.ax` sources
 
 From an app root:
 
