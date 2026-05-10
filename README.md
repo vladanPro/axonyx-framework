@@ -1,51 +1,52 @@
 # Axonyx Framework Monorepo
 
-Axonyx is a Rust-first framework focused on:
+Axonyx is a Rust-first framework for building Axonyx apps with `.ax` routes, Foundry UI packages, and a small Cargo-based authoring workflow.
 
-- Single-binary architecture
-- Algebraic UI pipelines (`|>`)
-- Fast data-to-UI execution flow
+Current focus:
 
-This repository includes:
+- Rust-first app/runtime architecture
+- JSX-like `.ax` authoring in `app/**/page.ax` and `app/**/layout.ax`
+- route-aware static builds and local dev serving
+- backend-oriented `.ax` files for loaders, actions, routes, and jobs
+- reusable Foundry UI imports through `@axonyx/ui/...`
 
-- `create-axonyx`: project scaffolding CLI (similar to `create-next-app`)
-- `cargo-axonyx`: project helper CLI (`cargo ax ...`) for local authoring flows
-- integration with the `vendor/axonyx-runtime` git submodule for `axonyx-core`, `axonyx-runtime`, and `axonyx-macros`
+## Packages
 
-The public framework name, crate names, commands, and app config file now use `Axonyx` / `axonyx-*`.
-Repository URLs and local workspace folders are now aligned to `axonyx-*`.
+This repository contains the public CLI packages:
 
-## Package Model
+- `create-axonyx` - project scaffolding CLI, similar in spirit to `create-next-app`
+- `cargo-axonyx` - Cargo helper CLI exposed as `cargo ax ...`
 
-Current package roles inside this repo:
+Runtime crates live in the standalone runtime workspace and are consumed by generated apps through crates.io by default:
 
-- `create-axonyx`: CLI that scaffolds a new Axonyx app
-- `cargo-axonyx`: local CLI for `add`, `build`, `check`, `run dev`, and `run start`
-- runtime crates are imported from the `vendor/axonyx-runtime` submodule
-
-Generated apps can now target either:
-
-- the published crates.io package, `axonyx-runtime = "0.1.0"`
-- a local Cargo `path` dependency into the checked out runtime workspace
-- the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
-
-Current local flow:
-
-```bash
-git submodule update --init --recursive
+```toml
+[dependencies]
+axonyx-runtime = "0.1.0"
 ```
 
-Release planning lives in [docs/release-runbook.md](./docs/release-runbook.md).
+Axonyx UI is also available as both npm and Cargo package:
+
+```toml
+[dependencies]
+axonyx-ui = "0.1.0"
+```
 
 ## Quick Start
 
-### 1) Create a new Axonyx app locally
+From this repository, create a new app:
 
 ```bash
 cargo run -p create-axonyx -- my-app --yes
 ```
 
-The default runtime source is now `registry`, so generated apps work from published crates.io packages without needing the framework repo or its submodule layout.
+Create a site or docs app:
+
+```bash
+cargo run -p create-axonyx -- my-site --yes --template site
+cargo run -p create-axonyx -- my-docs --yes --template docs
+```
+
+Generated apps use the published crates.io runtime source by default, so they do not need this monorepo or its submodule layout.
 
 Available templates today:
 
@@ -53,70 +54,60 @@ Available templates today:
 - `site`
 - `docs`
 
+## App Authoring Model
+
 Recommended authoring path today:
 
 - JSX-like `.ax` files in `app/**/page.ax` and `app/**/layout.ax`
-- nested app routes plus route-local `loader.ax` and `actions.ax`
+- nested app routes with route-local `loader.ax` and `actions.ax` when needed
 - imports from local app components via `@/components/...`
 - imports from Axonyx UI packages via `@axonyx/ui/...`
 
-Axonyx UI imports can resolve from local overrides, vendored development copies,
-or an `axonyx-ui` Cargo dependency that exposes `Axonyx.package.toml`.
-Today, `cargo ax add ui` and the `site` / `docs` templates use the published
-`axonyx-ui` Cargo package by default.
+Example route tree:
 
-Legacy indentation-first `.ax` syntax still exists for compatibility and reference work,
-but new examples and new framework authoring should prefer the JSX-like `.ax` direction.
-
-Example:
-
-```bash
-cargo run -p create-axonyx -- my-site --yes --template site
+```text
+app/
+  layout.ax
+  page.ax
+  docs/
+    page.ax
+  components/
+    page.ax
+  blog/
+    [slug]/
+      page.ax
+      loader.ax
 ```
 
-```bash
-cargo run -p create-axonyx -- my-docs --yes --template docs
-```
+Legacy indentation-first `.ax` syntax still exists for compatibility and reference work, but new examples and new framework authoring should prefer the JSX-like `.ax` direction.
 
-### 1a) Check app health
+## Common Commands
 
 From an app root:
 
 ```bash
 cargo ax doctor
+cargo ax check
+cargo ax build
+cargo ax run dev
 ```
 
-Use JSON output when an editor or CI tool wants structured checks:
-
-```bash
-cargo ax doctor --format json
-```
-
-Use strict mode in CI when warnings should block the run:
+Use strict doctor mode in CI:
 
 ```bash
 cargo ax doctor --deny-warnings
 ```
 
-### 1b) Add a docs module into an existing Axonyx app
-
-From an app root:
+Use JSON output for editor tooling:
 
 ```bash
-cargo run --manifest-path H:/CODE/axonyx/axonyx-framework/Cargo.toml -p cargo-axonyx --bin cargo-ax -- add docs
+cargo ax doctor --format json
+cargo ax routes --format json
 ```
 
-This first proof-of-concept adds an `app/docs/...` route tree and enables the module in `Axonyx.toml`.
+## Build
 
-### 1c) Build generated backend output from `.ax` sources
-
-From an app root:
-
-```bash
-cargo ax build
-```
-
-This scans backend-oriented `.ax` sources:
+`cargo ax build` scans backend-oriented `.ax` sources:
 
 - `app/**/loader.ax`
 - `app/**/actions.ax`
@@ -135,6 +126,7 @@ It also renders static page routes from `app/**/page.ax` into:
 dist/
   index.html
   docs/index.html
+  components/index.html
   ...
 ```
 
@@ -166,15 +158,9 @@ dist/blog/hello-axonyx/index.html
 dist/blog/foundry-ui/index.html
 ```
 
-For validation while authoring:
+## Local Dev Server
 
-```bash
-cargo ax check
-```
-
-This validates page/backend `.ax` files, import chains, and duplicate page/API route patterns.
-
-Then run the route-aware server:
+Run the route-aware server:
 
 ```bash
 cargo ax run dev
@@ -186,55 +172,62 @@ For a production-style process without dev live reload:
 cargo ax run start --host 0.0.0.0 --port 3000
 ```
 
-### 1c) Create a new Axonyx app against crates.io
+Inspect the route tree:
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes
+cargo ax routes
 ```
+
+This lists `app/**/page.ax` page routes, `routes/**/*.ax` backend routes, dynamic params, nested layout count, and route-local `loader.ax` / `actions.ax` files.
+
+## Adding Modules
+
+Add a docs module into an existing app:
+
+```bash
+cargo ax add docs
+```
+
+Add the Foundry UI package when needed:
+
+```bash
+cargo ax add ui
+```
+
+Today, `cargo ax add ui` and the `site` / `docs` templates use the published `axonyx-ui` Cargo package by default.
+
+## Runtime Source Options
+
+Generated apps can target:
+
+- the published crates.io package, `axonyx-runtime = "0.1.0"`
+- a local Cargo `path` dependency into a checked-out runtime workspace
+- the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
 
 Use `--runtime-source path` only when contributing to Axonyx itself from the framework workspace.
 
-### 1d) Create a new Axonyx app against a runtime Git repo
+Use `--runtime-source git` when testing an unreleased runtime branch:
 
 ```bash
 cargo run -p create-axonyx -- my-app --yes --runtime-source git
 ```
 
-Use `--runtime-source git` when testing an unreleased runtime branch.
+## Framework Development
 
-### 2) Run the generated app
-
-```bash
-cd my-app
-cargo run
-```
-
-For route-aware local serving with an automatic backend compile at startup:
+When working on this monorepo itself:
 
 ```bash
-cargo ax run dev
+git submodule update --init --recursive
+cargo test
 ```
 
-To inspect the route tree that Axonyx sees:
-
-```bash
-cargo ax routes
-cargo ax routes --format json
-```
-
-This lists `app/**/page.ax` page routes, `routes/**/*.ax` backend routes, dynamic params,
-nested layout count, and route-local `loader.ax` / `actions.ax` files.
-
-### 1e) Run the core loop smoke test
-
-From the framework repo root:
+Run the core loop smoke test from the framework repo root:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/smoke-core-loop.ps1 -Template site
 ```
 
-The smoke test creates a temporary app, uses the local framework and local `axonyx-ui`
-when available, then runs:
+The smoke test creates a temporary app, uses the local framework and local `axonyx-ui` when available, then runs:
 
 ```bash
 cargo ax check
@@ -242,368 +235,59 @@ cargo ax doctor --deny-warnings
 cargo ax build --clean
 ```
 
-It passes only if the app has no strict doctor warnings/errors and `dist/index.html`
-is generated.
+It passes only if the app has no strict doctor warnings/errors and `dist/index.html` is generated.
 
-## Planned global CLI flow
+## Design Direction
 
-Once published, we target:
+Axonyx should stay Rust-first and compiler-assisted, not a React clone.
 
-```bash
-cargo install create-axonyx
-cargo install cargo-axonyx
-create-axonyx my-site --yes --template site
-cd my-site
-cargo ax check
-cargo ax doctor
-cargo ax run dev
+The preferred runtime direction is:
+
+```txt
+compile .ax
+  -> static HTML with stable node ids
+  -> dependency graph
+  -> small runtime patcher
 ```
 
-## IR Demo Flow
+State and binding are separate concepts:
 
-Rust runtime executes compiled IR directly:
+```txt
+global/state = storage model
+hard/soft = binding model
+```
 
-```bash
-cargo run --manifest-path H:/CODE/axonyx/axonyx-framework/vendor/axonyx-runtime/Cargo.toml -p axonyx-runtime --example execute_json
+Preferred mental model:
+
+```txt
+Soft = snapshot
+Hard = live handle
 ```
 
 ## Docs
 
-The first structured docs index now lives in:
+The structured docs index lives in:
 
 ```text
 docs/README.md
 ```
 
-Recommended reading order for the current framework path:
+Recommended reading order:
 
 - `docs/overview.md`
 - `docs/ax-v2-authoring.md`
 - `docs/templates.md`
 - `docs/backend-authoring.md`
+- `docs/release-runbook.md`
 
-## Reactive Component Draft
+Drafts and lower-level architecture notes should live in `docs/`, not in the top-level README.
 
-```rust
-use axonyx_core::component;
-use axonyx_core::prelude::*;
+## Links
 
-#[component]
-fn CounterCard() -> AxNode {
-    let count = signal(1);
-    let count_for_mem = count.clone();
-    let doubled = mem(move || count_for_mem.get() * 2);
-
-    view(|| {
-        element("article", vec![
-            element("h2", vec![text("Counter")]),
-            element("p", vec![text(format!("Count: {}", count.get()))]),
-            element("p", vec![text(format!("Double: {}", doubled.get()))]),
-        ])
-    })
-}
-```
-
-Props work with the same component shape:
-
-```rust
-#[derive(Clone)]
-struct GreetingCardProps {
-    title: String,
-    count: i32,
-}
-
-#[component]
-fn GreetingCard(props: GreetingCardProps) -> AxNode {
-    view(|| {
-        element("article", vec![
-            element("h2", vec![text(props.title)]),
-            element("p", vec![text(format!("Count: {}", props.count))]),
-        ])
-    })
-}
-```
-
-Children can stay explicit and simple through props:
-
-```rust
-#[derive(Clone)]
-struct PanelProps {
-    title: String,
-    children: Children,
-}
-
-#[component]
-fn Panel(props: PanelProps) -> AxNode {
-    let mut body = vec![element("h2", vec![text(props.title)])];
-    body.extend(props.children);
-
-    view(|| element("section", body))
-}
-```
-
-And for cleaner tree authoring, there is now a first `ax!` draft:
-
-```rust
-use axonyx_core::ax;
-
-let node = ax!(article[
-    h2["Counter"],
-    p["Ready"],
-    p[format!("Count: {}", 2)],
-]);
-```
-
-Attributes are supported too:
-
-```rust
-let node = ax!(button(class="primary", data_state="ready")[
-    "Launch",
-]);
-```
-
-Layout primitives now exist as normal components too:
-
-```rust
-use axonyx_core::layout_prelude::*;
-use axonyx_core::prelude::*;
-
-let node = render_component(
-    grid,
-    GridProps {
-        cols: 3,
-        gap: Gap::Token("md"),
-        children: children([
-            text("Card A"),
-            text("Card B"),
-            text("Card C"),
-        ]),
-    },
-);
-```
-
-The first layout kit now includes:
-
-- `stack`
-- `grid`
-- `container`
-- `center`
-- `box`
-- `spacer`
-
-The first UI primitive kit now includes:
-
-- `button`
-- `card`
-- `input`
-- `copy`
-
-## Pipeline To UI Draft
-
-Pipelines can now be rendered into real `AxNode` trees through the first pipeline rendering bridge:
-
-```rust
-use axonyx_core::pipeline_prelude::*;
-
-let records = vec![
-    PipelineRecord::new("p1")
-        .titled("Card A")
-        .field("status", "draft"),
-    PipelineRecord::new("p2")
-        .titled("Card B")
-        .field("status", "published"),
-];
-
-let node = render_pipeline_node(
-    r#"Db.Stream("posts") |> layout.Grid(2) |> Card()"#,
-    &records,
-)?;
-```
-
-This first bridge keeps the model simple:
-
-- source metadata becomes a root container
-- transforms wrap the rendered record views
-- `Card()` uses the first-party `card` and `copy` primitives
-- named views such as `ProfileCard()` preserve their identity with `data-view`
-
-## `.ax` AST Draft
-
-Axonyx now also has a first Rust AST draft for `.ax` authoring:
-
-```rust
-use axonyx_core::ax_ast_prelude::*;
-
-let document = AxDocument::page(
-    "Home",
-    [
-        AxStatement::data(
-            "posts",
-            AxExpr::call(["Db", "Stream"], [AxExpr::string("posts")]),
-        ),
-        AxStatement::component(
-            AxComponent::new("Container")
-                .prop("max", "xl")
-                .block([AxStatement::component(
-                    AxComponent::new("Grid")
-                        .prop("cols", 3_i64)
-                        .prop("gap", "md")
-                        .block([AxStatement::each(
-                            "post",
-                            AxExpr::ident("posts"),
-                            [AxStatement::component(
-                                AxComponent::new("Card")
-                                    .prop("title", AxExpr::ident("post").member("title"))
-                                    .block([AxStatement::component(
-                                        AxComponent::new("Copy")
-                                            .inline(AxExpr::ident("post").member("excerpt")),
-                                    )]),
-                            )],
-                        )]),
-                )]),
-        ),
-    ],
-);
-```
-
-This draft intentionally models:
-
-- `page`
-- `data`
-- components
-- `each`
-- inline content through `->`
-- pipeline stages
-- styling layers through semantic props, `recipe`, and `class`
-
-## `.ax` Parser And Lowering Sketch
-
-Axonyx now also has a first parser sketch for the indentation-based `.ax` style and a first lowering pass into `AxNode`.
-
-Current parser sketch handles:
-
-- `page`
-- `data`
-- `each`
-- indentation-based component nesting
-- inline `->` children
-- styling fields such as `recipe` and `class`
-- a minimal `|>` pipeline sketch
-
-Current lowering sketch handles:
-
-- evaluating `data` bindings through a resolver
-- iterating `each` blocks over lists
-- lowering `Container`, `Grid`, `Card`, `Copy`, and `Button`
-- preserving `recipe` and `class` as style-level attributes
-
-## Backend AST Draft
-
-Axonyx now also has a first backend AST draft for full-stack authoring layers that lower into Rust.
-
-Current backend model includes:
-
-- `route`
-- `loader`
-- `action`
-- `job`
-
-The draft is intentionally small and focused on framework-shaped patterns rather than replacing all of Rust.
-
-## Query AST Draft
-
-Axonyx now also has a first query AST draft for backend data loading.
-
-Current query model covers:
-
-- `Db.Stream("collection")`
-- `where field = value`
-- `order field asc|desc`
-- `limit`
-- `offset`
-
-## Backend Parser Draft
-
-Axonyx now also has a first backend parser draft that can read indentation-based backend authoring blocks.
-
-Current parser draft handles:
-
-- `route METHOD "/path"`
-- `loader Name`
-- `action Name`
-- `job Name`
-- `data`
-- `input:`
-- `insert`
-- `update`
-- `revalidate`
-- `return`
-- `send ... with ...`
-- query clauses through `where`, `order`, `limit`, and `offset`
-
-## Backend Lowering Draft
-
-Axonyx now also has a first backend lowering draft that turns backend AST blocks into a stable Rust-oriented execution plan.
-
-Current lowering draft covers:
-
-- stable handler identities for `route`, `loader`, `action`, and `job`
-- Rust-friendly function names such as `loader_posts_list` and `route_get_api_posts`
-- lowered `data` bindings into either expression values or structured query plans
-- lowered action input fields into Rust types such as `String` and `bool`
-- lowered mutations, `revalidate`, `return`, and `send` steps into codegen-ready plan nodes
-
-## Backend Runtime And Codegen Draft
-
-Axonyx now also has a first backend runtime contract and codegen draft.
-
-Current runtime contract covers:
-
-- `AxQueryExecutor`
-- `AxMutationExecutor`
-- `AxRevalidator`
-- `AxMessenger`
-- `AxEnv` with `public` and `secret` namespaces
-- the combined `AxBackendRuntime` trait
-
-Current codegen draft covers:
-
-- generating Rust handlers from the backend lowering plan
-- emitting runtime-facing request types such as `AxQueryRequest` and `AxInsertRequest`
-- generating action input structs
-- direct compile flow from backend `.ax` source into a Rust module string
-
-Current env convention covers:
-
-- `.ax`: `Runtime.Env.public.app_name`
-- `.env`: `AX_PUBLIC_APP_NAME`
-- `.ax`: `Runtime.Env.secret.db_url`
-- `.env`: `AX_SECRET_DB_URL`
-- `.ax`: `Runtime.Env.secret.db_driver`
-- `.env`: `AX_SECRET_DB_DIALECT` with fallback to `AX_SECRET_DB_DRIVER`
-- `.env`: `AX_SECRET_DB_TRANSPORT` with default `direct`
-
-Current database adapter draft covers:
-
-- keeping `.ax` query authoring database-agnostic
-- selecting `postgres`, `mysql`, `sqlite`, or `memory` at runtime
-- resolving the active dialect from `AX_SECRET_DB_DIALECT`
-- resolving the active transport from `AX_SECRET_DB_TRANSPORT`
-- keeping one backend authoring shape while adapters translate into concrete driver behavior
-
-Current transport draft covers:
-
-- `direct` as the default runtime mode for normal SQL connections
-- `api` as an explicit mode for API-key-backed data providers
-- provider-specific env values such as `AX_PUBLIC_DATA_API_URL` and `AX_SECRET_DATA_API_KEY`
-- backward compatibility with the earlier `AX_SECRET_DB_DRIVER` draft
-
-Axonyx now also has a first SQL dialect draft in `axonyx-core`:
-
-- lowers `AxQueryPlan` into SQL text plus bound parameter slots
-- supports `postgres`, `mysql`, and `sqlite`
-- keeps placeholder rules dialect-aware such as `$1` for Postgres and `?` for MySQL/SQLite
-- gives the runtime adapter layer a clean seam for future real driver execution
+- Runtime repo: https://github.com/vladanPro/axonyx-runtime
+- UI package: https://github.com/vladanPro/axonyx-ui
+- React adapter: https://github.com/vladanPro/axonyx-react
+- crates.io user: https://crates.io/users/vladanPro
 
 ## Repo Layout
 
@@ -611,4 +295,7 @@ Axonyx now also has a first SQL dialect draft in `axonyx-core`:
 crates/
   cargo-axonyx/
   create-axonyx/
+vendor/
+  axonyx-runtime/
+docs/
 ```
