@@ -24,6 +24,7 @@ should be authored in JSX-like `.ax`.
 
 ```bash
 cargo ax check
+cargo ax doctor
 cargo ax build --clean
 cargo ax run dev
 ```

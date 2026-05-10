@@ -10,6 +10,7 @@ If you selected the registry runtime source before the package is published, swi
 
 ```bash
 cargo ax check
+cargo ax doctor
 cargo ax build --clean
 cargo ax run dev
 ```

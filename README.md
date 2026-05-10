@@ -252,7 +252,12 @@ Once published, we target:
 
 ```bash
 cargo install create-axonyx
-create-axonyx my-app --yes
+cargo install cargo-axonyx
+create-axonyx my-site --yes --template site
+cd my-site
+cargo ax check
+cargo ax doctor
+cargo ax run dev
 ```
 
 ## IR Demo Flow
