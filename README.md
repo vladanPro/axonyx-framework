@@ -35,6 +35,8 @@ Current local flow:
 git submodule update --init --recursive
 ```
 
+Release planning lives in [docs/release-runbook.md](./docs/release-runbook.md).
+
 ## Quick Start
 
 ### 1) Create a new Axonyx app locally

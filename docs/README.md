@@ -10,6 +10,7 @@ This folder is the first structured documentation layer for the Axonyx framework
 - [Getting Started](./getting-started.md)
 - [Proof App Checklist](./proof-app-checklist.md)
 - [Runtime Sources](./runtime-sources.md)
+- [Release Runbook](./release-runbook.md)
 - [Templates](./templates.md)
 - [Backend Authoring](./backend-authoring.md)
 
