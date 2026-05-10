@@ -408,6 +408,8 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
         checks.extend(doctor_ui_checks(root, cargo_source.as_deref()));
     }
 
+    checks.push(doctor_ax_sources_check(root));
+
     checks
 }
 
@@ -514,7 +516,59 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
         },
     });
 
+    checks.push(
+        match load_package_asset(root, "/_ax/pkg/axonyx-ui/index.css") {
+            Ok(Some(_)) => DoctorCheck {
+                code: "ui-package-css",
+                severity: DoctorSeverity::Ok,
+                message: "Axonyx UI package CSS can be served.".to_string(),
+                hint: None,
+            },
+            Ok(None) => DoctorCheck {
+                code: "ui-package-css",
+                severity: DoctorSeverity::Warn,
+                message: "Axonyx UI package CSS could not be found.".to_string(),
+                hint: Some(
+                    "Run `cargo ax add ui` or check that axonyx-ui exposes src/css/index.css.",
+                ),
+            },
+            Err(error) => DoctorCheck {
+                code: "ui-package-css",
+                severity: DoctorSeverity::Warn,
+                message: format!("Axonyx UI package CSS check failed: {error}"),
+                hint: Some("Check the package asset path and Axonyx UI package metadata."),
+            },
+        },
+    );
+
     checks
+}
+
+fn doctor_ax_sources_check(root: &Path) -> DoctorCheck {
+    match check_app_sources(root) {
+        Ok(diagnostics) if diagnostics.is_empty() => DoctorCheck {
+            code: "ax-sources",
+            severity: DoctorSeverity::Ok,
+            message: "Axonyx source diagnostics passed.".to_string(),
+            hint: None,
+        },
+        Ok(diagnostics) => DoctorCheck {
+            code: "ax-sources",
+            severity: DoctorSeverity::Error,
+            message: format!(
+                "{} Axonyx source diagnostic{} found.",
+                diagnostics.len(),
+                if diagnostics.len() == 1 { "" } else { "s" }
+            ),
+            hint: Some("Run `cargo ax check` to see file-level diagnostics."),
+        },
+        Err(error) => DoctorCheck {
+            code: "ax-sources",
+            severity: DoctorSeverity::Error,
+            message: format!("Axonyx source diagnostics failed: {error}"),
+            hint: Some("Run `cargo ax check` for more details."),
+        },
+    }
 }
 
 fn cargo_manifest_has_dependency(source: &str, dependency_name: &str) -> bool {
@@ -4434,6 +4488,7 @@ page RootLayout
         assert!(checks
             .iter()
             .all(|check| check.severity == DoctorSeverity::Ok));
+        assert!(checks.iter().any(|check| check.code == "ui-package-css"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -4486,6 +4541,41 @@ page RootLayout
         assert!(ui_dependency.message.contains("axonyx-ui"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_reports_ax_source_diagnostics() {
+        let root = make_temp_dir("doctor-ax-diagnostics");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.0"
+"#,
+        )
+        .expect("cargo manifest should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy></Card>\n")
+            .expect("page should write");
+
+        let checks = doctor_checks(&root);
+        let ax_sources = checks
+            .iter()
+            .find(|check| check.code == "ax-sources")
+            .expect("ax source check should exist");
+
+        assert_eq!(ax_sources.severity, DoctorSeverity::Error);
+        assert!(ax_sources.message.contains("diagnostic"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
