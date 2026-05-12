@@ -1,14 +1,23 @@
-# Axonyx Framework Monorepo
+# Axonyx Framework
 
-Axonyx is a Rust-first framework for building Axonyx apps with `.ax` routes, Foundry UI packages, and a small Cargo-based authoring workflow.
+Axonyx is a Rust-first web framework and language layer for building low-JavaScript sites, docs, and future CMS-style applications with `.ax` files, Cargo-native tooling, and Foundry UI.
 
-Current focus:
+Status: public beta loop.
 
-- Rust-first app/runtime architecture
+Axonyx can already scaffold apps, render `.ax` pages, build static output, serve route-aware local previews, import Foundry UI from `axonyx-ui`, and publish deployable sites. It is not yet a full replacement for React, Next.js, or mature CMS platforms. The next runtime work is tracked in the GitHub issues and Wiki.
+
+## What Works Today
+
 - JSX-like `.ax` authoring in `app/**/page.ax` and `app/**/layout.ax`
-- route-aware static builds and local dev serving
+- nested app routes
+- dynamic route params and query context
+- route-local `loader.ax` and `actions.ax` draft support
 - backend-oriented `.ax` files for loaders, actions, routes, and jobs
+- static builds through `cargo ax build`
+- route-aware dev/start server through `cargo ax run dev` and `cargo ax run start`
+- strict project diagnostics through `cargo ax doctor --deny-warnings`
 - reusable Foundry UI imports through `@axonyx/ui/...`
+- generated apps consuming published crates from crates.io
 
 ## Packages
 
@@ -17,42 +26,49 @@ This repository contains the public CLI packages:
 - `create-axonyx` - project scaffolding CLI, similar in spirit to `create-next-app`
 - `cargo-axonyx` - Cargo helper CLI exposed as `cargo ax ...`
 
-Runtime crates live in the standalone runtime workspace and are consumed by generated apps through crates.io by default:
+Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
 axonyx-runtime = "0.1.0"
-```
-
-Axonyx UI is also available as both npm and Cargo package:
-
-```toml
-[dependencies]
-axonyx-ui = "0.1.0"
+axonyx-ui = "0.0.33"
 ```
 
 ## Quick Start
 
-From this repository, create a new app:
+Install the public CLI tools:
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes
+cargo install create-axonyx
+cargo install cargo-axonyx
 ```
 
-Create a site or docs app:
+Create and run a site:
 
 ```bash
-cargo run -p create-axonyx -- my-site --yes --template site
-cargo run -p create-axonyx -- my-docs --yes --template docs
+create-axonyx my-site --yes --template site
+cd my-site
+cargo ax run dev
 ```
 
-Generated apps use the published crates.io runtime source by default, so they do not need this monorepo or its submodule layout.
+Check and build:
+
+```bash
+cargo ax doctor --deny-warnings
+cargo ax build --clean
+```
 
 Available templates today:
 
 - `minimal`
 - `site`
 - `docs`
+
+From this repository, contributors can also run the scaffold locally:
+
+```bash
+cargo run -p create-axonyx -- my-site --yes --template site
+```
 
 ## App Authoring Model
 
@@ -264,6 +280,29 @@ Soft = snapshot
 Hard = live handle
 ```
 
+The server/runtime can be async internally, but Axonyx authoring should stay structured and declarative. Developers should place work into `loader`, `action`, `signal`, `<Await>`, and `job` instead of hand-orchestrating promise timing.
+
+See [Structured Async In Axonyx](./docs/architecture/structured-async.md).
+
+## Roadmap
+
+The next framework spine is tracked as `Axonyx Runtime Core / The Melt`.
+
+Primary GitHub issues:
+
+- [#8 Epic: Axonyx Runtime Core / The Melt](https://github.com/vladanPro/axonyx-framework/issues/8)
+- [#9 axonyx-server-net: migrate server to Hyper/Tokio](https://github.com/vladanPro/axonyx-framework/issues/9)
+- [#10 axonyx-std-fs: capability FS and content collections](https://github.com/vladanPro/axonyx-framework/issues/10)
+- [#11 axonyx-std-state: SignalId bridge and typed patches](https://github.com/vladanPro/axonyx-framework/issues/11)
+- [#12 axonyx-std-auth: sessions, crypto, and policies](https://github.com/vladanPro/axonyx-framework/issues/12)
+- [#13 axonyx-std-process: jobs, workers, and child processes](https://github.com/vladanPro/axonyx-framework/issues/13)
+- [#14 Framework finishing layer after runtime core](https://github.com/vladanPro/axonyx-framework/issues/14)
+
+Architecture references:
+
+- [The Melt](https://github.com/vladanPro/axonyx-framework/wiki/The-Melt)
+- [Structured Async In Axonyx](https://github.com/vladanPro/axonyx-framework/wiki/Structured-Async-In-Axonyx)
+
 ## Docs
 
 The structured docs index lives in:
@@ -276,6 +315,7 @@ Recommended reading order:
 
 - `docs/overview.md`
 - `docs/ax-v2-authoring.md`
+- `docs/architecture/structured-async.md`
 - `docs/templates.md`
 - `docs/backend-authoring.md`
 - `docs/release-runbook.md`
@@ -284,6 +324,8 @@ Drafts and lower-level architecture notes should live in `docs/`, not in the top
 
 ## Links
 
+- Main site: https://axonyx.dev
+- React adapter site: https://react.axonyx.dev
 - Runtime repo: https://github.com/vladanPro/axonyx-runtime
 - UI package: https://github.com/vladanPro/axonyx-ui
 - React adapter: https://github.com/vladanPro/axonyx-react
