@@ -300,8 +300,11 @@ Primary GitHub issues:
 
 Architecture references:
 
+- [Next.js vs Axonyx](https://github.com/vladanPro/axonyx-framework/wiki/Next.js-vs-Axonyx)
 - [The Melt](https://github.com/vladanPro/axonyx-framework/wiki/The-Melt)
 - [Structured Async In Axonyx](https://github.com/vladanPro/axonyx-framework/wiki/Structured-Async-In-Axonyx)
+- [Axonyx Modules](https://github.com/vladanPro/axonyx-framework/wiki/Axonyx-Modules)
+- [Axonyx CLI](https://github.com/vladanPro/axonyx-framework/wiki/Axonyx-CLI)
 
 ## Docs
 

@@ -36,8 +36,15 @@ Generated apps depend on published Cargo packages by default:
 
 ```toml
 axonyx-runtime = "0.1.0"
-axonyx-ui = "0.0.32"
+axonyx-ui = "0.0.33"
 ```
 
 Local path and package override flows are still supported for framework development and UI dogfooding.
 
+## Architecture Direction
+
+Axonyx is not intended to be another React wrapper. It is aiming to become a Rust-first framework for sites, docs, CMS products, and full-stack apps where HTML-first output, explicit compilation, low JavaScript, and packageable themes/templates matter more than React compatibility.
+
+Read the architecture comparison:
+
+https://github.com/vladanPro/axonyx-framework/wiki/Next.js-vs-Axonyx

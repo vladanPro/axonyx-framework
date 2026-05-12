@@ -25,6 +25,14 @@ Available templates:
 - `site`
 - `docs`
 
+## Architecture Direction
+
+Axonyx is not intended to be another React wrapper. It is aiming to become a Rust-first framework for sites, docs, CMS products, and full-stack apps where HTML-first output, explicit compilation, low JavaScript, and packageable themes/templates matter more than React compatibility.
+
+Read the architecture comparison:
+
+https://github.com/vladanPro/axonyx-framework/wiki/Next.js-vs-Axonyx
+
 ## Runtime Source
 
 The default scaffold uses the published crates.io runtime:
@@ -44,4 +52,3 @@ For testing an unreleased runtime branch, use:
 ```bash
 create-axonyx my-site --yes --runtime-source git
 ```
-
