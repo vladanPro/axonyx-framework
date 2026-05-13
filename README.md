@@ -213,6 +213,11 @@ extensions = ["md", "mdx"]
 ```
 
 This indexes matching files into a content manifest today. Later runtime work can use the same manifest for docs, blog, and CMS routing.
+During `cargo ax build`, configured collections are written to:
+
+```text
+dist/_ax/content/manifest.json
+```
 
 ## Adding Modules
 

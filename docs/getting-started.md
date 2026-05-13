@@ -42,6 +42,7 @@ cargo ax run dev
 `cargo ax doctor` checks the app shape, runtime dependency, UI package wiring, package CSS, and `.ax` diagnostics before you start chasing browser issues.
 
 `cargo ax content` indexes configured content collections, which is the first filesystem/content layer for future docs, blog, and CMS flows.
+`cargo ax build` writes that manifest to `dist/_ax/content/manifest.json` when collections are configured.
 
 For a production-style local run, use:
 

@@ -32,6 +32,7 @@ cargo ax run dev
 `cargo ax doctor` verifies the app structure, runtime dependency, Axonyx UI package resolution, stylesheet wiring, and `.ax` source diagnostics.
 
 `cargo ax content` reads `[content.collections]` from `Axonyx.toml` and prints the current Melt-time content manifest.
+`cargo ax build` writes the same manifest to `dist/_ax/content/manifest.json` when collections are configured.
 
 ## Package Model
 

@@ -232,10 +232,12 @@ enum StaticBuildStatus {
         route_count: usize,
         prerendered_count: usize,
         skipped_dynamic_count: usize,
+        content_collection_count: usize,
         output_dir: PathBuf,
     },
     NoPages {
         skipped_dynamic_count: usize,
+        content_collection_count: usize,
         output_dir: PathBuf,
     },
 }
@@ -1738,10 +1740,12 @@ fn build_static_site_from_app_root(
 
     copy_public_assets_to_dist(root, &output_dir)?;
     copy_package_assets_to_dist(root, &output_dir)?;
+    let content_collection_count = write_content_manifest_to_dist(root, &output_dir)?;
 
     if static_routes.is_empty() && prerender_routes.is_empty() {
         return Ok(StaticBuildStatus::NoPages {
             skipped_dynamic_count: dynamic_routes.len(),
+            content_collection_count,
             output_dir,
         });
     }
@@ -1788,6 +1792,7 @@ fn build_static_site_from_app_root(
         route_count: static_routes.len(),
         prerendered_count,
         skipped_dynamic_count,
+        content_collection_count,
         output_dir,
     })
 }
@@ -1969,6 +1974,27 @@ fn copy_package_assets_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
     copy_dir_all_filtered(&css_root, &target, |_| false)
 }
 
+fn write_content_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize> {
+    let manifest = collect_content_manifest(root)?;
+    let count = manifest.collections.len();
+    if count == 0 {
+        return Ok(0);
+    }
+
+    let target = output_dir.join("_ax").join("content").join("manifest.json");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create '{}'", parent.display()))?;
+    }
+
+    let json = serde_json::to_string_pretty(&manifest)
+        .context("failed to render content manifest as JSON")?;
+    fs::write(&target, json)
+        .with_context(|| format!("failed to write content manifest to '{}'", target.display()))?;
+
+    Ok(count)
+}
+
 fn static_route_output_path(output_dir: &Path, route: &str) -> Result<PathBuf> {
     let normalized = normalize_request_path(route)?;
     let segments = path_segments(&normalized);
@@ -1991,6 +2017,7 @@ fn print_static_build_status(status: &StaticBuildStatus) {
             route_count,
             prerendered_count,
             skipped_dynamic_count,
+            content_collection_count,
             output_dir,
         } => {
             println!(
@@ -2005,9 +2032,16 @@ fn print_static_build_status(status: &StaticBuildStatus) {
                     "Skipped {skipped_dynamic_count} dynamic page route(s); provide params through a future prerender config."
                 );
             }
+            if *content_collection_count > 0 {
+                println!(
+                    "Wrote content manifest for {content_collection_count} collection(s) into {}/_ax/content/manifest.json",
+                    output_dir.display()
+                );
+            }
         }
         StaticBuildStatus::NoPages {
             skipped_dynamic_count,
+            content_collection_count,
             output_dir,
         } => {
             println!(
@@ -2017,6 +2051,12 @@ fn print_static_build_status(status: &StaticBuildStatus) {
             if *skipped_dynamic_count > 0 {
                 println!(
                     "Skipped {skipped_dynamic_count} dynamic page route(s); provide params through a future prerender config."
+                );
+            }
+            if *content_collection_count > 0 {
+                println!(
+                    "Wrote content manifest for {content_collection_count} collection(s) into {}/_ax/content/manifest.json",
+                    output_dir.display()
                 );
             }
         }
@@ -4388,11 +4428,13 @@ page Docs
                 route_count,
                 prerendered_count,
                 skipped_dynamic_count,
+                content_collection_count,
                 output_dir,
             } => {
                 assert_eq!(route_count, 2);
                 assert_eq!(prerendered_count, 0);
                 assert_eq!(skipped_dynamic_count, 0);
+                assert_eq!(content_collection_count, 0);
                 assert_eq!(output_dir, root.join("dist"));
             }
             StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
@@ -4464,20 +4506,24 @@ page BlogPost
         match status {
             StaticBuildStatus::NoPages {
                 skipped_dynamic_count,
+                content_collection_count,
                 output_dir,
             } => {
                 assert_eq!(output_dir, root.join("dist"));
                 assert_eq!(skipped_dynamic_count, 1);
+                assert_eq!(content_collection_count, 0);
             }
             StaticBuildStatus::Generated {
                 route_count,
                 prerendered_count,
                 skipped_dynamic_count,
+                content_collection_count,
                 ..
             } => {
                 assert_eq!(route_count, 0);
                 assert_eq!(prerendered_count, 0);
                 assert_eq!(skipped_dynamic_count, 1);
+                assert_eq!(content_collection_count, 0);
             }
         }
         assert!(!root.join("dist/blog/[slug]/index.html").exists());
@@ -4519,11 +4565,13 @@ page BlogPost
                 route_count,
                 prerendered_count,
                 skipped_dynamic_count,
+                content_collection_count,
                 output_dir,
             } => {
                 assert_eq!(route_count, 0);
                 assert_eq!(prerendered_count, 2);
                 assert_eq!(skipped_dynamic_count, 0);
+                assert_eq!(content_collection_count, 0);
                 assert_eq!(output_dir, root.join("dist"));
             }
             StaticBuildStatus::NoPages { .. } => panic!("prerender pages should be generated"),
@@ -5883,6 +5931,53 @@ extensions = ["md", "mdx"]
         assert_eq!(collection.entries[0].slug, "intro");
         assert_eq!(collection.entries[1].path, "content/docs/nested/setup.mdx");
         assert_eq!(collection.entries[1].slug, "nested/setup");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_writes_content_manifest() {
+        let root = make_temp_dir("static-build-content-manifest");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("content/docs")).expect("content dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[content.collections.docs]
+path = "content/docs"
+extensions = ["md"]
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+<Copy>Home page</Copy>
+"#,
+        )
+        .expect("page should write");
+        fs::write(root.join("content/docs/intro.md"), "# Intro\n").expect("intro should write");
+
+        let status = build_static_site_from_app_root(&root, Path::new("dist"), true)
+            .expect("static build works");
+
+        match status {
+            StaticBuildStatus::Generated {
+                content_collection_count,
+                ..
+            } => assert_eq!(content_collection_count, 1),
+            StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
+        }
+
+        let manifest = fs::read_to_string(root.join("dist/_ax/content/manifest.json"))
+            .expect("content manifest should exist");
+        assert!(manifest.contains("\"name\": \"docs\""));
+        assert!(manifest.contains("\"path\": \"content/docs/intro.md\""));
+        assert!(manifest.contains("\"slug\": \"intro\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
