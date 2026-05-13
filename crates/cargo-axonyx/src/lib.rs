@@ -30,7 +30,7 @@ const DOCS_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
-const AXONYX_UI_VERSION: &str = "0.0.32";
+const AXONYX_UI_VERSION: &str = "0.0.33";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -46,6 +46,7 @@ enum Commands {
     Add(AddArgs),
     Build(BuildArgs),
     Check(CheckArgs),
+    Content(ContentArgs),
     Dev(DevArgs),
     Doctor(DoctorArgs),
     Routes(RoutesArgs),
@@ -76,6 +77,13 @@ struct CheckArgs {
     file: Option<PathBuf>,
 
     /// Output format for diagnostics.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+}
+
+#[derive(Debug, Parser)]
+struct ContentArgs {
+    /// Output format for the content manifest.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
 }
@@ -254,6 +262,27 @@ struct RouteManifestItem {
     params: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ContentManifest {
+    collections: Vec<ContentCollectionManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ContentCollectionManifest {
+    name: String,
+    path: String,
+    extensions: Vec<String>,
+    entries: Vec<ContentEntryManifest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ContentEntryManifest {
+    path: String,
+    slug: String,
+    extension: String,
+    bytes: u64,
+}
+
 pub fn main_entry() {
     if let Err(error) = run() {
         print_cli_error(&error);
@@ -268,6 +297,7 @@ fn run() -> Result<()> {
         Commands::Add(args) => add_module(args.module),
         Commands::Build(args) => build_command(args),
         Commands::Check(args) => check_command(args),
+        Commands::Content(args) => content_command(args),
         Commands::Dev(args) => run_dev_server(args),
         Commands::Doctor(args) => doctor_command(args),
         Commands::Routes(args) => routes_command(args),
@@ -666,6 +696,269 @@ fn routes_command(args: RoutesArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn content_command(args: ContentArgs) -> Result<()> {
+    let root = app_root()?;
+    let manifest = collect_content_manifest(&root)?;
+
+    match args.format {
+        CheckFormat::Text => print_content_text(&manifest),
+        CheckFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_content_text(manifest: &ContentManifest) {
+    if manifest.collections.is_empty() {
+        println!("No content collections configured.");
+        println!("Add [content.collections.<name>] entries to Axonyx.toml.");
+        return;
+    }
+
+    println!("Content collections:");
+    for collection in &manifest.collections {
+        println!(
+            "  {:<18} path={} entries={} extensions={}",
+            collection.name,
+            collection.path,
+            collection.entries.len(),
+            collection.extensions.join(",")
+        );
+
+        for entry in &collection.entries {
+            println!(
+                "    {:<32} slug={} bytes={}",
+                entry.path, entry.slug, entry.bytes
+            );
+        }
+    }
+}
+
+fn collect_content_manifest(root: &Path) -> Result<ContentManifest> {
+    let configs = load_content_collection_configs(root)?;
+    let mut collections = Vec::new();
+
+    for config in configs {
+        let entries = collect_content_entries(root, &config)?;
+        collections.push(ContentCollectionManifest {
+            name: config.name,
+            path: display_relative_path(root, &config.path),
+            extensions: config.extensions,
+            entries,
+        });
+    }
+
+    Ok(ContentManifest { collections })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentCollectionConfig {
+    name: String,
+    path: PathBuf,
+    extensions: Vec<String>,
+}
+
+fn load_content_collection_configs(root: &Path) -> Result<Vec<ContentCollectionConfig>> {
+    let Some(collections_value) = axonyx_config_value(root, "content", "collections") else {
+        return Ok(Vec::new());
+    };
+
+    let collections = collections_value
+        .as_table()
+        .ok_or_else(|| anyhow::anyhow!("[content].collections must be a TOML table"))?;
+    let mut out = Vec::new();
+
+    for (name, value) in collections {
+        let table = value
+            .as_table()
+            .ok_or_else(|| anyhow::anyhow!("[content.collections.{name}] must be a TOML table"))?;
+        let path = table
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("[content.collections.{name}] is missing path"))?;
+        let path = resolve_content_collection_path(root, path)?;
+        let extensions = table
+            .get("extensions")
+            .map(content_extensions_from_value)
+            .transpose()?
+            .unwrap_or_else(|| vec!["md".to_string(), "mdx".to_string()]);
+
+        out.push(ContentCollectionConfig {
+            name: name.to_string(),
+            path,
+            extensions,
+        });
+    }
+
+    out.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(out)
+}
+
+fn content_extensions_from_value(value: &toml::Value) -> Result<Vec<String>> {
+    let values = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("content collection extensions must be an array"))?;
+    let mut extensions = Vec::new();
+
+    for value in values {
+        let extension = value
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("content collection extension must be a string"))?
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        if extension.is_empty()
+            || extension.contains('/')
+            || extension.contains('\\')
+            || extension == "."
+            || extension == ".."
+        {
+            bail!("invalid content collection extension '{extension}'");
+        }
+        if !extensions.contains(&extension) {
+            extensions.push(extension);
+        }
+    }
+
+    Ok(extensions)
+}
+
+fn resolve_content_collection_path(root: &Path, path: &str) -> Result<PathBuf> {
+    if path.contains('\0') {
+        bail!("content collection path contains an invalid null byte");
+    }
+
+    let path = PathBuf::from(path);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+
+    let normalized = normalize_content_path(&resolved)?;
+    let root = normalize_content_path(root)?;
+    if !normalized.starts_with(&root) {
+        bail!(
+            "content collection path '{}' must stay inside app root '{}'",
+            normalized.display(),
+            root.display()
+        );
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_content_path(path: &Path) -> Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    bail!("content collection path cannot escape app root");
+                }
+            }
+            std::path::Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    Ok(normalized)
+}
+
+fn collect_content_entries(
+    root: &Path,
+    config: &ContentCollectionConfig,
+) -> Result<Vec<ContentEntryManifest>> {
+    if !config.path.exists() {
+        return Ok(Vec::new());
+    }
+    if !config.path.is_dir() {
+        bail!(
+            "content collection '{}' path '{}' is not a directory",
+            config.name,
+            config.path.display()
+        );
+    }
+
+    let mut entries = Vec::new();
+    collect_content_entries_in_dir(root, config, &config.path, &mut entries)?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(entries)
+}
+
+fn collect_content_entries_in_dir(
+    root: &Path,
+    config: &ContentCollectionConfig,
+    dir: &Path,
+    out: &mut Vec<ContentEntryManifest>,
+) -> Result<()> {
+    let mut children = fs::read_dir(dir)
+        .with_context(|| format!("failed to read content directory '{}'", dir.display()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .with_context(|| format!("failed to read content directory '{}'", dir.display()))?;
+
+    children.sort_by_key(|entry| entry.path());
+
+    for entry in children {
+        let path = entry.path();
+        let file_name = entry.file_name();
+        if file_name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_content_entries_in_dir(root, config, &path, out)?;
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !config.extensions.contains(&extension) {
+            continue;
+        }
+
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("failed to inspect content file '{}'", path.display()))?;
+        out.push(ContentEntryManifest {
+            path: display_relative_path(root, &path),
+            slug: content_slug(&config.path, &path),
+            extension,
+            bytes: metadata.len(),
+        });
+    }
+
+    Ok(())
+}
+
+fn content_slug(collection_root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(collection_root).unwrap_or(path);
+    let mut segments = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(segment) => Some(segment.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if let Some(last) = segments.last_mut() {
+        if let Some((stem, _)) = last.rsplit_once('.') {
+            *last = stem.to_string();
+        }
+    }
+
+    segments.join("/")
 }
 
 fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
@@ -4359,7 +4652,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.32\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.33\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -5553,6 +5846,64 @@ page Home
         assert!(diagnostics[0].message.contains("SiteCard.ax"));
         assert!(diagnostics[0].message.contains("InnerCard.ax"));
         assert!(diagnostics[0].message.contains("cycle"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn content_manifest_indexes_configured_collections() {
+        let root = make_temp_dir("content-manifest");
+        fs::create_dir_all(root.join("content/docs/nested")).expect("content dirs should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[content.collections.docs]
+path = "content/docs"
+extensions = ["md", "mdx"]
+"#,
+        )
+        .expect("config should write");
+        fs::write(root.join("content/docs/intro.md"), "# Intro\n").expect("intro should write");
+        fs::write(root.join("content/docs/nested/setup.mdx"), "# Setup\n")
+            .expect("setup should write");
+        fs::write(root.join("content/docs/ignored.txt"), "skip").expect("ignored should write");
+
+        let manifest = collect_content_manifest(&root).expect("manifest should collect");
+
+        assert_eq!(manifest.collections.len(), 1);
+        let collection = &manifest.collections[0];
+        assert_eq!(collection.name, "docs");
+        assert_eq!(collection.path, "content/docs");
+        assert_eq!(collection.extensions, vec!["md", "mdx"]);
+        assert_eq!(collection.entries.len(), 2);
+        assert_eq!(collection.entries[0].path, "content/docs/intro.md");
+        assert_eq!(collection.entries[0].slug, "intro");
+        assert_eq!(collection.entries[1].path, "content/docs/nested/setup.mdx");
+        assert_eq!(collection.entries[1].slug, "nested/setup");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn content_collection_path_must_stay_inside_app_root() {
+        let root = make_temp_dir("content-path-safety");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[content.collections.docs]
+path = "../outside"
+"#,
+        )
+        .expect("config should write");
+
+        let error = load_content_collection_configs(&root).expect_err("path should fail");
+        assert!(error.to_string().contains("must stay inside app root"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

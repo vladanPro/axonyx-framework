@@ -25,6 +25,7 @@ If `cargo-axonyx` is installed, the first framework-shaped local loop is:
 ```bash
 cargo ax check
 cargo ax doctor
+cargo ax content
 cargo ax build
 cargo ax run dev
 ```
@@ -39,6 +40,8 @@ cargo ax run dev
 `cargo ax run dev` now runs that backend sync once before starting the local route-aware dev server with live reload polling.
 
 `cargo ax doctor` checks the app shape, runtime dependency, UI package wiring, package CSS, and `.ax` diagnostics before you start chasing browser issues.
+
+`cargo ax content` indexes configured content collections, which is the first filesystem/content layer for future docs, blog, and CMS flows.
 
 For a production-style local run, use:
 

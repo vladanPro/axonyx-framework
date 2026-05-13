@@ -104,6 +104,7 @@ From an app root:
 ```bash
 cargo ax doctor
 cargo ax check
+cargo ax content
 cargo ax build
 cargo ax run dev
 ```
@@ -195,6 +196,23 @@ cargo ax routes
 ```
 
 This lists `app/**/page.ax` page routes, `routes/**/*.ax` backend routes, dynamic params, nested layout count, and route-local `loader.ax` / `actions.ax` files.
+
+Inspect content collections:
+
+```bash
+cargo ax content
+cargo ax content --format json
+```
+
+Configure early Melt-time content indexing in `Axonyx.toml`:
+
+```toml
+[content.collections.docs]
+path = "content/docs"
+extensions = ["md", "mdx"]
+```
+
+This indexes matching files into a content manifest today. Later runtime work can use the same manifest for docs, blog, and CMS routing.
 
 ## Adding Modules
 
