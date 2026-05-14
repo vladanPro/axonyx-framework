@@ -68,6 +68,14 @@ let posts: List<Post> = load PostsList
 
 If the page uses `post.summary` instead of a declared field, `cargo ax check` reports an `axonyx-type` diagnostic. This is the first bridge between `.ax` primitives like `String` / `List<Post>` and Rust-side Axonyx types.
 
+For intentionally optional data, use safe member access:
+
+```ax
+<Copy>{post?.summary}</Copy>
+```
+
+If `summary` is missing at runtime, it lowers to an empty string instead of failing the render.
+
 For a production-style local run, use:
 
 ```bash

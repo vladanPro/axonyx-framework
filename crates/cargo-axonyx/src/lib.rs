@@ -5654,6 +5654,30 @@ let posts: List<Post> = load PostsList
     }
 
     #[test]
+    fn check_ax_source_allows_optional_typed_each_member() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Blog
+
+type Post {
+  title: String
+}
+
+let posts: List<Post> = load PostsList
+
+<Each items={posts} as="post">
+  <Card title={post?.summary} />
+</Each>
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
     fn check_ax_source_reports_duplicate_type_field() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
         let diagnostics = check_ax_source_with_root(

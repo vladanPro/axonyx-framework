@@ -116,6 +116,7 @@ let posts: List<Post> = load PostsList
 ```
 
 `cargo ax check` reports `axonyx-type` diagnostics when a typed page accesses a missing field such as `post.summary`.
+Use `post?.summary` when a missing field is intentional and should render as an empty string.
 
 ## Common Commands
 
