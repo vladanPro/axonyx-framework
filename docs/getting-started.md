@@ -44,6 +44,30 @@ cargo ax run dev
 `cargo ax content` indexes configured content collections, which is the first filesystem/content layer for future docs, blog, and CMS flows.
 `cargo ax build` writes that manifest to `dist/_ax/content/manifest.json` when collections are configured.
 
+## Typed Data And Each
+
+Axonyx now has an early typed data path for JSX-like `.ax` files. Define a record shape, bind loader data to a typed list, and `cargo ax check` can catch wrong field access before render:
+
+```ax
+page Blog
+
+type Post {
+  title: String
+  slug: String
+  excerpt: String
+}
+
+let posts: List<Post> = load PostsList
+
+<Each items={posts} as="post">
+  <Card title={post.title}>
+    <Copy>{post.excerpt}</Copy>
+  </Card>
+</Each>
+```
+
+If the page uses `post.summary` instead of a declared field, `cargo ax check` reports an `axonyx-type` diagnostic. This is the first bridge between `.ax` primitives like `String` / `List<Post>` and Rust-side Axonyx types.
+
 For a production-style local run, use:
 
 ```bash

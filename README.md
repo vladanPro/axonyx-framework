@@ -16,6 +16,7 @@ Axonyx can already scaffold apps, render `.ax` pages, build static output, serve
 - static builds through `cargo ax build`
 - route-aware dev/start server through `cargo ax run dev` and `cargo ax run start`
 - strict project diagnostics through `cargo ax doctor --deny-warnings`
+- early typed data checks for `type Post`, `List<Post>`, and `<Each>` field access
 - reusable Foundry UI imports through `@axonyx/ui/...`
 - generated apps consuming published crates from crates.io
 
@@ -96,6 +97,25 @@ app/
 ```
 
 Legacy indentation-first `.ax` syntax still exists for compatibility and reference work, but new examples and new framework authoring should prefer the JSX-like `.ax` direction.
+
+Typed data is available in the JSX-like path:
+
+```ax
+page Blog
+
+type Post {
+  title: String
+  slug: String
+}
+
+let posts: List<Post> = load PostsList
+
+<Each items={posts} as="post">
+  <Card title={post.title} />
+</Each>
+```
+
+`cargo ax check` reports `axonyx-type` diagnostics when a typed page accesses a missing field such as `post.summary`.
 
 ## Common Commands
 

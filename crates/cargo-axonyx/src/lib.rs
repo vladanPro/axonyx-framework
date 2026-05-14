@@ -17,7 +17,7 @@ use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxCon
 use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
-use axonyx_core::ax_types_prelude::AxDataContext;
+use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
     preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
@@ -1105,29 +1105,51 @@ fn check_ax_source_with_root(
     };
 
     let mut diagnostics = Vec::new();
-    diagnostics.extend(check_type_annotations(path, source));
+    diagnostics.extend(check_type_annotations(path, source, &document));
     if let Some(root) = root {
         diagnostics.extend(check_imports(root, path, source, &document.imports));
     }
     diagnostics
 }
 
-fn check_type_annotations(path: &Path, source: &str) -> Vec<CheckDiagnostic> {
+fn check_type_annotations(
+    path: &Path,
+    source: &str,
+    document: &axonyx_core::ax_ast_prelude::AxDocument,
+) -> Vec<CheckDiagnostic> {
     let Ok(file) = parse_ax_v2(source) else {
         return Vec::new();
     };
+    if file.types.is_empty() && file.lets.iter().all(|binding| binding.ty.is_none()) {
+        return Vec::new();
+    }
 
-    match AxDataContext::from_v2_let_types(&file) {
-        Ok(_) => Vec::new(),
-        Err(error) => vec![CheckDiagnostic {
+    let context = match AxDataContext::from_v2_let_types(&file) {
+        Ok(context) => context,
+        Err(error) => {
+            return vec![CheckDiagnostic {
+                file: display_path(path),
+                line: typed_let_line(source).unwrap_or(1),
+                column: 1,
+                severity: "error",
+                code: "axonyx-type",
+                message: error.to_string(),
+            }];
+        }
+    };
+
+    check_document_types(document, &context)
+        .errors
+        .into_iter()
+        .map(|error| CheckDiagnostic {
             file: display_path(path),
-            line: typed_let_line(source).unwrap_or(1),
+            line: 1,
             column: 1,
             severity: "error",
             code: "axonyx-type",
-            message: error.to_string(),
-        }],
-    }
+            message: format!("{}: {}", error.location, error.message),
+        })
+        .collect()
 }
 
 fn typed_let_line(source: &str) -> Option<usize> {
@@ -1438,6 +1460,7 @@ fn line_from_ax_parse_v2_error(error: &AxParseV2Error) -> Option<usize> {
         | AxParseV2Error::MissingImportFrom { line }
         | AxParseV2Error::EmptyImportList { line }
         | AxParseV2Error::InvalidPage { line }
+        | AxParseV2Error::InvalidType { line }
         | AxParseV2Error::InvalidLet { line }
         | AxParseV2Error::InvalidFunction { line }
         | AxParseV2Error::InvalidComponent { line }
@@ -5585,6 +5608,33 @@ let posts: List<Post>> = load PostsList
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 4);
         assert_eq!(diagnostics[0].code, "axonyx-type");
+    }
+
+    #[test]
+    fn check_ax_source_reports_unknown_typed_each_member() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Blog
+
+type Post {
+  title: String
+}
+
+let posts: List<Post> = load PostsList
+
+<Each items={posts} as="post">
+  <Card title={post.summary} />
+</Each>
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert!(diagnostics[0].message.contains("summary"));
+        assert!(diagnostics[0].message.contains("unknown field"));
     }
 
     #[test]
