@@ -15,8 +15,9 @@ use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
 use axonyx_core::ax_parser_prelude::AxParseError;
-use axonyx_core::ax_parser_v2_prelude::AxParseV2Error;
+use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
+use axonyx_core::ax_types_prelude::AxDataContext;
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
     preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
@@ -1104,10 +1105,40 @@ fn check_ax_source_with_root(
     };
 
     let mut diagnostics = Vec::new();
+    diagnostics.extend(check_type_annotations(path, source));
     if let Some(root) = root {
         diagnostics.extend(check_imports(root, path, source, &document.imports));
     }
     diagnostics
+}
+
+fn check_type_annotations(path: &Path, source: &str) -> Vec<CheckDiagnostic> {
+    let Ok(file) = parse_ax_v2(source) else {
+        return Vec::new();
+    };
+
+    match AxDataContext::from_v2_let_types(&file) {
+        Ok(_) => Vec::new(),
+        Err(error) => vec![CheckDiagnostic {
+            file: display_path(path),
+            line: typed_let_line(source).unwrap_or(1),
+            column: 1,
+            severity: "error",
+            code: "axonyx-type",
+            message: error.to_string(),
+        }],
+    }
+}
+
+fn typed_let_line(source: &str) -> Option<usize> {
+    source
+        .lines()
+        .enumerate()
+        .find(|(_, line)| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("let ") && trimmed.contains(':')
+        })
+        .map(|(index, _)| index + 1)
 }
 
 fn find_app_root_for_path(path: &Path) -> Option<PathBuf> {
@@ -5534,6 +5565,26 @@ page Home
         assert_eq!(diagnostics[0].code, "axonyx-parse");
         assert!(diagnostics[0].message.contains("reserved"));
         assert!(diagnostics[0].message.contains("Link"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_invalid_type_annotation() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Blog
+
+let posts: List<Post>> = load PostsList
+
+<Copy>Body</Copy>
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 4);
+        assert_eq!(diagnostics[0].code, "axonyx-type");
     }
 
     #[test]
