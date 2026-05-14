@@ -55,6 +55,7 @@ type Post {
   title: String
   slug: String
   excerpt: String
+  summary?: String
 }
 
 let posts: List<Post> = load PostsList
@@ -75,6 +76,15 @@ For intentionally optional data, use safe member access:
 ```
 
 If `summary` is missing at runtime, it lowers to an empty string instead of failing the render.
+If a field is optional in the type itself, regular access is allowed and resolves to `Optional<T>`:
+
+```ax
+type Post {
+  summary?: String
+}
+
+<Copy>{post.summary}</Copy>
+```
 
 For a production-style local run, use:
 

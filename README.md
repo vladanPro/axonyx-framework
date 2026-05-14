@@ -106,6 +106,7 @@ page Blog
 type Post {
   title: String
   slug: String
+  summary?: String
 }
 
 let posts: List<Post> = load PostsList
@@ -117,6 +118,7 @@ let posts: List<Post> = load PostsList
 
 `cargo ax check` reports `axonyx-type` diagnostics when a typed page accesses a missing field such as `post.summary`.
 Use `post?.summary` when a missing field is intentional and should render as an empty string.
+Use `summary?: String` in the type when the field is part of the schema but optional.
 
 ## Common Commands
 
