@@ -1143,13 +1143,27 @@ fn check_type_annotations(
         .into_iter()
         .map(|error| CheckDiagnostic {
             file: display_path(path),
-            line: 1,
+            line: type_error_line(source, error.expression.as_deref())
+                .or_else(|| typed_let_line(source))
+                .unwrap_or(1),
             column: 1,
             severity: "error",
             code: "axonyx-type",
-            message: format!("{}: {}", error.location, error.message),
+            message: match error.expression {
+                Some(expression) => format!("`{expression}`: {}", error.message),
+                None => format!("{}: {}", error.location, error.message),
+            },
         })
         .collect()
+}
+
+fn type_error_line(source: &str, expression: Option<&str>) -> Option<usize> {
+    let expression = expression?;
+    source
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains(expression))
+        .map(|(index, _)| index + 1)
 }
 
 fn typed_let_line(source: &str) -> Option<usize> {
@@ -5633,8 +5647,34 @@ let posts: List<Post> = load PostsList
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert_eq!(diagnostics[0].line, 11);
+        assert!(diagnostics[0].message.contains("post.summary"));
         assert!(diagnostics[0].message.contains("summary"));
         assert!(diagnostics[0].message.contains("unknown field"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_duplicate_type_field() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Blog
+
+type Post {
+  title: String
+  title: String
+}
+
+<Copy>Body</Copy>
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert!(diagnostics[0].message.contains("duplicate field"));
+        assert!(diagnostics[0].message.contains("title"));
     }
 
     #[test]
