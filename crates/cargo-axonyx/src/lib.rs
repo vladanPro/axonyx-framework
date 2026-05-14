@@ -52,6 +52,7 @@ enum Commands {
     Doctor(DoctorArgs),
     Routes(RoutesArgs),
     Run(RunArgs),
+    Schema(SchemaArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -122,15 +123,50 @@ struct RunArgs {
     command: RunCommands,
 }
 
+#[derive(Debug, Parser)]
+struct SchemaArgs {
+    #[command(subcommand)]
+    command: SchemaCommands,
+}
+
 #[derive(Debug, Subcommand)]
 enum RunCommands {
     Dev(DevArgs),
     Start(DevArgs),
 }
 
+#[derive(Debug, Subcommand)]
+enum SchemaCommands {
+    Pull(SchemaPullArgs),
+}
+
+#[derive(Debug, Parser)]
+struct SchemaPullArgs {
+    /// JSON file path, inline JSON, or local http:// endpoint to inspect.
+    source: String,
+
+    /// Root record name for generated .ax output.
+    #[arg(long, default_value = "Item")]
+    name: String,
+
+    /// Output format for the inferred schema.
+    #[arg(long, value_enum, default_value_t = SchemaFormat::Ax)]
+    format: SchemaFormat,
+
+    /// Write output to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CheckFormat {
     Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SchemaFormat {
+    Ax,
     Json,
 }
 
@@ -286,6 +322,25 @@ struct ContentEntryManifest {
     bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct InferredSchema {
+    root_type: String,
+    records: Vec<InferredRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct InferredRecord {
+    name: String,
+    fields: Vec<InferredField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct InferredField {
+    name: String,
+    ty: String,
+    optional: bool,
+}
+
 pub fn main_entry() {
     if let Err(error) = run() {
         print_cli_error(&error);
@@ -305,6 +360,7 @@ fn run() -> Result<()> {
         Commands::Doctor(args) => doctor_command(args),
         Commands::Routes(args) => routes_command(args),
         Commands::Run(args) => run_command(args),
+        Commands::Schema(args) => schema_command(args),
     }
 }
 
@@ -713,6 +769,297 @@ fn content_command(args: ContentArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn schema_command(args: SchemaArgs) -> Result<()> {
+    match args.command {
+        SchemaCommands::Pull(args) => schema_pull_command(args),
+    }
+}
+
+fn schema_pull_command(args: SchemaPullArgs) -> Result<()> {
+    let source = read_schema_source(&args.source)?;
+    let value = serde_json::from_str::<serde_json::Value>(&source)
+        .with_context(|| format!("failed to parse schema source '{}' as JSON", args.source))?;
+    let schema = infer_schema_from_json(&args.name, &value)?;
+
+    let rendered = match args.format {
+        SchemaFormat::Ax => render_schema_as_ax(&schema),
+        SchemaFormat::Json => serde_json::to_string_pretty(&schema)?,
+    };
+
+    if let Some(path) = args.out {
+        fs::write(&path, rendered)
+            .with_context(|| format!("failed to write schema output '{}'", path.display()))?;
+    } else {
+        println!("{rendered}");
+    }
+
+    Ok(())
+}
+
+fn read_schema_source(source: &str) -> Result<String> {
+    if source.starts_with("http://") {
+        return read_http_text(source);
+    }
+
+    let path = Path::new(source);
+    if path.exists() {
+        return fs::read_to_string(path)
+            .with_context(|| format!("failed to read schema source '{}'", path.display()));
+    }
+
+    if source.trim_start().starts_with('{') || source.trim_start().starts_with('[') {
+        return Ok(source.to_string());
+    }
+
+    bail!(
+        "schema source '{}' is not a file, inline JSON, or http:// endpoint",
+        source
+    )
+}
+
+fn read_http_text(url: &str) -> Result<String> {
+    let request = parse_http_url(url)?;
+    let mut stream = TcpStream::connect((request.host.as_str(), request.port))
+        .with_context(|| format!("failed to connect to {}", request.authority))?;
+    let request_text = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        request.path, request.authority
+    );
+    stream
+        .write_all(request_text.as_bytes())
+        .with_context(|| format!("failed to send request to {url}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .with_context(|| format!("failed to read response from {url}"))?;
+
+    let Some((head, body)) = response.split_once("\r\n\r\n") else {
+        bail!("invalid HTTP response from {url}");
+    };
+    let status = head.lines().next().unwrap_or_default();
+    if !status.contains(" 200 ") {
+        bail!("schema endpoint returned non-200 status: {status}");
+    }
+
+    Ok(body.to_string())
+}
+
+struct ParsedHttpUrl {
+    authority: String,
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_http_url(url: &str) -> Result<ParsedHttpUrl> {
+    let Some(rest) = url.strip_prefix("http://") else {
+        bail!("only http:// schema endpoints are supported in this draft")
+    };
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if authority.is_empty() {
+        bail!("schema endpoint host is empty")
+    }
+    let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
+        (
+            host.to_string(),
+            port.parse::<u16>()
+                .with_context(|| format!("invalid schema endpoint port '{port}'"))?,
+        )
+    } else {
+        (authority.to_string(), 80)
+    };
+    if host.is_empty() {
+        bail!("schema endpoint host is empty")
+    }
+
+    Ok(ParsedHttpUrl {
+        authority: authority.to_string(),
+        host,
+        port,
+        path: format!("/{path}"),
+    })
+}
+
+fn infer_schema_from_json(root_name: &str, value: &serde_json::Value) -> Result<InferredSchema> {
+    let mut records = Vec::new();
+    let root_type = infer_value_type(root_name, value, &mut records)?;
+    Ok(InferredSchema { root_type, records })
+}
+
+fn infer_value_type(
+    name_hint: &str,
+    value: &serde_json::Value,
+    records: &mut Vec<InferredRecord>,
+) -> Result<String> {
+    Ok(match value {
+        serde_json::Value::Null => "Unknown".to_string(),
+        serde_json::Value::Bool(_) => "Bool".to_string(),
+        serde_json::Value::Number(_) => "Number".to_string(),
+        serde_json::Value::String(_) => "String".to_string(),
+        serde_json::Value::Array(items) => {
+            let item_name = singular_type_name(name_hint);
+            let item_type = infer_array_item_type(&item_name, items, records)?;
+            format!("List<{item_type}>")
+        }
+        serde_json::Value::Object(map) => {
+            let record_name = sanitize_type_name(name_hint);
+            let objects = vec![map];
+            let record = infer_record(&record_name, &objects, records)?;
+            records.push(record);
+            record_name
+        }
+    })
+}
+
+fn infer_array_item_type(
+    name_hint: &str,
+    items: &[serde_json::Value],
+    records: &mut Vec<InferredRecord>,
+) -> Result<String> {
+    let objects = items
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .collect::<Vec<_>>();
+    if !objects.is_empty() && objects.len() == items.len() {
+        let record_name = sanitize_type_name(name_hint);
+        let record = infer_record(&record_name, &objects, records)?;
+        records.push(record);
+        return Ok(record_name);
+    }
+
+    let mut ty = None;
+    let mut optional = false;
+    for item in items {
+        if item.is_null() {
+            optional = true;
+            continue;
+        }
+        let next = infer_value_type(name_hint, item, records)?;
+        ty = Some(match ty {
+            None => next,
+            Some(current) if current == next => current,
+            Some(_) => "Unknown".to_string(),
+        });
+    }
+
+    let ty = ty.unwrap_or_else(|| "Unknown".to_string());
+    Ok(if optional {
+        format!("Optional<{ty}>")
+    } else {
+        ty
+    })
+}
+
+fn infer_record(
+    record_name: &str,
+    objects: &[&serde_json::Map<String, serde_json::Value>],
+    records: &mut Vec<InferredRecord>,
+) -> Result<InferredRecord> {
+    let mut keys = std::collections::BTreeSet::new();
+    for object in objects {
+        keys.extend(object.keys().cloned());
+    }
+
+    let mut fields = Vec::new();
+    for key in keys {
+        let mut values = Vec::new();
+        let mut optional = false;
+        for object in objects {
+            match object.get(&key) {
+                Some(value) if value.is_null() => optional = true,
+                Some(value) => values.push(value),
+                None => optional = true,
+            }
+        }
+
+        let field_type = infer_field_type(record_name, &key, &values, records)?;
+        fields.push(InferredField {
+            name: key,
+            ty: field_type,
+            optional,
+        });
+    }
+
+    Ok(InferredRecord {
+        name: record_name.to_string(),
+        fields,
+    })
+}
+
+fn infer_field_type(
+    record_name: &str,
+    field_name: &str,
+    values: &[&serde_json::Value],
+    records: &mut Vec<InferredRecord>,
+) -> Result<String> {
+    if values.is_empty() {
+        return Ok("Unknown".to_string());
+    }
+
+    let nested_name = format!("{record_name}{}", sanitize_type_name(field_name));
+    let mut ty = None;
+    for value in values {
+        let next = infer_value_type(&nested_name, value, records)?;
+        ty = Some(match ty {
+            None => next,
+            Some(current) if current == next => current,
+            Some(_) => "Unknown".to_string(),
+        });
+    }
+    Ok(ty.unwrap_or_else(|| "Unknown".to_string()))
+}
+
+fn render_schema_as_ax(schema: &InferredSchema) -> String {
+    let mut out = String::new();
+    for record in &schema.records {
+        out.push_str(&format!("type {} {{\n", record.name));
+        for field in &record.fields {
+            if field.optional {
+                out.push_str(&format!("  {}?: {}\n", field.name, field.ty));
+            } else {
+                out.push_str(&format!("  {}: {}\n", field.name, field.ty));
+            }
+        }
+        out.push_str("}\n\n");
+    }
+    out.push_str(&format!("// root: {}\n", schema.root_type));
+    out.trim_end().to_string()
+}
+
+fn sanitize_type_name(input: &str) -> String {
+    let mut out = String::new();
+    let mut capitalize_next = true;
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if capitalize_next {
+                out.push(ch.to_ascii_uppercase());
+                capitalize_next = false;
+            } else {
+                out.push(ch);
+            }
+        } else {
+            capitalize_next = true;
+        }
+    }
+    if out.is_empty() {
+        "Item".to_string()
+    } else if out
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_digit())
+    {
+        format!("T{out}")
+    } else {
+        out
+    }
+}
+
+fn singular_type_name(input: &str) -> String {
+    let name = sanitize_type_name(input);
+    name.strip_suffix('s').unwrap_or(&name).to_string()
 }
 
 fn print_content_text(manifest: &ContentManifest) {
@@ -6191,5 +6538,56 @@ path = "../outside"
         assert!(error.to_string().contains("must stay inside app root"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn schema_inference_generates_ax_type_from_json_list() {
+        let value = serde_json::json!([
+            {
+                "title": "Hello",
+                "slug": "hello",
+                "summary": null
+            },
+            {
+                "title": "Second",
+                "slug": "second"
+            }
+        ]);
+
+        let schema = infer_schema_from_json("Post", &value).expect("schema should infer");
+        let ax = render_schema_as_ax(&schema);
+
+        assert!(ax.contains("type Post {"));
+        assert!(ax.contains("  title: String"));
+        assert!(ax.contains("  slug: String"));
+        assert!(ax.contains("  summary?: Unknown"));
+        assert!(ax.contains("// root: List<Post>"));
+    }
+
+    #[test]
+    fn schema_inference_marks_missing_list_fields_optional() {
+        let value = serde_json::json!([
+            {
+                "title": "Hello",
+                "views": 3
+            },
+            {
+                "title": "Second",
+                "summary": "Short"
+            }
+        ]);
+
+        let schema = infer_schema_from_json("Post", &value).expect("schema should infer");
+        let ax = render_schema_as_ax(&schema);
+
+        assert!(ax.contains("  summary?: String"));
+        assert!(ax.contains("  views?: Number"));
+    }
+
+    #[test]
+    fn schema_pull_can_read_inline_json() {
+        let source = read_schema_source(r#"[{"title":"Hello"}]"#).expect("inline JSON works");
+
+        assert_eq!(source, r#"[{"title":"Hello"}]"#);
     }
 }

@@ -127,6 +127,7 @@ From an app root:
 ```bash
 cargo ax doctor
 cargo ax check
+cargo ax schema pull ./sample-posts.json --name Post
 cargo ax content
 cargo ax build
 cargo ax run dev

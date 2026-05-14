@@ -25,6 +25,7 @@ If `cargo-axonyx` is installed, the first framework-shaped local loop is:
 ```bash
 cargo ax check
 cargo ax doctor
+cargo ax schema pull ./sample-posts.json --name Post
 cargo ax content
 cargo ax build
 cargo ax run dev
@@ -43,6 +44,24 @@ cargo ax run dev
 
 `cargo ax content` indexes configured content collections, which is the first filesystem/content layer for future docs, blog, and CMS flows.
 `cargo ax build` writes that manifest to `dist/_ax/content/manifest.json` when collections are configured.
+
+`cargo ax schema pull` is the first "fast Swagger" command. It can inspect JSON from a file, inline JSON, or a local `http://` endpoint and print a draft `.ax type`:
+
+```bash
+cargo ax schema pull ./sample-posts.json --name Post
+```
+
+Example output:
+
+```ax
+type Post {
+  slug: String
+  summary?: String
+  title: String
+}
+
+// root: List<Post>
+```
 
 ## Typed Data And Each
 
