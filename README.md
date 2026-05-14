@@ -269,6 +269,9 @@ loader DocsList
   return docs
 ```
 
+Markdown entries expose `path`, `slug`, `extension`, `bytes`, `body`, and simple
+frontmatter fields such as `title` or `description`.
+
 ## Adding Modules
 
 Add a docs module into an existing app:

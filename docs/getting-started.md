@@ -53,6 +53,9 @@ loader DocsList
   return docs
 ```
 
+Each markdown entry exposes manifest fields plus content fields: `path`, `slug`,
+`extension`, `bytes`, `body`, and simple frontmatter keys such as `title`.
+
 `cargo ax schema pull` is the first "fast Swagger" command. It can inspect JSON from a file, inline JSON, or a local `http://` endpoint and print a draft `.ax type`:
 
 ```bash

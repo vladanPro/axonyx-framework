@@ -321,6 +321,8 @@ struct ContentEntryManifest {
     slug: String,
     extension: String,
     bytes: u64,
+    frontmatter: std::collections::BTreeMap<String, String>,
+    body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1199,19 +1201,25 @@ fn preview_store_from_content(root: &Path) -> Result<AxPreviewStore> {
         let items = collection
             .entries
             .into_iter()
-            .map(|entry| {
-                AxValue::record([
-                    ("path", AxValue::from(entry.path)),
-                    ("slug", AxValue::from(entry.slug)),
-                    ("extension", AxValue::from(entry.extension)),
-                    ("bytes", AxValue::from(entry.bytes as i64)),
-                ])
-            })
+            .map(content_entry_to_record)
             .collect();
         store = store.with_collection(collection.name, items);
     }
 
     Ok(store)
+}
+
+fn content_entry_to_record(entry: ContentEntryManifest) -> AxValue {
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("path".to_string(), AxValue::from(entry.path));
+    fields.insert("slug".to_string(), AxValue::from(entry.slug));
+    fields.insert("extension".to_string(), AxValue::from(entry.extension));
+    fields.insert("bytes".to_string(), AxValue::from(entry.bytes as i64));
+    fields.insert("body".to_string(), AxValue::from(entry.body));
+    for (key, value) in entry.frontmatter {
+        fields.insert(key, AxValue::from(value));
+    }
+    AxValue::Record(fields)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1390,15 +1398,83 @@ fn collect_content_entries_in_dir(
 
         let metadata = fs::metadata(&path)
             .with_context(|| format!("failed to inspect content file '{}'", path.display()))?;
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read content file '{}'", path.display()))?;
+        let (frontmatter, body) = parse_content_frontmatter(&source);
         out.push(ContentEntryManifest {
             path: display_relative_path(root, &path),
             slug: content_slug(&config.path, &path),
             extension,
             bytes: metadata.len(),
+            frontmatter,
+            body,
         });
     }
 
     Ok(())
+}
+
+fn parse_content_frontmatter(source: &str) -> (std::collections::BTreeMap<String, String>, String) {
+    let Some(rest) = source
+        .strip_prefix("---\n")
+        .or_else(|| source.strip_prefix("---\r\n"))
+    else {
+        return (std::collections::BTreeMap::new(), source.to_string());
+    };
+
+    let Some((frontmatter_source, body)) = split_frontmatter_body(rest) else {
+        return (std::collections::BTreeMap::new(), source.to_string());
+    };
+
+    let mut frontmatter = std::collections::BTreeMap::new();
+    for line in frontmatter_source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() || !is_content_frontmatter_key(key) {
+            continue;
+        }
+        frontmatter.insert(key.to_string(), trim_frontmatter_value(value));
+    }
+
+    (frontmatter, body.to_string())
+}
+
+fn split_frontmatter_body(source: &str) -> Option<(&str, &str)> {
+    if let Some((frontmatter, body)) = source.split_once("\n---\n") {
+        return Some((frontmatter, body));
+    }
+    if let Some((frontmatter, body)) = source.split_once("\r\n---\r\n") {
+        return Some((frontmatter, body));
+    }
+    if let Some((frontmatter, body)) = source.split_once("\n---\r\n") {
+        return Some((frontmatter, body));
+    }
+    source
+        .split_once("\r\n---\n")
+        .map(|(frontmatter, body)| (frontmatter, body))
+}
+
+fn is_content_frontmatter_key(key: &str) -> bool {
+    key.chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn trim_frontmatter_value(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len().saturating_sub(1)].to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn content_slug(collection_root: &Path, path: &Path) -> String {
@@ -6561,7 +6637,11 @@ extensions = ["md", "mdx"]
 "#,
         )
         .expect("config should write");
-        fs::write(root.join("content/docs/intro.md"), "# Intro\n").expect("intro should write");
+        fs::write(
+            root.join("content/docs/intro.md"),
+            "---\ntitle: Intro\ndescription: Start here\n---\n# Intro\n",
+        )
+        .expect("intro should write");
         fs::write(root.join("content/docs/nested/setup.mdx"), "# Setup\n")
             .expect("setup should write");
         fs::write(root.join("content/docs/ignored.txt"), "skip").expect("ignored should write");
@@ -6576,6 +6656,11 @@ extensions = ["md", "mdx"]
         assert_eq!(collection.entries.len(), 2);
         assert_eq!(collection.entries[0].path, "content/docs/intro.md");
         assert_eq!(collection.entries[0].slug, "intro");
+        assert_eq!(
+            collection.entries[0].frontmatter.get("title"),
+            Some(&"Intro".to_string())
+        );
+        assert_eq!(collection.entries[0].body, "# Intro\n");
         assert_eq!(collection.entries[1].path, "content/docs/nested/setup.mdx");
         assert_eq!(collection.entries[1].slug, "nested/setup");
 
@@ -6594,8 +6679,11 @@ path = "content/docs"
 "#,
         )
         .expect("config should write");
-        fs::write(root.join("content/docs/getting-started.md"), "# Start\n")
-            .expect("doc should write");
+        fs::write(
+            root.join("content/docs/getting-started.md"),
+            "---\ntitle: Getting Started\ndescription: Build your first page\n---\n# Start\n",
+        )
+        .expect("doc should write");
 
         let store = preview_store_from_content(&root).expect("preview store should load content");
         let items = store.collection_items("docs");
@@ -6606,6 +6694,12 @@ path = "content/docs"
         };
         assert_eq!(fields.get("slug"), Some(&AxValue::from("getting-started")));
         assert_eq!(fields.get("extension"), Some(&AxValue::from("md")));
+        assert_eq!(fields.get("title"), Some(&AxValue::from("Getting Started")));
+        assert_eq!(
+            fields.get("description"),
+            Some(&AxValue::from("Build your first page"))
+        );
+        assert_eq!(fields.get("body"), Some(&AxValue::from("# Start\n")));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
