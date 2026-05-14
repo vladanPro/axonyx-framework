@@ -260,6 +260,15 @@ During `cargo ax build`, configured collections are written to:
 dist/_ax/content/manifest.json
 ```
 
+Route loaders can read configured content collections in preview/build:
+
+```ax
+loader DocsList
+  data docs = Content.Collection("docs")
+    order slug asc
+  return docs
+```
+
 ## Adding Modules
 
 Add a docs module into an existing app:

@@ -44,6 +44,14 @@ cargo ax run dev
 
 `cargo ax content` indexes configured content collections, which is the first filesystem/content layer for future docs, blog, and CMS flows.
 `cargo ax build` writes that manifest to `dist/_ax/content/manifest.json` when collections are configured.
+Route loaders can now read configured content collections:
+
+```ax
+loader DocsList
+  data docs = Content.Collection("docs")
+    order slug asc
+  return docs
+```
 
 `cargo ax schema pull` is the first "fast Swagger" command. It can inspect JSON from a file, inline JSON, or a local `http://` endpoint and print a draft `.ax type`:
 

@@ -13,6 +13,7 @@ use axonyx_core::ax_ast_prelude::AxImport;
 use axonyx_core::ax_backend_ast_prelude::AxBackendBlock;
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
+use axonyx_core::ax_lowering_prelude::AxValue;
 use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
 use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
@@ -1190,6 +1191,29 @@ fn collect_content_manifest(root: &Path) -> Result<ContentManifest> {
     Ok(ContentManifest { collections })
 }
 
+fn preview_store_from_content(root: &Path) -> Result<AxPreviewStore> {
+    let manifest = collect_content_manifest(root)?;
+    let mut store = AxPreviewStore::default();
+
+    for collection in manifest.collections {
+        let items = collection
+            .entries
+            .into_iter()
+            .map(|entry| {
+                AxValue::record([
+                    ("path", AxValue::from(entry.path)),
+                    ("slug", AxValue::from(entry.slug)),
+                    ("extension", AxValue::from(entry.extension)),
+                    ("bytes", AxValue::from(entry.bytes as i64)),
+                ])
+            })
+            .collect();
+        store = store.with_collection(collection.name, items);
+    }
+
+    Ok(store)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ContentCollectionConfig {
     name: String,
@@ -2125,9 +2149,10 @@ fn run_http_server(args: DevArgs, mode: ServerMode) -> Result<()> {
     let bind = format!("{}:{}", args.host, args.port);
     let listener = TcpListener::bind(&bind)
         .with_context(|| format!("failed to bind Axonyx server at {bind}"))?;
+    let preview_store = preview_store_from_content(&root)?;
     let shared_state = Arc::new(DevServerState {
         root,
-        preview_store: Mutex::new(AxPreviewStore::default()),
+        preview_store: Mutex::new(preview_store),
     });
 
     print_backend_build_status(&backend_status);
@@ -2252,7 +2277,7 @@ fn build_static_site_from_app_root(
 
     let state = DevServerState {
         root: root.to_path_buf(),
-        preview_store: Mutex::new(AxPreviewStore::default()),
+        preview_store: Mutex::new(preview_store_from_content(root)?),
     };
 
     for route in &static_routes {
@@ -6553,6 +6578,34 @@ extensions = ["md", "mdx"]
         assert_eq!(collection.entries[0].slug, "intro");
         assert_eq!(collection.entries[1].path, "content/docs/nested/setup.mdx");
         assert_eq!(collection.entries[1].slug, "nested/setup");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn preview_store_loads_configured_content_collections() {
+        let root = make_temp_dir("content-preview-store");
+        fs::create_dir_all(root.join("content/docs")).expect("content dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[content.collections.docs]
+path = "content/docs"
+"#,
+        )
+        .expect("config should write");
+        fs::write(root.join("content/docs/getting-started.md"), "# Start\n")
+            .expect("doc should write");
+
+        let store = preview_store_from_content(&root).expect("preview store should load content");
+        let items = store.collection_items("docs");
+
+        assert_eq!(items.len(), 1);
+        let AxValue::Record(fields) = &items[0] else {
+            panic!("expected content item record");
+        };
+        assert_eq!(fields.get("slug"), Some(&AxValue::from("getting-started")));
+        assert_eq!(fields.get("extension"), Some(&AxValue::from("md")));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
