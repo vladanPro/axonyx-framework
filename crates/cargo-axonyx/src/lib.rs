@@ -781,7 +781,11 @@ fn schema_pull_command(args: SchemaPullArgs) -> Result<()> {
     let source = read_schema_source(&args.source)?;
     let value = serde_json::from_str::<serde_json::Value>(&source)
         .with_context(|| format!("failed to parse schema source '{}' as JSON", args.source))?;
-    let schema = infer_schema_from_json(&args.name, &value)?;
+    let schema = match schema_from_typed_envelope(&args.name, &value)? {
+        Some(schema) => schema,
+        None => infer_schema_from_json(&args.name, &value)
+            .with_context(|| "failed to infer schema from JSON source")?,
+    };
 
     let rendered = match args.format {
         SchemaFormat::Ax => render_schema_as_ax(&schema),
@@ -887,6 +891,87 @@ fn infer_schema_from_json(root_name: &str, value: &serde_json::Value) -> Result<
     let mut records = Vec::new();
     let root_type = infer_value_type(root_name, value, &mut records)?;
     Ok(InferredSchema { root_type, records })
+}
+
+fn schema_from_typed_envelope(
+    root_name: &str,
+    value: &serde_json::Value,
+) -> Result<Option<InferredSchema>> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let Some(schema_value) = object.get("schema") else {
+        return Ok(None);
+    };
+    let schema_object = schema_value
+        .as_object()
+        .with_context(|| "typed schema envelope field 'schema' must be an object")?;
+
+    let mut records = Vec::new();
+    for (record_name, fields_value) in schema_object {
+        let fields_object = fields_value.as_object().with_context(|| {
+            format!("typed schema record '{record_name}' must be an object of fields")
+        })?;
+        let mut fields = Vec::new();
+        for (field_name, field_value) in fields_object {
+            let (ty, optional) = parse_schema_field_type(field_name, field_value)?;
+            fields.push(InferredField {
+                name: field_name.to_string(),
+                ty,
+                optional,
+            });
+        }
+        records.push(InferredRecord {
+            name: sanitize_type_name(record_name),
+            fields,
+        });
+    }
+
+    let root_type = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            object
+                .get("data")
+                .and_then(|data| infer_schema_from_json(root_name, data).ok())
+                .map(|schema| schema.root_type)
+        })
+        .unwrap_or_else(|| sanitize_type_name(root_name));
+
+    Ok(Some(InferredSchema { root_type, records }))
+}
+
+fn parse_schema_field_type(field_name: &str, value: &serde_json::Value) -> Result<(String, bool)> {
+    if let Some(ty) = value.as_str() {
+        return Ok(normalize_schema_type(ty));
+    }
+
+    let Some(object) = value.as_object() else {
+        bail!("typed schema field '{field_name}' must be a type string or object")
+    };
+    let ty = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("typed schema field '{field_name}' is missing string 'type'"))?;
+    let (ty, wrapped_optional) = normalize_schema_type(ty);
+    let optional = object
+        .get("optional")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(wrapped_optional);
+    Ok((ty, optional))
+}
+
+fn normalize_schema_type(ty: &str) -> (String, bool) {
+    let trimmed = ty.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("Optional<")
+        .and_then(|value| value.strip_suffix('>'))
+    {
+        (inner.trim().to_string(), true)
+    } else {
+        (trimmed.to_string(), false)
+    }
 }
 
 fn infer_value_type(
@@ -6582,6 +6667,60 @@ path = "../outside"
 
         assert!(ax.contains("  summary?: String"));
         assert!(ax.contains("  views?: Number"));
+    }
+
+    #[test]
+    fn schema_pull_prefers_typed_envelope_schema() {
+        let value = serde_json::json!({
+            "type": "List<Post>",
+            "schemaHash": "sha256:test",
+            "schema": {
+                "Post": {
+                    "title": "String",
+                    "slug": "String",
+                    "summary": "Optional<String>"
+                }
+            },
+            "data": [
+                {
+                    "title": "Hello",
+                    "slug": "hello",
+                    "summary": null
+                }
+            ]
+        });
+
+        let schema = schema_from_typed_envelope("Post", &value)
+            .expect("schema envelope should parse")
+            .expect("schema envelope should be detected");
+        let ax = render_schema_as_ax(&schema);
+
+        assert!(ax.contains("type Post {"));
+        assert!(ax.contains("  title: String"));
+        assert!(ax.contains("  slug: String"));
+        assert!(ax.contains("  summary?: String"));
+        assert!(ax.contains("// root: List<Post>"));
+    }
+
+    #[test]
+    fn schema_pull_accepts_object_field_descriptors() {
+        let value = serde_json::json!({
+            "schema": {
+                "Post": {
+                    "title": { "type": "String" },
+                    "summary": { "type": "String", "optional": true }
+                }
+            }
+        });
+
+        let schema = schema_from_typed_envelope("Post", &value)
+            .expect("schema envelope should parse")
+            .expect("schema envelope should be detected");
+        let ax = render_schema_as_ax(&schema);
+
+        assert!(ax.contains("  title: String"));
+        assert!(ax.contains("  summary?: String"));
+        assert!(ax.contains("// root: Post"));
     }
 
     #[test]

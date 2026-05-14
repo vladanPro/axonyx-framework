@@ -51,6 +51,25 @@ cargo ax run dev
 cargo ax schema pull ./sample-posts.json --name Post
 ```
 
+For real loaders and API endpoints, prefer a typed envelope. That lets the backend
+send the exact DTO contract, while `data` can still contain `null` or missing
+optional values:
+
+```json
+{
+  "type": "List<Post>",
+  "schemaHash": "sha256:abc123",
+  "schema": {
+    "Post": {
+      "slug": "String",
+      "summary": "Optional<String>",
+      "title": "String"
+    }
+  },
+  "data": []
+}
+```
+
 Example output:
 
 ```ax

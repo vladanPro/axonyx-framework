@@ -133,6 +133,23 @@ cargo ax build
 cargo ax run dev
 ```
 
+`cargo ax schema pull` accepts sample JSON as a draft, but it can also read a typed
+envelope from an endpoint or file. When the source includes `schema`, Axonyx uses
+that contract instead of guessing from `null` values:
+
+```json
+{
+  "type": "List<Post>",
+  "schema": {
+    "Post": {
+      "title": "String",
+      "summary": "Optional<String>"
+    }
+  },
+  "data": []
+}
+```
+
 Use strict doctor mode in CI:
 
 ```bash
