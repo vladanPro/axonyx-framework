@@ -327,6 +327,7 @@ struct ContentEntryManifest {
     word_count: usize,
     frontmatter: std::collections::BTreeMap<String, String>,
     body: String,
+    html: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1233,6 +1234,7 @@ fn content_entry_to_record(entry: ContentEntryManifest) -> AxValue {
         AxValue::from(entry.word_count as i64),
     );
     fields.insert("body".to_string(), AxValue::from(entry.body));
+    fields.insert("html".to_string(), AxValue::from(entry.html));
     for (key, value) in entry.frontmatter {
         fields.insert(key, AxValue::from(value));
     }
@@ -1420,6 +1422,7 @@ fn collect_content_entries_in_dir(
         let (frontmatter, body) = parse_content_frontmatter(&source);
         let title = content_title(&frontmatter, &body, &path);
         let excerpt = content_excerpt(&frontmatter, &body);
+        let html = render_content_html(&body, &extension);
         out.push(ContentEntryManifest {
             path: display_relative_path(root, &path),
             slug: content_slug(&config.path, &path),
@@ -1431,6 +1434,7 @@ fn collect_content_entries_in_dir(
             word_count: content_word_count(&body),
             frontmatter,
             body,
+            html,
         });
     }
 
@@ -1507,6 +1511,190 @@ fn content_type_for_extension(extension: &str) -> &'static str {
         "json" => "json",
         _ => "text",
     }
+}
+
+fn render_content_html(body: &str, extension: &str) -> String {
+    match extension {
+        "md" | "mdx" => render_markdown_html(body),
+        "html" | "htm" => body.to_string(),
+        _ => format!("<pre><code>{}</code></pre>", html_escape(body)),
+    }
+}
+
+fn render_markdown_html(source: &str) -> String {
+    let mut html = String::new();
+    let mut paragraph = Vec::<String>::new();
+    let mut list_open = false;
+    let mut code_open = false;
+    let mut code = String::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("```") {
+            if code_open {
+                html.push_str("<pre><code>");
+                html.push_str(&html_escape(code.trim_end_matches('\n')));
+                html.push_str("</code></pre>");
+                code.clear();
+                code_open = false;
+            } else {
+                flush_markdown_paragraph(&mut html, &mut paragraph);
+                if list_open {
+                    html.push_str("</ul>");
+                    list_open = false;
+                }
+                code_open = true;
+            }
+            continue;
+        }
+
+        if code_open {
+            code.push_str(line);
+            code.push('\n');
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            flush_markdown_paragraph(&mut html, &mut paragraph);
+            if list_open {
+                html.push_str("</ul>");
+                list_open = false;
+            }
+            continue;
+        }
+
+        if let Some((level, text)) = markdown_heading(trimmed) {
+            flush_markdown_paragraph(&mut html, &mut paragraph);
+            if list_open {
+                html.push_str("</ul>");
+                list_open = false;
+            }
+            html.push_str(&format!(
+                "<h{level}>{}</h{level}>",
+                render_markdown_inline(text.trim())
+            ));
+            continue;
+        }
+
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            flush_markdown_paragraph(&mut html, &mut paragraph);
+            if !list_open {
+                html.push_str("<ul>");
+                list_open = true;
+            }
+            html.push_str("<li>");
+            html.push_str(&render_markdown_inline(item.trim()));
+            html.push_str("</li>");
+            continue;
+        }
+
+        paragraph.push(trimmed.to_string());
+    }
+
+    if code_open {
+        html.push_str("<pre><code>");
+        html.push_str(&html_escape(code.trim_end_matches('\n')));
+        html.push_str("</code></pre>");
+    }
+    flush_markdown_paragraph(&mut html, &mut paragraph);
+    if list_open {
+        html.push_str("</ul>");
+    }
+
+    html
+}
+
+fn flush_markdown_paragraph(html: &mut String, paragraph: &mut Vec<String>) {
+    if paragraph.is_empty() {
+        return;
+    }
+    let text = paragraph.join(" ");
+    html.push_str("<p>");
+    html.push_str(&render_markdown_inline(&text));
+    html.push_str("</p>");
+    paragraph.clear();
+}
+
+fn markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = line.get(hashes..)?;
+    rest.strip_prefix(' ').map(|text| (hashes, text))
+}
+
+fn render_markdown_inline(value: &str) -> String {
+    let escaped = html_escape(value);
+    let with_code = replace_inline_markers(&escaped, "`", "code");
+    let with_strong = replace_inline_markers(&with_code, "**", "strong");
+    render_markdown_links(&with_strong)
+}
+
+fn replace_inline_markers(value: &str, marker: &str, tag: &str) -> String {
+    let mut out = String::new();
+    let mut rest = value;
+    let mut open = false;
+    while let Some(index) = rest.find(marker) {
+        out.push_str(&rest[..index]);
+        if open {
+            out.push_str("</");
+            out.push_str(tag);
+            out.push('>');
+        } else {
+            out.push('<');
+            out.push_str(tag);
+            out.push('>');
+        }
+        open = !open;
+        rest = &rest[index + marker.len()..];
+    }
+    out.push_str(rest);
+    if open {
+        out.push_str(marker);
+    }
+    out
+}
+
+fn render_markdown_links(value: &str) -> String {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('[') {
+        let before = &rest[..start];
+        let candidate = &rest[start + 1..];
+        let Some(label_end) = candidate.find("](") else {
+            break;
+        };
+        let after_label = &candidate[label_end + 2..];
+        let Some(url_end) = after_label.find(')') else {
+            break;
+        };
+        let label = &candidate[..label_end];
+        let url = &after_label[..url_end];
+        if !is_safe_markdown_url(url) {
+            break;
+        }
+        out.push_str(before);
+        out.push_str("<a href=\"");
+        out.push_str(&html_escape(url));
+        out.push_str("\">");
+        out.push_str(label);
+        out.push_str("</a>");
+        rest = &after_label[url_end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn is_safe_markdown_url(url: &str) -> bool {
+    url.starts_with('/')
+        || url.starts_with('#')
+        || url.starts_with("https://")
+        || url.starts_with("http://")
 }
 
 fn content_title(
@@ -6790,6 +6978,7 @@ extensions = ["md", "mdx"]
         assert_eq!(collection.entries[0].title, "Intro");
         assert_eq!(collection.entries[0].excerpt, "Start here");
         assert_eq!(collection.entries[0].word_count, 1);
+        assert_eq!(collection.entries[0].html, "<h1>Intro</h1>");
         assert_eq!(
             collection.entries[0].frontmatter.get("title"),
             Some(&"Intro".to_string())
@@ -6842,6 +7031,7 @@ path = "content/docs"
             Some(&AxValue::from("Build your first page"))
         );
         assert_eq!(fields.get("body"), Some(&AxValue::from("# Start\n")));
+        assert_eq!(fields.get("html"), Some(&AxValue::from("<h1>Start</h1>")));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
