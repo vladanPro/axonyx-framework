@@ -39,7 +39,7 @@ cargo ax run dev
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.1.5"
+axonyx-runtime = "0.1.6"
 axonyx-ui = "0.0.33"
 ```
 
