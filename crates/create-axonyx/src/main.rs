@@ -18,7 +18,7 @@ const DEFAULT_UI_VERSION: &str = "0.0.33";
 #[command(name = "create-axonyx")]
 #[command(about = "Create a new Axonyx app", version)]
 struct Cli {
-    /// Name of the app directory to create
+    /// Name or path of the app directory to create
     project_name: String,
 
     /// Skip prompts and accept defaults
@@ -77,11 +77,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    validate_project_name(&cli.project_name)?;
-
-    let target_dir = std::env::current_dir()
-        .context("unable to resolve current directory")?
-        .join(&cli.project_name);
+    let target_dir = resolve_target_dir(&cli.project_name)?;
+    let project_name = project_name_from_target(&target_dir)?;
+    validate_project_name(&project_name)?;
 
     if target_dir.exists() && !cli.force {
         bail!(
@@ -110,7 +108,7 @@ fn run() -> Result<()> {
         }
     }
 
-    create_app(&target_dir, &cli)?;
+    create_app(&target_dir, &project_name, &cli)?;
 
     if cli.git {
         init_git(&target_dir)?;
@@ -119,13 +117,36 @@ fn run() -> Result<()> {
     println!();
     println!("Success! Axonyx app created at {}", target_dir.display());
     println!("Next steps:");
-    println!("  cd {}", cli.project_name);
+    println!("  cd {}", target_dir.display());
     println!("  cargo ax check");
     println!("  cargo ax doctor");
     println!("  cargo ax build --clean");
     println!("  cargo ax run dev");
     println!("Template: {:?}", cli.template);
     Ok(())
+}
+
+fn resolve_target_dir(input: &str) -> Result<PathBuf> {
+    if input.trim().is_empty() {
+        bail!("project path cannot be empty");
+    }
+
+    let path = PathBuf::from(input);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()
+            .context("unable to resolve current directory")?
+            .join(path))
+    }
+}
+
+fn project_name_from_target(target_dir: &Path) -> Result<String> {
+    let Some(name) = target_dir.file_name().and_then(|name| name.to_str()) else {
+        bail!("project path must end with a folder name");
+    };
+
+    Ok(name.to_string())
 }
 
 fn validate_project_name(name: &str) -> Result<()> {
@@ -173,7 +194,7 @@ fn hint_for_create_error(error: &anyhow::Error) -> Option<&'static str> {
         .join("\n");
 
     if combined.contains("project name") {
-        return Some("Use a simple folder name such as `my-site`, `docs`, or `hello-axonyx`.");
+        return Some("Use a path ending in a simple folder name such as `my-site`, `docs`, or `hello-axonyx`.");
     }
 
     if combined.contains("target directory") && combined.contains("already exists") {
@@ -197,7 +218,7 @@ fn hint_for_create_error(error: &anyhow::Error) -> Option<&'static str> {
     None
 }
 
-fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
+fn create_app(target_dir: &PathBuf, project_name: &str, cli: &Cli) -> Result<()> {
     let runtime_dependency = runtime_dependency_spec(cli)?;
     let runtime_source_note = runtime_source_note(cli);
     let template = match cli.template {
@@ -215,7 +236,7 @@ fn create_app(target_dir: &PathBuf, cli: &Cli) -> Result<()> {
 
     for file in template::template_files(
         template,
-        &cli.project_name,
+        project_name,
         &runtime_dependency,
         &runtime_source_note,
     ) {
@@ -547,6 +568,23 @@ mod tests {
     }
 
     #[test]
+    fn target_path_uses_last_component_as_project_name() {
+        let workspace = make_temp_dir("target-path");
+        let target_dir = workspace.join("nested").join("demo-site");
+
+        assert_eq!(
+            project_name_from_target(&target_dir).expect("project name should resolve"),
+            "demo-site"
+        );
+        validate_project_name(
+            &project_name_from_target(&target_dir).expect("project name should resolve"),
+        )
+        .expect("last path component should validate");
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn create_error_hint_detects_missing_local_runtime() {
         let error = anyhow::anyhow!("could not find axonyx-runtime workspace");
 
@@ -573,7 +611,7 @@ mod tests {
             runtime_version: DEFAULT_RUNTIME_VERSION.to_string(),
         };
 
-        create_app(&target_dir, &cli).expect("site template should scaffold");
+        create_app(&target_dir, "demo-site", &cli).expect("site template should scaffold");
 
         assert!(!target_dir.join("vendor/axonyx-ui").exists());
         assert!(!target_dir.join("public/css/axonyx-ui").exists());
