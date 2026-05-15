@@ -17,6 +17,7 @@ Axonyx can already scaffold apps, render `.ax` pages, build static output, serve
 - route-aware dev/start server through `cargo ax run dev` and `cargo ax run start`
 - strict project diagnostics through `cargo ax doctor --deny-warnings`
 - early typed data checks for `type Post`, `List<Post>`, and `<Each>` field access
+- first state bridge contracts through stable `SignalId`, `data-ax-signal`, and typed patch events
 - reusable Foundry UI imports through `@axonyx/ui/...`
 - generated apps consuming published crates from crates.io
 
@@ -119,6 +120,26 @@ let posts: List<Post> = load PostsList
 `cargo ax check` reports `axonyx-type` diagnostics when a typed page accesses a missing field such as `post.summary`.
 Use `post?.summary` when a missing field is intentional and should render as an empty string.
 Use `summary?: String` in the type when the field is part of the schema but optional.
+
+Early UI state authoring is also available in JSX-like `.ax`:
+
+```ax
+page Settings
+
+state theme = "silver"
+state count: Number = 0
+
+<select bind:value={theme}>
+  <option value="silver">Silver</option>
+  <option value="bronze">Bronze</option>
+  <option value="gold">Gold</option>
+</select>
+
+<span bind:text={theme}>{theme}</span>
+<input bind:value={count} />
+```
+
+Axonyx lowers this into stable `data-ax-signal` / `data-ax-bind` metadata and injects the small state bridge only when a page uses signal bindings.
 
 ## Common Commands
 

@@ -201,6 +201,77 @@ The current implementation in `axonyx-core` is intentionally a draft:
 
 That is enough to stabilize API shape before we build the real scheduler and dependency graph.
 
+## State bridge v0
+
+Axonyx now has a first browser-facing state bridge contract.
+
+The important design choice is that browser code receives a stable `SignalId`, not a raw Rust server pointer:
+
+```text
+signal<T>
+-> AxSignalId
+-> data-ax-signal
+-> minimal client bridge
+-> AxStatePatch
+```
+
+Rust helpers:
+
+```rust
+use axonyx_core::prelude::*;
+use axonyx_core::state_prelude::*;
+
+let binding = AxStateBinding::value(AxSignalId::root("theme", 1));
+let attrs = state_binding_attrs(&binding);
+```
+
+The rendered HTML contract is intentionally small:
+
+```html
+<input data-ax-signal="root:theme:1" data-ax-bind="value" value="silver">
+<span data-ax-signal="root:theme:1" data-ax-bind="text">silver</span>
+```
+
+The JSX-like `.ax` authoring shape can now produce that metadata:
+
+```ax
+page Settings
+
+state theme = "silver"
+state count: Number = 0
+
+<select bind:value={theme}>
+  <option value="silver">Silver</option>
+  <option value="bronze">Bronze</option>
+  <option value="gold">Gold</option>
+</select>
+
+<span bind:text={theme}>{theme}</span>
+<input bind:value={count} />
+```
+
+When a page contains `data-ax-signal`, `axonyx-runtime` injects a tiny state bridge script.
+The bridge syncs nodes that share the same signal and emits `axonyx:state-patch` events.
+
+Supported v0 binding targets:
+
+- `value`
+- `checked`
+- `text`
+
+State types can be inferred from literals or written explicitly:
+
+```ax
+state theme = "silver"      // String
+state open = false          // Bool
+state count = 0             // Number
+state tab: String = "docs"  // explicit
+```
+
+The bridge emits `data-ax-state-type` so browser values can be cast back toward the declared state type.
+
+The next step is for The Melt to own a real signal graph, initial snapshot, and patch transport beyond local DOM sync.
+
 ## Layout draft
 
 Axonyx now has a first layout layer through ordinary components:

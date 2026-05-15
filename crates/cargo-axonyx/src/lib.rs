@@ -2326,6 +2326,7 @@ fn line_from_ax_parse_v2_error(error: &AxParseV2Error) -> Option<usize> {
         | AxParseV2Error::InvalidPage { line }
         | AxParseV2Error::InvalidType { line }
         | AxParseV2Error::InvalidLet { line }
+        | AxParseV2Error::InvalidState { line }
         | AxParseV2Error::InvalidFunction { line }
         | AxParseV2Error::InvalidComponent { line }
         | AxParseV2Error::DuplicatePage { line }
@@ -2353,7 +2354,10 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::HeadValueAttrsNotSupported { .. }
         | AxConvertV2Error::HeadValueRequiresSingleChild { .. }
         | AxConvertV2Error::HeadValueInvalidChild { .. }
-        | AxConvertV2Error::HeadTagChildrenNotSupported { .. } => Some(1),
+        | AxConvertV2Error::HeadTagChildrenNotSupported { .. }
+        | AxConvertV2Error::InvalidStateInitializer { .. }
+        | AxConvertV2Error::UnknownStateBinding { .. }
+        | AxConvertV2Error::InvalidStateBinding { .. } => Some(1),
     }
 }
 
