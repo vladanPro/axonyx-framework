@@ -2812,6 +2812,12 @@ fn concrete_route_from_params(
 }
 
 fn load_prerender_routes(root: &Path) -> Result<Vec<PrerenderRoute>> {
+    let mut out = load_explicit_prerender_routes(root)?;
+    out.extend(load_content_prerender_routes(root)?);
+    Ok(out)
+}
+
+fn load_explicit_prerender_routes(root: &Path) -> Result<Vec<PrerenderRoute>> {
     let Some(routes_value) = axonyx_config_value(root, "prerender", "routes") else {
         return Ok(Vec::new());
     };
@@ -2860,6 +2866,89 @@ fn load_prerender_routes(root: &Path) -> Result<Vec<PrerenderRoute>> {
     }
 
     Ok(out)
+}
+
+fn load_content_prerender_routes(root: &Path) -> Result<Vec<PrerenderRoute>> {
+    let Some(collections_value) = axonyx_config_value(root, "prerender", "collections") else {
+        return Ok(Vec::new());
+    };
+
+    let collections = collections_value
+        .as_table()
+        .ok_or_else(|| anyhow::anyhow!("[prerender].collections must be a TOML table"))?;
+    let content = collect_content_manifest(root)?;
+    let mut out = Vec::new();
+
+    for (collection_name, value) in collections {
+        let table = value.as_table().ok_or_else(|| {
+            anyhow::anyhow!("[prerender.collections.{collection_name}] must be a TOML table")
+        })?;
+        let route = table
+            .get("route")
+            .and_then(toml::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("[prerender.collections.{collection_name}] is missing route")
+            })?
+            .trim()
+            .to_string();
+        let param = table
+            .get("param")
+            .and_then(toml::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("slug")
+            .trim()
+            .to_string();
+        let field = table
+            .get("field")
+            .and_then(toml::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&param)
+            .trim()
+            .to_string();
+        let collection = content
+            .collections
+            .iter()
+            .find(|collection| collection.name == *collection_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "prerender collection '{collection_name}' does not match a configured content collection"
+                )
+            })?;
+        let mut params = Vec::new();
+
+        for entry in &collection.entries {
+            let Some(value) = content_entry_field(entry, &field) else {
+                continue;
+            };
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            params.push(std::collections::BTreeMap::from([(
+                param.clone(),
+                value.to_string(),
+            )]));
+        }
+
+        out.push(PrerenderRoute { route, params });
+    }
+
+    Ok(out)
+}
+
+fn content_entry_field<'a>(entry: &'a ContentEntryManifest, field: &str) -> Option<&'a str> {
+    match field {
+        "path" => Some(&entry.path),
+        "slug" => Some(&entry.slug),
+        "extension" => Some(&entry.extension),
+        "content_type" => Some(&entry.content_type),
+        "title" => Some(&entry.title),
+        "excerpt" => Some(&entry.excerpt),
+        "body" => Some(&entry.body),
+        "html" => Some(&entry.html),
+        other => entry.frontmatter.get(other).map(String::as_str),
+    }
 }
 
 fn resolve_output_dir(root: &Path, out_dir: &Path) -> PathBuf {
@@ -5502,6 +5591,80 @@ page BlogPost
             .expect("foundry page should exist");
         assert!(hello.contains("hello-axonyx"));
         assert!(foundry.contains("foundry-ui"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_prerenders_dynamic_routes_from_content_collection() {
+        let root = make_temp_dir("static-build-content-prerender");
+        fs::create_dir_all(root.join("app/docs/content/[slug]")).expect("docs dir should exist");
+        fs::create_dir_all(root.join("content/docs")).expect("content dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"
+[app]
+name = "demo"
+
+[content.collections.docs]
+path = "content/docs"
+
+[prerender.collections.docs]
+route = "/docs/content/:slug"
+param = "slug"
+field = "slug"
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/docs/content/[slug]/loader.ax"),
+            r#"
+loader DocDetail
+  data docs = Content.Collection("docs")
+    where slug = params.slug
+    limit 1
+  return docs
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/docs/content/[slug]/page.ax"),
+            r#"
+page DocDetail
+<Each items={load DocDetail} as="doc">
+  <h1>{doc.title}</h1>
+  <Html content={doc.html} />
+</Each>
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("content/docs/hello.md"),
+            "---\ntitle: Hello Content\n---\n# Hello Content\n\nRendered from markdown.\n",
+        )
+        .expect("content should write");
+
+        let status = build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect("static build works");
+
+        match status {
+            StaticBuildStatus::Generated {
+                prerendered_count,
+                skipped_dynamic_count,
+                content_collection_count,
+                ..
+            } => {
+                assert_eq!(prerendered_count, 1);
+                assert_eq!(skipped_dynamic_count, 0);
+                assert_eq!(content_collection_count, 1);
+            }
+            StaticBuildStatus::NoPages { .. } => panic!("content prerender page should build"),
+        }
+
+        let html = fs::read_to_string(root.join("dist/docs/content/hello/index.html"))
+            .expect("content page should exist");
+        assert!(html.contains("Hello Content"));
+        assert!(html.contains("<p>Rendered from markdown.</p>"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
