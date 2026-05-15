@@ -320,7 +320,11 @@ struct ContentEntryManifest {
     path: String,
     slug: String,
     extension: String,
+    content_type: String,
     bytes: u64,
+    title: String,
+    excerpt: String,
+    word_count: usize,
     frontmatter: std::collections::BTreeMap<String, String>,
     body: String,
 }
@@ -1169,9 +1173,12 @@ fn print_content_text(manifest: &ContentManifest) {
 
         for entry in &collection.entries {
             println!(
-                "    {:<32} slug={} bytes={}",
-                entry.path, entry.slug, entry.bytes
+                "    {:<32} slug={} title=\"{}\" words={} bytes={}",
+                entry.path, entry.slug, entry.title, entry.word_count, entry.bytes
             );
+            if !entry.excerpt.is_empty() {
+                println!("      {}", entry.excerpt);
+            }
         }
     }
 }
@@ -1214,7 +1221,17 @@ fn content_entry_to_record(entry: ContentEntryManifest) -> AxValue {
     fields.insert("path".to_string(), AxValue::from(entry.path));
     fields.insert("slug".to_string(), AxValue::from(entry.slug));
     fields.insert("extension".to_string(), AxValue::from(entry.extension));
+    fields.insert(
+        "content_type".to_string(),
+        AxValue::from(entry.content_type),
+    );
     fields.insert("bytes".to_string(), AxValue::from(entry.bytes as i64));
+    fields.insert("title".to_string(), AxValue::from(entry.title));
+    fields.insert("excerpt".to_string(), AxValue::from(entry.excerpt));
+    fields.insert(
+        "word_count".to_string(),
+        AxValue::from(entry.word_count as i64),
+    );
     fields.insert("body".to_string(), AxValue::from(entry.body));
     for (key, value) in entry.frontmatter {
         fields.insert(key, AxValue::from(value));
@@ -1401,11 +1418,17 @@ fn collect_content_entries_in_dir(
         let source = fs::read_to_string(&path)
             .with_context(|| format!("failed to read content file '{}'", path.display()))?;
         let (frontmatter, body) = parse_content_frontmatter(&source);
+        let title = content_title(&frontmatter, &body, &path);
+        let excerpt = content_excerpt(&frontmatter, &body);
         out.push(ContentEntryManifest {
             path: display_relative_path(root, &path),
             slug: content_slug(&config.path, &path),
+            content_type: content_type_for_extension(&extension).to_string(),
             extension,
             bytes: metadata.len(),
+            title,
+            excerpt,
+            word_count: content_word_count(&body),
             frontmatter,
             body,
         });
@@ -1475,6 +1498,113 @@ fn trim_frontmatter_value(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn content_type_for_extension(extension: &str) -> &'static str {
+    match extension {
+        "md" | "mdx" => "markdown",
+        "html" | "htm" => "html",
+        "json" => "json",
+        _ => "text",
+    }
+}
+
+fn content_title(
+    frontmatter: &std::collections::BTreeMap<String, String>,
+    body: &str,
+    path: &Path,
+) -> String {
+    if let Some(title) = frontmatter
+        .get("title")
+        .filter(|value| !value.trim().is_empty())
+    {
+        return title.trim().to_string();
+    }
+
+    if let Some(heading) = first_markdown_heading(body) {
+        return heading;
+    }
+
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(humanize_slug)
+        .unwrap_or_default()
+}
+
+fn content_excerpt(frontmatter: &std::collections::BTreeMap<String, String>, body: &str) -> String {
+    for key in ["excerpt", "summary", "description"] {
+        if let Some(value) = frontmatter
+            .get(key)
+            .filter(|value| !value.trim().is_empty())
+        {
+            return collapse_ws(value);
+        }
+    }
+
+    body.lines()
+        .map(strip_markdown_line)
+        .map(|line| collapse_ws(&line))
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+}
+
+fn content_word_count(body: &str) -> usize {
+    strip_markdown_line(body)
+        .split_whitespace()
+        .filter(|word| !word.trim().is_empty())
+        .count()
+}
+
+fn first_markdown_heading(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let line = line.trim();
+        let heading = line.strip_prefix("# ")?;
+        let heading = collapse_ws(heading);
+        (!heading.is_empty()).then_some(heading)
+    })
+}
+
+fn strip_markdown_line(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut in_html_tag = false;
+    for ch in value.chars() {
+        if in_html_tag {
+            if ch == '>' {
+                in_html_tag = false;
+                out.push(' ');
+            }
+            continue;
+        }
+        match ch {
+            '#' | '*' | '_' | '`' | '>' | '[' | ']' | '(' | ')' => out.push(' '),
+            '<' => in_html_tag = true,
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn collapse_ws(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn humanize_slug(value: &str) -> String {
+    value
+        .replace(['-', '_'], " ")
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut out = first.to_uppercase().collect::<String>();
+                    out.push_str(chars.as_str());
+                    out
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn content_slug(collection_root: &Path, path: &Path) -> String {
@@ -6656,6 +6786,10 @@ extensions = ["md", "mdx"]
         assert_eq!(collection.entries.len(), 2);
         assert_eq!(collection.entries[0].path, "content/docs/intro.md");
         assert_eq!(collection.entries[0].slug, "intro");
+        assert_eq!(collection.entries[0].content_type, "markdown");
+        assert_eq!(collection.entries[0].title, "Intro");
+        assert_eq!(collection.entries[0].excerpt, "Start here");
+        assert_eq!(collection.entries[0].word_count, 1);
         assert_eq!(
             collection.entries[0].frontmatter.get("title"),
             Some(&"Intro".to_string())
@@ -6663,6 +6797,8 @@ extensions = ["md", "mdx"]
         assert_eq!(collection.entries[0].body, "# Intro\n");
         assert_eq!(collection.entries[1].path, "content/docs/nested/setup.mdx");
         assert_eq!(collection.entries[1].slug, "nested/setup");
+        assert_eq!(collection.entries[1].title, "Setup");
+        assert_eq!(collection.entries[1].excerpt, "Setup");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -6694,7 +6830,13 @@ path = "content/docs"
         };
         assert_eq!(fields.get("slug"), Some(&AxValue::from("getting-started")));
         assert_eq!(fields.get("extension"), Some(&AxValue::from("md")));
+        assert_eq!(fields.get("content_type"), Some(&AxValue::from("markdown")));
         assert_eq!(fields.get("title"), Some(&AxValue::from("Getting Started")));
+        assert_eq!(
+            fields.get("excerpt"),
+            Some(&AxValue::from("Build your first page"))
+        );
+        assert_eq!(fields.get("word_count"), Some(&AxValue::from(1i64)));
         assert_eq!(
             fields.get("description"),
             Some(&AxValue::from("Build your first page"))
