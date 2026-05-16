@@ -569,6 +569,7 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
             "cargo update -p axonyx-runtime",
         ));
     }
+    checks.push(doctor_server_streaming_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
     let ui_enabled = axonyx_source
@@ -581,6 +582,20 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
     checks.push(doctor_ax_sources_check(root));
 
     checks
+}
+
+fn doctor_server_streaming_check(root: &Path) -> DoctorCheck {
+    let enabled = axonyx_config_bool(root, "server", "stream_pages").unwrap_or(false);
+    DoctorCheck {
+        code: "server-stream-pages",
+        severity: DoctorSeverity::Ok,
+        message: if enabled {
+            "Page route streaming is enabled via [server].stream_pages.".to_string()
+        } else {
+            "Page route streaming is disabled; use ?__ax_stream=1 or [server].stream_pages = true to test it.".to_string()
+        },
+        hint: None,
+    }
 }
 
 fn doctor_file_check(
@@ -6218,6 +6233,41 @@ page RootLayout
         assert!(checks.iter().any(|check| check.code == "ui-package-css"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_reports_page_streaming_config() {
+        let root = make_temp_dir("doctor-stream-pages");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nstream_pages = true\n",
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.6"
+"#,
+        )
+        .expect("cargo manifest should write");
+
+        let checks = doctor_checks(&root);
+        let streaming = checks
+            .iter()
+            .find(|check| check.code == "server-stream-pages")
+            .expect("server streaming check should exist");
+
+        assert_eq!(streaming.severity, DoctorSeverity::Ok);
+        assert!(streaming.message.contains("enabled"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
