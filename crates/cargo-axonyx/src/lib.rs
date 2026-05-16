@@ -19,7 +19,9 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
-use axonyx_runtime::server_prelude::{AxHttpRequest, AxHttpResponse, AxServerConfig, AxServerMode};
+use axonyx_runtime::server_prelude::{
+    AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
+};
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
     preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
@@ -230,26 +232,41 @@ struct DevServerState {
     preview_store: Mutex<AxPreviewStore>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServerMode {
-    Dev,
-    Start,
+struct StdNetAxServer {
+    config: AxServerConfig,
+    state: Arc<DevServerState>,
 }
 
-impl ServerMode {
-    fn runtime_mode(self) -> AxServerMode {
-        match self {
-            Self::Dev => AxServerMode::Dev,
-            Self::Start => AxServerMode::Start,
+impl AxServer for StdNetAxServer {
+    fn config(&self) -> &AxServerConfig {
+        &self.config
+    }
+
+    fn serve(&self) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let bind = self.config.bind_addr();
+        let listener = TcpListener::bind(&bind)
+            .with_context(|| format!("failed to bind Axonyx server at {bind}"))?;
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    if let Err(error) = handle_connection(stream, &self.state, self.config.mode) {
+                        eprintln!(
+                            "Axonyx {} server error: {error:#}",
+                            self.config.mode.label()
+                        );
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Axonyx {} server connection error: {error}",
+                        self.config.mode.label()
+                    );
+                }
+            }
         }
-    }
 
-    fn inject_dev_client(self) -> bool {
-        self.runtime_mode().inject_dev_client()
-    }
-
-    fn label(self) -> &'static str {
-        self.runtime_mode().label()
+        Ok(())
     }
 }
 
@@ -2692,49 +2709,40 @@ fn add_module(module: ModuleKind) -> Result<()> {
 }
 
 fn run_dev_server(args: DevArgs) -> Result<()> {
-    run_http_server(args, ServerMode::Dev)
+    run_http_server(args, AxServerMode::Dev)
 }
 
 fn run_start_server(args: DevArgs) -> Result<()> {
-    run_http_server(args, ServerMode::Start)
+    run_http_server(args, AxServerMode::Start)
 }
 
-fn run_http_server(args: DevArgs, mode: ServerMode) -> Result<()> {
+fn run_http_server(args: DevArgs, mode: AxServerMode) -> Result<()> {
     let root = app_root()?;
     let backend_status = compile_backend_from_app_root(&root)?;
 
-    let server_config = AxServerConfig::new(args.host, args.port, mode.runtime_mode());
+    let server_config = AxServerConfig::new(args.host, args.port, mode);
     let bind = server_config.bind_addr();
-    let listener = TcpListener::bind(&bind)
-        .with_context(|| format!("failed to bind Axonyx server at {bind}"))?;
     let preview_store = preview_store_from_content(&root)?;
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(preview_store),
     });
+    let server = StdNetAxServer {
+        config: server_config,
+        state: shared_state,
+    };
 
     print_backend_build_status(&backend_status);
     println!("Axonyx {} server listening at http://{bind}", mode.label());
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
     );
-    if mode == ServerMode::Dev {
+    if mode == AxServerMode::Dev {
         println!("Live reload polling is enabled.");
     }
     println!("Press Ctrl+C to stop.");
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                if let Err(error) = handle_connection(stream, &shared_state, mode) {
-                    eprintln!("Axonyx {} server error: {error:#}", mode.label());
-                }
-            }
-            Err(error) => eprintln!("Axonyx {} server connection error: {error}", mode.label()),
-        }
-    }
-
-    Ok(())
+    server.serve().map_err(|error| anyhow::anyhow!("{error}"))
 }
 
 fn compile_backend_from_app_root(root: &Path) -> Result<BackendBuildStatus> {
@@ -3882,7 +3890,7 @@ fn update_axonyx_toml(
 fn handle_connection(
     mut stream: TcpStream,
     state: &DevServerState,
-    mode: ServerMode,
+    mode: AxServerMode,
 ) -> Result<()> {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -3919,7 +3927,7 @@ fn handle_connection(
         return Ok(());
     }
 
-    if mode == ServerMode::Dev
+    if mode == AxServerMode::Dev
         && request.method == "GET"
         && request.target.starts_with("/__axonyx/version")
     {
