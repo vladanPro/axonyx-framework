@@ -9,6 +9,7 @@ The stable seam is `axonyx_runtime::server_prelude`:
 - `AxServerMode` distinguishes `dev` from `start`.
 - `AxHttpRequest` and `AxHttpResponse` describe framework-level request and
   response values before they are adapted to a concrete transport.
+- `AxBody` describes either fixed bytes or streaming chunks.
 - `AxServer` is the future trait for concrete server implementations.
 
 This gives the CLI and runtime one small contract to share:
@@ -25,6 +26,18 @@ let bind = config.bind_addr();
 The current beta server is intentionally simple. It can serve page routes,
 public assets, package assets, route-local actions, and backend route previews.
 That is enough for the first site loop.
+
+It also has a streaming probe path:
+
+```text
+cargo ax stream
+GET /__axonyx/stream
+GET /__axonyx/stream/html
+```
+
+The probe uses `Transfer-Encoding: chunked` when the response body is
+`AxBody::Chunks`. This proves the transport path before route rendering itself
+becomes streaming-aware.
 
 Tokio/Hyper should replace the transport underneath, not the framework shape
 above it. The developer should still write:
@@ -45,10 +58,8 @@ and the app should still be authored through:
 
 ## Next Server Milestones
 
-1. Move request parsing and response writing behind `AxHttpRequest` and
-   `AxHttpResponse`.
-2. Add a concrete `StdNetAxServer` adapter for the current beta loop.
-3. Add a `TokioAxServer` or `HyperAxServer` adapter once async streaming starts.
-4. Add native chunked UI streaming for route rendering.
-5. Keep structured async in Axonyx authoring through loaders, actions, jobs, and
+1. Add a `TokioAxServer` or `HyperAxServer` adapter once async streaming starts.
+2. Add native chunked UI streaming for route rendering.
+3. Lower future `<Await>` or stream boundaries into `AxBody::Chunks`.
+4. Keep structured async in Axonyx authoring through loaders, actions, jobs, and
    future `<Await>` boundaries instead of exposing promise-style timing.

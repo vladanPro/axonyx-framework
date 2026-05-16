@@ -18,6 +18,7 @@ cargo ax content
 cargo ax doctor
 cargo ax build --clean
 cargo ax run dev
+cargo ax stream
 ```
 
 ## Typical Flow
@@ -33,6 +34,16 @@ cargo ax run dev
 
 `cargo ax content` reads `[content.collections]` from `Axonyx.toml` and prints the current Melt-time content manifest.
 `cargo ax build` writes the same manifest to `dist/_ax/content/manifest.json` when collections are configured.
+
+`cargo ax stream` starts the dev server with a visible streaming probe URL. It is
+not a replacement for `cargo ax run dev`; it exists to test Axonyx chunked
+response support while UI streaming is being shaped.
+
+```bash
+cargo ax stream
+# open http://127.0.0.1:3000/__axonyx/stream
+# open http://127.0.0.1:3000/__axonyx/stream/html
+```
 
 ## Package Model
 
