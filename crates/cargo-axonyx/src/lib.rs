@@ -32,6 +32,7 @@ const DOCS_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
+const AXONYX_RUNTIME_VERSION: &str = "0.1.6";
 const AXONYX_UI_VERSION: &str = "0.0.33";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
@@ -506,6 +507,14 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
             hint: None,
         },
     });
+    if let Some(source) = cargo_source.as_deref() {
+        checks.push(doctor_dependency_version_check(
+            source,
+            "axonyx-runtime",
+            AXONYX_RUNTIME_VERSION,
+            "cargo update -p axonyx-runtime",
+        ));
+    }
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
     let ui_enabled = axonyx_source
@@ -584,6 +593,14 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
             hint: None,
         },
     });
+    if let Some(source) = cargo_source {
+        checks.push(doctor_dependency_version_check(
+            source,
+            "axonyx-ui",
+            AXONYX_UI_VERSION,
+            "cargo update -p axonyx-ui",
+        ));
+    }
 
     checks.push(
         match package_root
@@ -701,6 +718,103 @@ fn cargo_manifest_has_dependency(source: &str, dependency_name: &str) -> bool {
                 .cloned()
         })
         .is_some_and(|dependencies| dependencies.contains_key(dependency_name))
+}
+
+fn doctor_dependency_version_check(
+    cargo_source: &str,
+    dependency_name: &'static str,
+    expected_version: &'static str,
+    update_command: &'static str,
+) -> DoctorCheck {
+    let code = if dependency_name == "axonyx-runtime" {
+        "runtime-version"
+    } else {
+        "ui-version"
+    };
+
+    let Some(version) = cargo_manifest_dependency_version(cargo_source, dependency_name) else {
+        return DoctorCheck {
+            code,
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "{dependency_name} uses a path/git dependency or has no pinned registry version."
+            ),
+            hint: None,
+        };
+    };
+
+    if version == expected_version {
+        return DoctorCheck {
+            code,
+            severity: DoctorSeverity::Ok,
+            message: format!("{dependency_name} {version} is current."),
+            hint: None,
+        };
+    }
+
+    let severity = if is_version_older(&version, expected_version) {
+        DoctorSeverity::Warn
+    } else {
+        DoctorSeverity::Ok
+    };
+    let message = if severity == DoctorSeverity::Warn {
+        format!("{dependency_name} {version} is older than expected {expected_version}.")
+    } else {
+        format!("{dependency_name} {version} is newer than expected {expected_version}.")
+    };
+    let hint = if severity == DoctorSeverity::Warn {
+        Some(update_command)
+    } else {
+        None
+    };
+
+    DoctorCheck {
+        code,
+        severity,
+        message,
+        hint,
+    }
+}
+
+fn cargo_manifest_dependency_version(source: &str, dependency_name: &str) -> Option<String> {
+    let value = source.parse::<toml::Value>().ok()?;
+    let dependencies = value.get("dependencies")?.as_table()?;
+    let dependency = dependencies.get(dependency_name)?;
+
+    match dependency {
+        toml::Value::String(version) => Some(version.clone()),
+        toml::Value::Table(table) => table
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string),
+        _ => None,
+    }
+}
+
+fn is_version_older(found: &str, expected: &str) -> bool {
+    parse_version_tuple(found) < parse_version_tuple(expected)
+}
+
+fn parse_version_tuple(version: &str) -> (u64, u64, u64) {
+    let trimmed = version
+        .trim()
+        .trim_start_matches('^')
+        .trim_start_matches('=')
+        .trim();
+    let mut parts = trimmed.split('.');
+    let major = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    let patch = parts
+        .next()
+        .and_then(|part| {
+            part.chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0);
+    (major, minor, patch)
 }
 
 fn print_doctor_text(checks: &[DoctorCheck]) {
@@ -5813,7 +5927,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.0"
+axonyx-runtime = "0.1.6"
 
 [dependencies.axonyx-ui]
 path = "vendor/axonyx-ui"
@@ -5864,7 +5978,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.0"
+axonyx-runtime = "0.1.6"
 "#,
         )
         .expect("cargo manifest should write");
@@ -5888,6 +6002,65 @@ page RootLayout
 
         assert_eq!(ui_dependency.severity, DoctorSeverity::Warn);
         assert!(ui_dependency.message.contains("axonyx-ui"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_warns_for_outdated_registry_dependencies() {
+        let workspace = make_temp_dir("doctor-outdated-dependencies");
+        let app_root = workspace.join("demo-app");
+        let ui_root = app_root.join("vendor/axonyx-ui");
+
+        fs::create_dir_all(app_root.join("app")).expect("app dir should exist");
+        write_test_axonyx_ui_package(&ui_root, "Doctor UI", "body { color: silver; }");
+        fs::write(
+            app_root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[modules]\nenabled = [\"ui\"]\n",
+        )
+        .expect("config should write");
+        fs::write(
+            app_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.5"
+axonyx-ui = "0.0.32"
+"#,
+        )
+        .expect("cargo manifest should write");
+        fs::write(
+            app_root.join("app/layout.ax"),
+            r#"
+page RootLayout
+<Head>
+  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
+</Head>
+<Slot />
+"#,
+        )
+        .expect("layout should write");
+
+        let checks = doctor_checks(&app_root);
+        let runtime_version = checks
+            .iter()
+            .find(|check| check.code == "runtime-version")
+            .expect("runtime version check should exist");
+        let ui_version = checks
+            .iter()
+            .find(|check| check.code == "ui-version")
+            .expect("ui version check should exist");
+
+        assert_eq!(runtime_version.severity, DoctorSeverity::Warn);
+        assert!(runtime_version.message.contains("0.1.5"));
+        assert_eq!(runtime_version.hint, Some("cargo update -p axonyx-runtime"));
+        assert_eq!(ui_version.severity, DoctorSeverity::Warn);
+        assert!(ui_version.message.contains("0.0.32"));
+        assert_eq!(ui_version.hint, Some("cargo update -p axonyx-ui"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

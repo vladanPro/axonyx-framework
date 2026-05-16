@@ -15,7 +15,7 @@ repository = "https://github.com/vladanPro/axonyx-framework"
 homepage = "https://github.com/vladanPro/axonyx-framework"
 documentation = "https://github.com/vladanPro/axonyx-framework"
 rust-version = "1.82"
-version = "0.1.12"
+version = "0.1.13"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
