@@ -117,13 +117,22 @@ fn run() -> Result<()> {
     println!();
     println!("Success! Axonyx app created at {}", target_dir.display());
     println!("Next steps:");
-    println!("  cd {}", target_dir.display());
+    println!("  cd {}", shell_path_arg(&target_dir));
     println!("  cargo ax check");
     println!("  cargo ax doctor");
     println!("  cargo ax build --clean");
     println!("  cargo ax run dev");
     println!("Template: {:?}", cli.template);
     Ok(())
+}
+
+fn shell_path_arg(path: &Path) -> String {
+    let display = path.display().to_string();
+    if display.chars().any(char::is_whitespace) {
+        format!("\"{display}\"")
+    } else {
+        display
+    }
 }
 
 fn resolve_target_dir(input: &str) -> Result<PathBuf> {
@@ -582,6 +591,18 @@ mod tests {
         .expect("last path component should validate");
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn shell_path_arg_quotes_paths_with_spaces() {
+        assert_eq!(
+            shell_path_arg(Path::new(r"C:\Temp\Axonyx Sites\demo-site")),
+            r#""C:\Temp\Axonyx Sites\demo-site""#
+        );
+        assert_eq!(
+            shell_path_arg(Path::new(r"C:\Temp\demo-site")),
+            r"C:\Temp\demo-site"
+        );
     }
 
     #[test]
