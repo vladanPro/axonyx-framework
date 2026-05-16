@@ -4014,16 +4014,8 @@ fn handle_connection(
         return Ok(());
     };
 
-    let mut html = render_route_html(state, &route)?;
-    if mode.inject_dev_client() {
-        html = inject_dev_client(&html, &route.request_path);
-    }
-    write_response(
-        &mut stream,
-        "200 OK",
-        "text/html; charset=utf-8",
-        html.as_bytes(),
-    )?;
+    let response = render_route_response(state, &route, mode.inject_dev_client())?;
+    write_ax_response(&mut stream, &response)?;
     Ok(())
 }
 
@@ -4623,6 +4615,18 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
     })?;
 
     Ok(apply_theme_config(&state.root, html))
+}
+
+fn render_route_response(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    inject_dev_client_script: bool,
+) -> Result<AxHttpResponse> {
+    let mut html = render_route_html(state, route)?;
+    if inject_dev_client_script {
+        html = inject_dev_client(&html, &route.request_path);
+    }
+    Ok(AxHttpResponse::html(200, html).with_no_store())
 }
 
 fn route_version(root: &Path, route: &ResolvedRoute) -> Result<String> {
@@ -6653,6 +6657,41 @@ axonyx-runtime = "0.1.0"
 
         assert!(html.contains("Draft Preview"));
         assert!(!html.contains("Hello Axonyx"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn render_route_response_wraps_page_html_in_http_response() {
+        let root = make_temp_dir("route-response");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\n<Copy>Hello response</Copy>\n",
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let response =
+            render_route_response(&state, &route, true).expect("route response should render");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "text/html; charset=utf-8");
+        let body = response
+            .body
+            .chunks_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+            .collect::<String>();
+        assert!(body.contains("Hello response"));
+        assert!(body.contains("/__axonyx/version"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
