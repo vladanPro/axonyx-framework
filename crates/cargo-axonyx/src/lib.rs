@@ -4018,7 +4018,7 @@ fn handle_connection(
         state,
         &route,
         mode.inject_dev_client(),
-        should_stream_page_route(&request.target),
+        should_stream_page_route(&state.root, &request.target),
     )?;
     write_ax_response(&mut stream, &response)?;
     Ok(())
@@ -4643,8 +4643,10 @@ fn render_route_response(
     Ok(AxHttpResponse::html(200, html).with_no_store())
 }
 
-fn should_stream_page_route(target: &str) -> bool {
-    query_param_value(target, "__ax_stream").is_some_and(|value| matches!(value, "1" | "true"))
+fn should_stream_page_route(root: &Path, target: &str) -> bool {
+    query_param_value(target, "__ax_stream")
+        .map(parse_boolish)
+        .unwrap_or_else(|| axonyx_config_bool(root, "server", "stream_pages").unwrap_or(false))
 }
 
 fn html_stream_chunks(html: &str) -> Vec<Vec<u8>> {
@@ -5044,6 +5046,14 @@ fn axonyx_config_string(root: &Path, table: &str, key: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn axonyx_config_bool(root: &Path, table: &str, key: &str) -> Option<bool> {
+    match axonyx_config_value(root, table, key)? {
+        toml::Value::Boolean(value) => Some(value),
+        toml::Value::String(value) => Some(parse_boolish(&value)),
+        _ => None,
+    }
+}
+
 fn axonyx_config_value(root: &Path, table: &str, key: &str) -> Option<toml::Value> {
     axonyx_config_table(root, table)?.get(key).cloned()
 }
@@ -5181,6 +5191,13 @@ fn query_param_value<'a>(target: &'a str, needle: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+fn parse_boolish(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 fn normalize_request_path(request_path: &str) -> Result<String> {
@@ -6752,7 +6769,7 @@ axonyx-runtime = "0.1.0"
             &state,
             &route,
             false,
-            should_stream_page_route(&route.request_target),
+            should_stream_page_route(&root, &route.request_target),
         )
         .expect("streamed route response should render");
 
@@ -6766,6 +6783,41 @@ axonyx-runtime = "0.1.0"
             .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
             .collect::<String>();
         assert!(body.contains("Hello streamed page"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn server_config_can_enable_page_streaming_by_default() {
+        let root = make_temp_dir("route-response-stream-config");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nstream_pages = true\n",
+        )
+        .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\n<Copy>Hello config stream</Copy>\n",
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let response = render_route_response(
+            &state,
+            &route,
+            false,
+            should_stream_page_route(&root, &route.request_target),
+        )
+        .expect("streamed route response should render");
+
+        assert!(response.body.is_streaming());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

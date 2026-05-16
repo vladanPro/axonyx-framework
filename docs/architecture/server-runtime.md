@@ -39,6 +39,22 @@ The probe uses `Transfer-Encoding: chunked` when the response body is
 `AxBody::Chunks`. This proves the transport path before route rendering itself
 becomes streaming-aware.
 
+Page routes can also opt into the same response path during development:
+
+```toml
+[server]
+stream_pages = true
+```
+
+or per request:
+
+```text
+GET /?__ax_stream=1
+```
+
+This still streams the already-rendered HTML in coarse shell/body/end chunks.
+It is a transport milestone, not yet a full `<Await>` boundary implementation.
+
 Tokio/Hyper should replace the transport underneath, not the framework shape
 above it. The developer should still write:
 
