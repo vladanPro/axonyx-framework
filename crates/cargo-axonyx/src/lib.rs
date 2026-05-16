@@ -5026,7 +5026,7 @@ fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Resul
     let mut header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         response.content_type,
-        response.body.len()
+        response.body_len()
     );
     if response.header_value("Cache-Control").is_none() {
         header.push_str("Cache-Control: no-store\r\n");
@@ -5042,9 +5042,11 @@ fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Resul
     stream
         .write_all(header.as_bytes())
         .context("failed to write response headers")?;
-    stream
-        .write_all(&response.body)
-        .context("failed to write response body")?;
+    for chunk in response.body.chunks_iter() {
+        stream
+            .write_all(chunk)
+            .context("failed to write response body")?;
+    }
     stream.flush().context("failed to flush response")?;
     Ok(())
 }
