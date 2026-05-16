@@ -55,6 +55,7 @@ enum Commands {
     Routes(RoutesArgs),
     Run(RunArgs),
     Schema(SchemaArgs),
+    Upgrade,
 }
 
 #[derive(Debug, Parser)]
@@ -370,6 +371,7 @@ fn run() -> Result<()> {
         Commands::Routes(args) => routes_command(args),
         Commands::Run(args) => run_command(args),
         Commands::Schema(args) => schema_command(args),
+        Commands::Upgrade => upgrade_command(),
     }
 }
 
@@ -440,6 +442,41 @@ fn run_command(args: RunArgs) -> Result<()> {
         RunCommands::Dev(args) => run_dev_server(args),
         RunCommands::Start(args) => run_start_server(args),
     }
+}
+
+fn upgrade_command() -> Result<()> {
+    let root = app_root()?;
+    let cargo_toml = root.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        bail!("Cargo.toml is missing; run this command from an Axonyx app root");
+    }
+
+    let mut changes = Vec::new();
+    if upgrade_cargo_dependency_version(&cargo_toml, "axonyx-runtime", AXONYX_RUNTIME_VERSION)? {
+        changes.push(format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\""));
+    }
+
+    let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
+    let ui_enabled = axonyx_source
+        .as_deref()
+        .is_some_and(|source| source.contains("\"ui\"") || source.contains("'ui'"));
+    if (ui_enabled || cargo_manifest_has_dependency_file(&cargo_toml, "axonyx-ui")?)
+        && upgrade_cargo_dependency_version(&cargo_toml, "axonyx-ui", AXONYX_UI_VERSION)?
+    {
+        changes.push(format!("axonyx-ui = \"{AXONYX_UI_VERSION}\""));
+    }
+
+    if changes.is_empty() {
+        println!("Axonyx packages are already current or use path/git dependencies.");
+    } else {
+        println!("Updated Cargo.toml:");
+        for change in changes {
+            println!("  {change}");
+        }
+        println!("Next: cargo update");
+    }
+
+    Ok(())
 }
 
 fn doctor_command(args: DoctorArgs) -> Result<()> {
@@ -718,6 +755,16 @@ fn cargo_manifest_has_dependency(source: &str, dependency_name: &str) -> bool {
                 .cloned()
         })
         .is_some_and(|dependencies| dependencies.contains_key(dependency_name))
+}
+
+fn cargo_manifest_has_dependency_file(cargo_toml: &Path, dependency_name: &str) -> Result<bool> {
+    if !cargo_toml.exists() {
+        return Ok(false);
+    }
+
+    let source = fs::read_to_string(cargo_toml)
+        .with_context(|| format!("failed to read '{}'", cargo_toml.display()))?;
+    Ok(cargo_manifest_has_dependency(&source, dependency_name))
 }
 
 fn doctor_dependency_version_check(
@@ -3560,6 +3607,64 @@ fn ensure_cargo_dependency_version(
     Ok(())
 }
 
+fn upgrade_cargo_dependency_version(
+    cargo_toml: &Path,
+    dependency_name: &str,
+    dependency_version: &str,
+) -> Result<bool> {
+    let source = fs::read_to_string(cargo_toml)
+        .with_context(|| format!("failed to read '{}'", cargo_toml.display()))?;
+    let mut value = source
+        .parse::<toml::Value>()
+        .with_context(|| format!("failed to parse '{}'", cargo_toml.display()))?;
+    let Some(dependencies_table) = value
+        .get_mut("dependencies")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return Ok(false);
+    };
+    let Some(dependency) = dependencies_table.get_mut(dependency_name) else {
+        return Ok(false);
+    };
+
+    let changed = match dependency {
+        toml::Value::String(version) => {
+            if version == dependency_version {
+                false
+            } else {
+                *version = dependency_version.to_string();
+                true
+            }
+        }
+        toml::Value::Table(table) if table.contains_key("path") || table.contains_key("git") => {
+            false
+        }
+        toml::Value::Table(table) => match table.get_mut("version") {
+            Some(toml::Value::String(version)) if version != dependency_version => {
+                *version = dependency_version.to_string();
+                true
+            }
+            Some(toml::Value::String(_)) => false,
+            _ => {
+                table.insert(
+                    "version".to_string(),
+                    toml::Value::String(dependency_version.to_string()),
+                );
+                true
+            }
+        },
+        _ => false,
+    };
+
+    if changed {
+        let rendered = toml::to_string_pretty(&value).context("failed to render Cargo.toml")?;
+        fs::write(cargo_toml, rendered)
+            .with_context(|| format!("failed to write '{}'", cargo_toml.display()))?;
+    }
+
+    Ok(changed)
+}
+
 fn copy_dir_all_filtered(
     source: &Path,
     destination: &Path,
@@ -6061,6 +6166,87 @@ page RootLayout
         assert_eq!(ui_version.severity, DoctorSeverity::Warn);
         assert!(ui_version.message.contains("0.0.32"));
         assert_eq!(ui_version.hint, Some("cargo update -p axonyx-ui"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn upgrade_updates_registry_dependencies_only() {
+        let workspace = make_temp_dir("upgrade-registry-dependencies");
+        let app_root = workspace.join("demo-app");
+        fs::create_dir_all(&app_root).expect("app dir should exist");
+        let cargo_toml = app_root.join("Cargo.toml");
+
+        fs::write(
+            &cargo_toml,
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.5"
+axonyx-ui = { version = "0.0.32" }
+serde_json = "1"
+"#,
+        )
+        .expect("cargo manifest should write");
+
+        assert!(upgrade_cargo_dependency_version(
+            &cargo_toml,
+            "axonyx-runtime",
+            AXONYX_RUNTIME_VERSION
+        )
+        .expect("runtime should upgrade"));
+        assert!(
+            upgrade_cargo_dependency_version(&cargo_toml, "axonyx-ui", AXONYX_UI_VERSION)
+                .expect("ui should upgrade")
+        );
+
+        let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
+        assert!(updated.contains("axonyx-runtime = \"0.1.6\""));
+        assert!(updated.contains("version = \"0.0.33\""));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn upgrade_keeps_path_and_git_dependencies() {
+        let workspace = make_temp_dir("upgrade-path-dependencies");
+        let app_root = workspace.join("demo-app");
+        fs::create_dir_all(&app_root).expect("app dir should exist");
+        let cargo_toml = app_root.join("Cargo.toml");
+
+        fs::write(
+            &cargo_toml,
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = { git = "https://github.com/vladanPro/axonyx-runtime" }
+axonyx-ui = { path = "vendor/axonyx-ui" }
+"#,
+        )
+        .expect("cargo manifest should write");
+
+        assert!(!upgrade_cargo_dependency_version(
+            &cargo_toml,
+            "axonyx-runtime",
+            AXONYX_RUNTIME_VERSION
+        )
+        .expect("runtime should stay pinned to git"));
+        assert!(
+            !upgrade_cargo_dependency_version(&cargo_toml, "axonyx-ui", AXONYX_UI_VERSION)
+                .expect("ui should stay pinned to path")
+        );
+
+        let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
+        assert!(updated.contains("git = \"https://github.com/vladanPro/axonyx-runtime\""));
+        assert!(updated.contains("path = \"vendor/axonyx-ui\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
