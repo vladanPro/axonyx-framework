@@ -4014,7 +4014,12 @@ fn handle_connection(
         return Ok(());
     };
 
-    let response = render_route_response(state, &route, mode.inject_dev_client())?;
+    let response = render_route_response(
+        state,
+        &route,
+        mode.inject_dev_client(),
+        should_stream_page_route(&request.target),
+    )?;
     write_ax_response(&mut stream, &response)?;
     Ok(())
 }
@@ -4621,12 +4626,43 @@ fn render_route_response(
     state: &DevServerState,
     route: &ResolvedRoute,
     inject_dev_client_script: bool,
+    stream_response: bool,
 ) -> Result<AxHttpResponse> {
     let mut html = render_route_html(state, route)?;
     if inject_dev_client_script {
         html = inject_dev_client(&html, &route.request_path);
     }
+    if stream_response {
+        return Ok(AxHttpResponse::stream_chunks(
+            200,
+            "text/html; charset=utf-8",
+            html_stream_chunks(&html),
+        )
+        .with_no_store());
+    }
     Ok(AxHttpResponse::html(200, html).with_no_store())
+}
+
+fn should_stream_page_route(target: &str) -> bool {
+    query_param_value(target, "__ax_stream").is_some_and(|value| matches!(value, "1" | "true"))
+}
+
+fn html_stream_chunks(html: &str) -> Vec<Vec<u8>> {
+    if let Some(body_start) = html.find("<body") {
+        if let Some(open_end) = html[body_start..].find('>') {
+            let split = body_start + open_end + 1;
+            if let Some(body_end) = html[split..].rfind("</body>") {
+                let body_end = split + body_end;
+                return vec![
+                    html[..split].as_bytes().to_vec(),
+                    html[split..body_end].as_bytes().to_vec(),
+                    html[body_end..].as_bytes().to_vec(),
+                ];
+            }
+        }
+    }
+
+    vec![html.as_bytes().to_vec()]
 }
 
 fn route_version(root: &Path, route: &ResolvedRoute) -> Result<String> {
@@ -5129,22 +5165,19 @@ fn write_chunked_body(stream: &mut TcpStream, response: &AxHttpResponse) -> Resu
 }
 
 fn extract_version_path(target: &str) -> Option<String> {
-    let query = target.split_once('?')?.1;
-    for pair in query.split('&') {
-        let (key, value) = pair.split_once('=')?;
-        if key == "path" {
-            return Some(url_decode(value));
-        }
-    }
-    None
+    query_param_value(target, "path").map(url_decode)
 }
 
 fn extract_action_query_param(target: &str, needle: &str) -> Option<String> {
+    query_param_value(target, needle).map(url_decode)
+}
+
+fn query_param_value<'a>(target: &'a str, needle: &str) -> Option<&'a str> {
     let query = target.split_once('?')?.1;
     for pair in query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         if key == needle {
-            return Some(url_decode(value));
+            return Some(value);
         }
     }
     None
@@ -6680,8 +6713,8 @@ axonyx-runtime = "0.1.0"
             root: root.clone(),
             preview_store: Mutex::new(AxPreviewStore::default()),
         };
-        let response =
-            render_route_response(&state, &route, true).expect("route response should render");
+        let response = render_route_response(&state, &route, true, false)
+            .expect("route response should render");
 
         assert_eq!(response.status, 200);
         assert_eq!(response.content_type, "text/html; charset=utf-8");
@@ -6692,6 +6725,47 @@ axonyx-runtime = "0.1.0"
             .collect::<String>();
         assert!(body.contains("Hello response"));
         assert!(body.contains("/__axonyx/version"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn render_route_response_can_stream_page_html_chunks() {
+        let root = make_temp_dir("route-response-stream");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\n<Copy>Hello streamed page</Copy>\n",
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/?__ax_stream=1")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let response = render_route_response(
+            &state,
+            &route,
+            false,
+            should_stream_page_route(&route.request_target),
+        )
+        .expect("streamed route response should render");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "text/html; charset=utf-8");
+        assert!(response.body.is_streaming());
+        assert!(response.body.chunks_iter().count() >= 2);
+        let body = response
+            .body
+            .chunks_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+            .collect::<String>();
+        assert!(body.contains("Hello streamed page"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
