@@ -58,6 +58,7 @@ enum Commands {
     Routes(RoutesArgs),
     Run(RunArgs),
     Schema(SchemaArgs),
+    Stream(DevArgs),
     Upgrade,
 }
 
@@ -386,6 +387,7 @@ fn run() -> Result<()> {
         Commands::Routes(args) => routes_command(args),
         Commands::Run(args) => run_command(args),
         Commands::Schema(args) => schema_command(args),
+        Commands::Stream(args) => run_stream_server(args),
         Commands::Upgrade => upgrade_command(),
     }
 }
@@ -2709,14 +2711,18 @@ fn add_module(module: ModuleKind) -> Result<()> {
 }
 
 fn run_dev_server(args: DevArgs) -> Result<()> {
-    run_http_server(args, AxServerMode::Dev)
+    run_http_server(args, AxServerMode::Dev, false)
 }
 
 fn run_start_server(args: DevArgs) -> Result<()> {
-    run_http_server(args, AxServerMode::Start)
+    run_http_server(args, AxServerMode::Start, false)
 }
 
-fn run_http_server(args: DevArgs, mode: AxServerMode) -> Result<()> {
+fn run_stream_server(args: DevArgs) -> Result<()> {
+    run_http_server(args, AxServerMode::Dev, true)
+}
+
+fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Result<()> {
     let root = app_root()?;
     let backend_status = compile_backend_from_app_root(&root)?;
 
@@ -2739,6 +2745,9 @@ fn run_http_server(args: DevArgs, mode: AxServerMode) -> Result<()> {
     );
     if mode == AxServerMode::Dev {
         println!("Live reload polling is enabled.");
+    }
+    if stream_probe {
+        println!("Streaming probe: http://{bind}/__axonyx/stream");
     }
     println!("Press Ctrl+C to stop.");
 
@@ -6018,6 +6027,19 @@ page Home
         let cli = Cli::try_parse_from(normalized).expect("cargo ax args should parse");
 
         assert!(matches!(cli.command, Commands::Run(_)));
+    }
+
+    #[test]
+    fn parses_stream_probe_command() {
+        let cli =
+            Cli::try_parse_from(["cargo-ax", "stream", "--host", "0.0.0.0", "--port", "4100"])
+                .expect("stream command should parse");
+
+        let Commands::Stream(args) = cli.command else {
+            panic!("expected stream command");
+        };
+        assert_eq!(args.host, "0.0.0.0");
+        assert_eq!(args.port, 4100);
     }
 
     #[test]
