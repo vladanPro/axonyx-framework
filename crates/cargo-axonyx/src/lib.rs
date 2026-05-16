@@ -19,7 +19,7 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
-use axonyx_runtime::server_prelude::{AxServerConfig, AxServerMode};
+use axonyx_runtime::server_prelude::{AxHttpRequest, AxHttpResponse, AxServerConfig, AxServerMode};
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
     preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
@@ -251,13 +251,6 @@ impl ServerMode {
     fn label(self) -> &'static str {
         self.runtime_mode().label()
     }
-}
-
-struct HttpRequest {
-    method: String,
-    target: String,
-    headers: std::collections::BTreeMap<String, String>,
-    body: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -3952,8 +3945,7 @@ fn handle_connection(
     }
 
     if let Some(response) = execute_backend_route_request(state, &request)? {
-        let status = http_status_text(response.status);
-        write_response(&mut stream, &status, &response.content_type, &response.body)?;
+        write_ax_response(&mut stream, &preview_response_to_http(response))?;
         return Ok(());
     }
 
@@ -4006,7 +3998,7 @@ fn handle_connection(
 
 fn execute_backend_route_request(
     state: &DevServerState,
-    request: &HttpRequest,
+    request: &AxHttpRequest,
 ) -> Result<Option<AxPreviewHttpResponse>> {
     let mut sources = Vec::new();
     let routes_root = state.root.join("routes");
@@ -4034,7 +4026,12 @@ fn execute_backend_route_request(
         })
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
+fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
+    AxHttpResponse::bytes(response.status, response.content_type, response.body)
+        .with_header("Cache-Control", "no-store")
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
     let mut header_end = None;
@@ -4086,7 +4083,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
     let body_start = header_end + 4;
     let body = buffer[body_start..].to_vec();
 
-    Ok(Some(HttpRequest {
+    Ok(Some(AxHttpRequest {
         method,
         target,
         headers,
@@ -4114,7 +4111,7 @@ fn parse_content_length(headers: &str) -> usize {
 fn handle_action_request(
     stream: &mut TcpStream,
     state: &DevServerState,
-    request: &HttpRequest,
+    request: &AxHttpRequest,
 ) -> Result<()> {
     let content_type = request
         .headers
@@ -4210,6 +4207,7 @@ fn http_status_text(status: u16) -> String {
     match status {
         200 => "200 OK".to_string(),
         204 => "204 No Content".to_string(),
+        303 => "303 See Other".to_string(),
         400 => "400 Bad Request".to_string(),
         404 => "404 Not Found".to_string(),
         405 => "405 Method Not Allowed".to_string(),
@@ -4220,17 +4218,15 @@ fn http_status_text(status: u16) -> String {
 }
 
 fn write_redirect_response(stream: &mut TcpStream, status: &str, location: &str) -> Result<()> {
-    let header = format!(
-        "HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
-    );
-
-    stream
-        .write_all(header.as_bytes())
-        .context("failed to write redirect response")?;
-    stream
-        .flush()
-        .context("failed to flush redirect response")?;
-    Ok(())
+    let status = status
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(303);
+    let response = AxHttpResponse::text(status, "")
+        .with_header("Location", location)
+        .with_header("Cache-Control", "no-store");
+    write_ax_response(stream, &response)
 }
 
 fn load_public_asset(root: &Path, request_path: &str) -> Result<Option<StaticAsset>> {
@@ -5023,16 +5019,39 @@ fn write_response(
     content_type: &str,
     body: &[u8],
 ) -> Result<()> {
-    let header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-        body.len()
+    let status_code = status
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(200);
+    let response = AxHttpResponse::bytes(status_code, content_type, body.to_vec())
+        .with_header("Cache-Control", "no-store");
+    write_ax_response(stream, &response)
+}
+
+fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Result<()> {
+    let status = http_status_text(response.status);
+    let mut header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        response.content_type,
+        response.body.len()
     );
+    if !response.headers.contains_key("Cache-Control") {
+        header.push_str("Cache-Control: no-store\r\n");
+    }
+    for (name, value) in &response.headers {
+        header.push_str(name);
+        header.push_str(": ");
+        header.push_str(value);
+        header.push_str("\r\n");
+    }
+    header.push_str("\r\n");
 
     stream
         .write_all(header.as_bytes())
         .context("failed to write response headers")?;
     stream
-        .write_all(body)
+        .write_all(&response.body)
         .context("failed to write response body")?;
     stream.flush().context("failed to flush response")?;
     Ok(())
@@ -6367,7 +6386,7 @@ axonyx-runtime = "0.1.0"
             root: root.clone(),
             preview_store: Mutex::new(AxPreviewStore::default()),
         };
-        let request = HttpRequest {
+        let request = AxHttpRequest {
             method: "GET".to_string(),
             target: "/api/posts".to_string(),
             headers: std::collections::BTreeMap::new(),
@@ -6406,7 +6425,7 @@ axonyx-runtime = "0.1.0"
             root: root.clone(),
             preview_store: Mutex::new(AxPreviewStore::default()),
         };
-        let request = HttpRequest {
+        let request = AxHttpRequest {
             method: "GET".to_string(),
             target: "/api/posts/draft-preview?status=draft".to_string(),
             headers: std::collections::BTreeMap::new(),
