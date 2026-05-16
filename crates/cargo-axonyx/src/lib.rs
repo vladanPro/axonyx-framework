@@ -4027,8 +4027,7 @@ fn execute_backend_route_request(
 }
 
 fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
-    AxHttpResponse::bytes(response.status, response.content_type, response.body)
-        .with_header("Cache-Control", "no-store")
+    AxHttpResponse::bytes(response.status, response.content_type, response.body).with_no_store()
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
@@ -4203,20 +4202,6 @@ fn parse_form_body(body: &[u8]) -> std::collections::BTreeMap<String, String> {
     fields
 }
 
-fn http_status_text(status: u16) -> String {
-    match status {
-        200 => "200 OK".to_string(),
-        204 => "204 No Content".to_string(),
-        303 => "303 See Other".to_string(),
-        400 => "400 Bad Request".to_string(),
-        404 => "404 Not Found".to_string(),
-        405 => "405 Method Not Allowed".to_string(),
-        415 => "415 Unsupported Media Type".to_string(),
-        500 => "500 Internal Server Error".to_string(),
-        _ => format!("{status} OK"),
-    }
-}
-
 fn write_redirect_response(stream: &mut TcpStream, status: &str, location: &str) -> Result<()> {
     let status = status
         .split_whitespace()
@@ -4225,7 +4210,7 @@ fn write_redirect_response(stream: &mut TcpStream, status: &str, location: &str)
         .unwrap_or(303);
     let response = AxHttpResponse::text(status, "")
         .with_header("Location", location)
-        .with_header("Cache-Control", "no-store");
+        .with_no_store();
     write_ax_response(stream, &response)
 }
 
@@ -5024,19 +5009,18 @@ fn write_response(
         .next()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(200);
-    let response = AxHttpResponse::bytes(status_code, content_type, body.to_vec())
-        .with_header("Cache-Control", "no-store");
+    let response = AxHttpResponse::bytes(status_code, content_type, body.to_vec()).with_no_store();
     write_ax_response(stream, &response)
 }
 
 fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Result<()> {
-    let status = http_status_text(response.status);
+    let status = response.status_line();
     let mut header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
         response.content_type,
         response.body.len()
     );
-    if !response.headers.contains_key("Cache-Control") {
+    if response.header_value("Cache-Control").is_none() {
         header.push_str("Cache-Control: no-store\r\n");
     }
     for (name, value) in &response.headers {
