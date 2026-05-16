@@ -19,6 +19,7 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
+use axonyx_runtime::server_prelude::{AxServerConfig, AxServerMode};
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
     preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
@@ -236,15 +237,19 @@ enum ServerMode {
 }
 
 impl ServerMode {
+    fn runtime_mode(self) -> AxServerMode {
+        match self {
+            Self::Dev => AxServerMode::Dev,
+            Self::Start => AxServerMode::Start,
+        }
+    }
+
     fn inject_dev_client(self) -> bool {
-        matches!(self, ServerMode::Dev)
+        self.runtime_mode().inject_dev_client()
     }
 
     fn label(self) -> &'static str {
-        match self {
-            ServerMode::Dev => "dev",
-            ServerMode::Start => "start",
-        }
+        self.runtime_mode().label()
     }
 }
 
@@ -2705,7 +2710,8 @@ fn run_http_server(args: DevArgs, mode: ServerMode) -> Result<()> {
     let root = app_root()?;
     let backend_status = compile_backend_from_app_root(&root)?;
 
-    let bind = format!("{}:{}", args.host, args.port);
+    let server_config = AxServerConfig::new(args.host, args.port, mode.runtime_mode());
+    let bind = server_config.bind_addr();
     let listener = TcpListener::bind(&bind)
         .with_context(|| format!("failed to bind Axonyx server at {bind}"))?;
     let preview_store = preview_store_from_content(&root)?;

@@ -17,6 +17,7 @@ This folder is the first structured documentation layer for the Axonyx framework
 ## Draft References
 
 - [Structured Async In Axonyx](./architecture/structured-async.md)
+- [Server Runtime](./architecture/server-runtime.md)
 - [Reactivity v1](./reactivity-v1.md)
 - [IR v1](./ir-v1.md)
 
