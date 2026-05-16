@@ -3900,6 +3900,12 @@ fn handle_connection(
         return Ok(());
     };
 
+    if mode == AxServerMode::Dev && request.method == "GET" && request.target == "/__axonyx/stream"
+    {
+        write_ax_response(&mut stream, &stream_probe_response())?;
+        return Ok(());
+    }
+
     if request.method == "GET" {
         if let Some(asset) = load_package_asset(&state.root, &request.target)? {
             write_response(&mut stream, "200 OK", asset.content_type, &asset.body)?;
@@ -4036,6 +4042,19 @@ fn execute_backend_route_request(
 
 fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
     AxHttpResponse::bytes(response.status, response.content_type, response.body).with_no_store()
+}
+
+fn stream_probe_response() -> AxHttpResponse {
+    AxHttpResponse::stream_chunks(
+        200,
+        "text/plain; charset=utf-8",
+        vec![
+            b"axonyx-stream:start\n".to_vec(),
+            b"axonyx-stream:chunk\n".to_vec(),
+            b"axonyx-stream:end\n".to_vec(),
+        ],
+    )
+    .with_no_store()
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
@@ -6417,6 +6436,43 @@ axonyx-runtime = "0.1.0"
         assert!(raw.contains("Transfer-Encoding: chunked\r\n"));
         assert!(!raw.contains("Content-Length:"));
         assert!(raw.ends_with("5\r\nHello\r\n7\r\n Axonyx\r\n0\r\n\r\n"));
+    }
+
+    #[test]
+    fn dev_stream_probe_route_uses_chunked_transfer() {
+        let root = make_temp_dir("stream-probe-route");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Dev).expect("request should handle");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(b"GET /__axonyx/stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(raw.contains("axonyx-stream:start\n"));
+        assert!(raw.contains("axonyx-stream:chunk\n"));
+        assert!(raw.contains("axonyx-stream:end\n"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
