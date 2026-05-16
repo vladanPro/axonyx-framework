@@ -5024,10 +5024,14 @@ fn write_response(
 fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Result<()> {
     let status = response.status_line();
     let mut header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        response.content_type,
-        response.body_len()
+        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nConnection: close\r\n",
+        response.content_type
     );
+    if response.body.is_streaming() {
+        header.push_str("Transfer-Encoding: chunked\r\n");
+    } else {
+        header.push_str(&format!("Content-Length: {}\r\n", response.body_len()));
+    }
     if response.header_value("Cache-Control").is_none() {
         header.push_str("Cache-Control: no-store\r\n");
     }
@@ -5042,12 +5046,32 @@ fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Resul
     stream
         .write_all(header.as_bytes())
         .context("failed to write response headers")?;
-    for chunk in response.body.chunks_iter() {
-        stream
-            .write_all(chunk)
-            .context("failed to write response body")?;
+    if response.body.is_streaming() {
+        write_chunked_body(stream, response)?;
+    } else {
+        for chunk in response.body.chunks_iter() {
+            stream
+                .write_all(chunk)
+                .context("failed to write response body")?;
+        }
     }
     stream.flush().context("failed to flush response")?;
+    Ok(())
+}
+
+fn write_chunked_body(stream: &mut TcpStream, response: &AxHttpResponse) -> Result<()> {
+    for chunk in response.body.chunks_iter() {
+        write!(stream, "{:X}\r\n", chunk.len()).context("failed to write chunk header")?;
+        stream
+            .write_all(chunk)
+            .context("failed to write response chunk")?;
+        stream
+            .write_all(b"\r\n")
+            .context("failed to finish response chunk")?;
+    }
+    stream
+        .write_all(b"0\r\n\r\n")
+        .context("failed to finish chunked response")?;
     Ok(())
 }
 
@@ -6364,6 +6388,35 @@ axonyx-runtime = "0.1.0"
             fields.get("excerpt").map(String::as_str),
             Some("Fast forms")
         );
+    }
+
+    #[test]
+    fn write_ax_response_uses_chunked_transfer_for_streaming_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+        let response = AxHttpResponse::stream_chunks(
+            200,
+            "text/plain; charset=utf-8",
+            vec![b"Hello".to_vec(), b" Axonyx".to_vec()],
+        );
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test client should connect");
+            write_ax_response(&mut stream, &response).expect("response should write");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(!raw.contains("Content-Length:"));
+        assert!(raw.ends_with("5\r\nHello\r\n7\r\n Axonyx\r\n0\r\n\r\n"));
     }
 
     #[test]
