@@ -320,6 +320,12 @@ struct RouteManifestItem {
     params: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct RoutesReport {
+    stream_pages: bool,
+    routes: Vec<RouteManifestItem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ContentManifest {
     collections: Vec<ContentCollectionManifest>,
@@ -946,16 +952,23 @@ fn doctor_summary(checks: &[DoctorCheck]) -> DoctorSummary {
 
 fn routes_command(args: RoutesArgs) -> Result<()> {
     let root = app_root()?;
-    let routes = collect_app_route_manifest(&root)?;
+    let report = routes_report(&root)?;
 
     match args.format {
-        CheckFormat::Text => print_routes_text(&routes),
+        CheckFormat::Text => print_routes_text(&report),
         CheckFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&routes)?);
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
     }
 
     Ok(())
+}
+
+fn routes_report(root: &Path) -> Result<RoutesReport> {
+    Ok(RoutesReport {
+        stream_pages: axonyx_config_bool(root, "server", "stream_pages").unwrap_or(false),
+        routes: collect_app_route_manifest(root)?,
+    })
 }
 
 fn content_command(args: ContentArgs) -> Result<()> {
@@ -3442,14 +3455,18 @@ fn display_relative_path(root: &Path, path: &Path) -> String {
     display_path(path.strip_prefix(root).unwrap_or(path))
 }
 
-fn print_routes_text(routes: &[RouteManifestItem]) {
-    if routes.is_empty() {
+fn print_routes_text(report: &RoutesReport) {
+    if report.routes.is_empty() {
         println!("No routes found in app/**/page.ax or routes/**/*.ax.");
         return;
     }
 
     println!("Routes:");
-    for route in routes {
+    println!(
+        "  server stream_pages={}",
+        if report.stream_pages { "true" } else { "false" }
+    );
+    for route in &report.routes {
         let mut details = vec![format!("kind={}", route.kind)];
         if let Some(method) = &route.method {
             details.push(format!("method={method}"));
@@ -5559,6 +5576,31 @@ route POST "/api/posts/:slug"
         assert_eq!(routes[1].method.as_deref(), Some("POST"));
         assert_eq!(routes[1].route, "/api/posts/:slug");
         assert_eq!(routes[1].params, vec!["slug"]);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn routes_report_includes_server_streaming_mode() {
+        let root = make_temp_dir("route-report-stream-mode");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nstream_pages = true\n",
+        )
+        .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("home page should write");
+
+        let report = routes_report(&root).expect("routes report should collect");
+
+        assert!(report.stream_pages);
+        assert_eq!(report.routes.len(), 1);
+        assert_eq!(report.routes[0].route, "/");
+
+        let json = serde_json::to_string(&report).expect("routes report should serialize");
+        assert!(json.contains("\"stream_pages\":true"));
+        assert!(json.contains("\"routes\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
