@@ -3915,6 +3915,14 @@ fn handle_connection(
         return Ok(());
     }
 
+    if mode == AxServerMode::Dev
+        && request.method == "GET"
+        && request.target == "/__axonyx/stream/html"
+    {
+        write_ax_response(&mut stream, &stream_html_probe_response())?;
+        return Ok(());
+    }
+
     if request.method == "GET" {
         if let Some(asset) = load_package_asset(&state.root, &request.target)? {
             write_response(&mut stream, "200 OK", asset.content_type, &asset.body)?;
@@ -4061,6 +4069,19 @@ fn stream_probe_response() -> AxHttpResponse {
             b"axonyx-stream:start\n".to_vec(),
             b"axonyx-stream:chunk\n".to_vec(),
             b"axonyx-stream:end\n".to_vec(),
+        ],
+    )
+    .with_no_store()
+}
+
+fn stream_html_probe_response() -> AxHttpResponse {
+    AxHttpResponse::stream_chunks(
+        200,
+        "text/html; charset=utf-8",
+        vec![
+            b"<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx Stream</title><style>body{margin:0;background:#0f1115;color:#f4efe6;font-family:Georgia,serif}.shell{min-height:100vh;display:grid;place-items:center;padding:48px}.card{max-width:720px;border:1px solid rgba(232,183,103,.35);background:linear-gradient(135deg,rgba(255,255,255,.08),rgba(255,255,255,.02));border-radius:28px;padding:32px;box-shadow:0 24px 80px rgba(0,0,0,.42)}.eyebrow{color:#e8b767;text-transform:uppercase;letter-spacing:.16em;font-size:12px}.chunk{margin-top:18px;color:#b9c0cc}</style></head><body><main class=\"shell\"><section class=\"card\"><p class=\"eyebrow\">Axonyx UI Streaming Probe</p><h1>Shell arrived first.</h1>".to_vec(),
+            b"<p class=\"chunk\">Then the streamed content chunk arrived through <code>Transfer-Encoding: chunked</code>.</p>".to_vec(),
+            b"<p class=\"chunk\">This is still a dev probe, but it proves the server can send HTML in pieces.</p></section></main></body></html>".to_vec(),
         ],
     )
     .with_no_store()
@@ -6493,6 +6514,43 @@ axonyx-runtime = "0.1.0"
         assert!(raw.contains("axonyx-stream:start\n"));
         assert!(raw.contains("axonyx-stream:chunk\n"));
         assert!(raw.contains("axonyx-stream:end\n"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn dev_stream_html_probe_route_uses_chunked_html() {
+        let root = make_temp_dir("stream-html-probe-route");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Dev).expect("request should handle");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(b"GET /__axonyx/stream/html HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.contains("Content-Type: text/html; charset=utf-8\r\n"));
+        assert!(raw.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(raw.contains("Shell arrived first."));
+        assert!(raw.contains("Then the streamed content chunk arrived"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
