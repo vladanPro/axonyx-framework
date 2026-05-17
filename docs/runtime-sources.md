@@ -13,7 +13,7 @@ cargo run -p create-axonyx -- my-app --yes
 This points the generated app at:
 
 ```toml
-axonyx-runtime = "0.1.6"
+axonyx-runtime = "0.1.7"
 ```
 
 ## 2. `path`

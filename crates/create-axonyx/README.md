@@ -38,7 +38,7 @@ https://github.com/vladanPro/axonyx-framework/wiki/Next.js-vs-Axonyx
 The default scaffold uses the published crates.io runtime:
 
 ```toml
-axonyx-runtime = "0.1.6"
+axonyx-runtime = "0.1.7"
 ```
 
 For framework development, use:
