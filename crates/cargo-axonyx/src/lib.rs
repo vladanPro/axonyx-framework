@@ -2030,9 +2030,68 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     for file in files {
         diagnostics.extend(check_ax_file_with_root(&file, Some(root))?);
     }
+    diagnostics.extend(check_axonyx_config(root)?);
     diagnostics.extend(check_route_manifest(root)?);
 
     Ok(diagnostics)
+}
+
+fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let path = root.join("Axonyx.toml");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read '{}'", path.display()))?;
+    let value = match source.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(vec![CheckDiagnostic {
+                file: display_path(&path),
+                line: 1,
+                column: 1,
+                severity: "error",
+                code: "axonyx-config",
+                message: format!("failed to parse Axonyx.toml: {error}"),
+            }]);
+        }
+    };
+    let Some(stream_pages) = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("stream_pages"))
+    else {
+        return Ok(Vec::new());
+    };
+
+    let valid = match stream_pages {
+        toml::Value::Boolean(_) => true,
+        toml::Value::String(value) => parse_boolish_strict(value).is_some(),
+        _ => false,
+    };
+
+    if valid {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![CheckDiagnostic {
+        file: display_path(&path),
+        line: line_for_config_key(&source, "stream_pages"),
+        column: 1,
+        severity: "error",
+        code: "axonyx-config-stream-pages",
+        message: "[server].stream_pages must be a boolean or one of true/false/1/0/yes/no/on/off."
+            .to_string(),
+    }])
+}
+
+fn line_for_config_key(source: &str, key: &str) -> usize {
+    source
+        .lines()
+        .position(|line| line.trim_start().starts_with(key))
+        .map(|index| index + 1)
+        .unwrap_or(1)
 }
 
 fn check_route_manifest(root: &Path) -> Result<Vec<CheckDiagnostic>> {
@@ -5081,7 +5140,7 @@ fn axonyx_config_string(root: &Path, table: &str, key: &str) -> Option<String> {
 fn axonyx_config_bool(root: &Path, table: &str, key: &str) -> Option<bool> {
     match axonyx_config_value(root, table, key)? {
         toml::Value::Boolean(value) => Some(value),
-        toml::Value::String(value) => Some(parse_boolish(&value)),
+        toml::Value::String(value) => parse_boolish_strict(&value),
         _ => None,
     }
 }
@@ -5226,10 +5285,15 @@ fn query_param_value<'a>(target: &'a str, needle: &str) -> Option<&'a str> {
 }
 
 fn parse_boolish(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    parse_boolish_strict(value).unwrap_or(false)
+}
+
+fn parse_boolish_strict(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn normalize_request_path(request_path: &str) -> Result<String> {
@@ -5628,6 +5692,30 @@ route POST "/api/posts/:slug"
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "axonyx-route-duplicate");
         assert!(diagnostics[0].message.contains("/posts/:"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_invalid_stream_pages_config() {
+        let root = make_temp_dir("invalid-stream-pages-config");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nstream_pages = \"maybe\"\n",
+        )
+        .expect("config should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-config-stream-pages"
+                && diagnostic.file.ends_with("Axonyx.toml")
+                && diagnostic.line == 5
+                && diagnostic.message.contains("stream_pages")
+        }));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
