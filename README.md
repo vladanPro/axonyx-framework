@@ -140,7 +140,7 @@ state count: Number = 0
 <input bind:value={count} />
 ```
 
-Axonyx lowers this into stable `data-ax-signal` / `data-ax-bind` metadata and injects the small state bridge only when a page uses signal bindings.
+Axonyx lowers this into stable `data-ax-signal` / `data-ax-bind` metadata and injects the small state bridge only when a page uses signal bindings. The browser bridge exposes `window.__axonyx.state` with `get`, `set`, `subscribe`, `applyPatch`, and `snapshot`.
 
 ## Common Commands
 

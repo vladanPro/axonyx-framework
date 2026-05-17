@@ -251,7 +251,19 @@ state count: Number = 0
 ```
 
 When a page contains `data-ax-signal`, `axonyx-runtime` injects a tiny state bridge script.
-The bridge syncs nodes that share the same signal and emits `axonyx:state-patch` events.
+The bridge syncs nodes that share the same signal and emits `axonyx:state-patch` events for client-originated changes.
+
+State bridge v1 exposes a stable browser API:
+
+```js
+window.__axonyx.state.get("root:theme:1");
+window.__axonyx.state.set("root:theme:1", "gold");
+window.__axonyx.state.subscribe("root:theme:1", (value) => console.log(value));
+window.__axonyx.state.applyPatch({ op: "set", signal: "root:theme:1", value: "bronze" });
+window.__axonyx.state.snapshot();
+```
+
+`applyPatch` updates bound DOM nodes and emits `axonyx:state-change` without re-emitting a client patch. The legacy `window.__axonyxStateBridge` alias remains available for compatibility.
 
 Supported v0 binding targets:
 
@@ -270,7 +282,7 @@ state tab: String = "docs"  // explicit
 
 The bridge emits `data-ax-state-type` so browser values can be cast back toward the declared state type.
 
-The next step is for The Melt to own a real signal graph, initial snapshot, and patch transport beyond local DOM sync.
+The next step is for The Melt to own a real signal graph, initial snapshot, and server patch transport beyond local DOM sync.
 
 ## Layout draft
 
