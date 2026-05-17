@@ -6833,6 +6833,52 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn page_route_config_streams_through_http_handler() {
+        let root = make_temp_dir("page-route-config-stream");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nstream_pages = true\n",
+        )
+        .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\n<Copy>Config streamed page route</Copy>\n",
+        )
+        .expect("page should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Dev).expect("request should handle");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.contains("Content-Type: text/html; charset=utf-8\r\n"));
+        assert!(raw.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(raw.contains("Config streamed page route"));
+        assert!(raw.contains("/__axonyx/version"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn executes_backend_route_request_from_routes_directory() {
         let root = make_temp_dir("api-route");
         fs::create_dir_all(root.join("routes").join("api")).expect("routes dir should exist");
