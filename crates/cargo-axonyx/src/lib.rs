@@ -7302,6 +7302,52 @@ action SetTheme
     }
 
     #[test]
+    fn render_route_html_injects_action_runtime_for_action_forms() {
+        let root = make_temp_dir("action-runtime-render");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetTheme
+  input:
+    theme: string
+
+  patch theme = input.theme
+  return ok
+"#,
+        )
+        .expect("actions should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+  form method: "post", action: action SetTheme
+    input name: "theme", value: "gold"
+    Button type: "submit" -> "Set theme"
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html = render_route_html(&state, &route).expect("route should render");
+
+        assert!(html.contains("/__axonyx/action?path=%2F&amp;name=SetTheme"));
+        assert!(html.contains("data-ax-runtime=\"actions\""));
+        assert!(html.contains("window.__axonyxActionRuntime"));
+        assert!(html.contains("application/ax-patch+json"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn render_route_response_wraps_page_html_in_http_response() {
         let root = make_temp_dir("route-response");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
