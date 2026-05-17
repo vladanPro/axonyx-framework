@@ -4092,25 +4092,31 @@ fn handle_connection(
             return Ok(());
         }
 
-        let html = format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx 404</title></head><body><h1>Route not found</h1><p>No <code>page.ax</code> matched <code>{}</code>.</p></body></html>",
-            html_escape(&request.target)
-        );
-        write_response(
-            &mut stream,
-            "404 Not Found",
-            "text/html; charset=utf-8",
-            html.as_bytes(),
+        let response = render_not_found_response(
+            state,
+            &request.target,
+            mode.inject_dev_client(),
+            should_stream_page_route(&state.root, &request.target),
         )?;
+        write_ax_response(&mut stream, &response)?;
         return Ok(());
     };
 
-    let response = render_route_response(
+    let response = match render_route_response(
         state,
         &route,
         mode.inject_dev_client(),
         should_stream_page_route(&state.root, &request.target),
-    )?;
+    ) {
+        Ok(response) => response,
+        Err(error) => render_error_response(
+            state,
+            &request.target,
+            &error,
+            mode.inject_dev_client(),
+            should_stream_page_route(&state.root, &request.target),
+        )?,
+    };
     write_ax_response(&mut stream, &response)?;
     Ok(())
 }
@@ -4564,6 +4570,34 @@ fn resolve_route(root: &Path, request_path: &str) -> Result<Option<ResolvedRoute
     }))
 }
 
+fn resolve_boundary_route(
+    root: &Path,
+    file_name: &str,
+    request_path: &str,
+) -> Option<ResolvedRoute> {
+    let app_root = root.join("app");
+    let page_path = app_root.join(file_name);
+    if !page_path.exists() {
+        return None;
+    }
+
+    let mut layout_paths = Vec::new();
+    let root_layout = app_root.join("layout.ax");
+    if root_layout.exists() {
+        layout_paths.push(root_layout);
+    }
+
+    Some(ResolvedRoute {
+        request_path: normalize_request_path(request_path).unwrap_or_else(|_| "/".to_string()),
+        request_target: request_path.to_string(),
+        page_path,
+        layout_paths,
+        loader_path: None,
+        actions_path: None,
+        params: std::collections::BTreeMap::new(),
+    })
+}
+
 fn resolve_app_route_dir(
     app_root: &Path,
     segments: &[String],
@@ -4719,19 +4753,82 @@ fn render_route_response(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
+    render_route_response_with_status(state, route, 200, inject_dev_client_script, stream_response)
+}
+
+fn render_route_response_with_status(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    status: u16,
+    inject_dev_client_script: bool,
+    stream_response: bool,
+) -> Result<AxHttpResponse> {
     let mut html = render_route_html(state, route)?;
     if inject_dev_client_script {
         html = inject_dev_client(&html, &route.request_path);
     }
     if stream_response {
         return Ok(AxHttpResponse::stream_chunks(
-            200,
+            status,
             "text/html; charset=utf-8",
             html_stream_chunks(&html),
         )
         .with_no_store());
     }
-    Ok(AxHttpResponse::html(200, html).with_no_store())
+    Ok(AxHttpResponse::html(status, html).with_no_store())
+}
+
+fn render_not_found_response(
+    state: &DevServerState,
+    request_target: &str,
+    inject_dev_client_script: bool,
+    stream_response: bool,
+) -> Result<AxHttpResponse> {
+    if let Some(route) = resolve_boundary_route(&state.root, "not-found.ax", request_target) {
+        return render_route_response_with_status(
+            state,
+            &route,
+            404,
+            inject_dev_client_script,
+            stream_response,
+        );
+    }
+
+    let html = format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx 404</title></head><body><h1>Route not found</h1><p>No <code>page.ax</code> matched <code>{}</code>.</p></body></html>",
+        html_escape(request_target)
+    );
+    Ok(AxHttpResponse::html(404, html).with_no_store())
+}
+
+fn render_error_response(
+    state: &DevServerState,
+    request_target: &str,
+    error: &anyhow::Error,
+    inject_dev_client_script: bool,
+    stream_response: bool,
+) -> Result<AxHttpResponse> {
+    if let Some(route) = resolve_boundary_route(&state.root, "error.ax", request_target) {
+        match render_route_response_with_status(
+            state,
+            &route,
+            500,
+            inject_dev_client_script,
+            stream_response,
+        ) {
+            Ok(response) => return Ok(response),
+            Err(boundary_error) => {
+                eprintln!("Axonyx error boundary failed: {boundary_error:#}");
+            }
+        }
+    }
+
+    let html = format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx 500</title></head><body><h1>Application error</h1><p>Axonyx could not render <code>{}</code>.</p><pre>{}</pre></body></html>",
+        html_escape(request_target),
+        html_escape(&error.to_string())
+    );
+    Ok(AxHttpResponse::html(500, html).with_no_store())
 }
 
 fn should_stream_page_route(root: &Path, target: &str) -> bool {
@@ -6785,6 +6882,102 @@ axonyx-runtime = "0.1.0"
         assert!(raw.contains("Transfer-Encoding: chunked\r\n"));
         assert!(raw.contains("Shell arrived first."));
         assert!(raw.contains("Then the streamed content chunk arrived"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn missing_page_route_renders_not_found_boundary() {
+        let root = make_temp_dir("not-found-boundary");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/layout.ax"),
+            "page RootLayout\n<Container><Copy>Shell</Copy><Slot /></Container>\n",
+        )
+        .expect("layout should write");
+        fs::write(
+            root.join("app/not-found.ax"),
+            "page NotFound\n<Copy>Custom Axonyx not found</Copy>\n",
+        )
+        .expect("not-found boundary should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Start).expect("request should handle");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(b"GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 404 Not Found"));
+        assert!(raw.contains("Shell"));
+        assert!(raw.contains("Custom Axonyx not found"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn render_error_renders_error_boundary() {
+        let root = make_temp_dir("error-boundary");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/layout.ax"),
+            "page RootLayout\n<Container><Copy>Shell</Copy><Slot /></Container>\n",
+        )
+        .expect("layout should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy></Card>\n")
+            .expect("broken page should write");
+        fs::write(
+            root.join("app/error.ax"),
+            "page Error\n<Copy>Custom Axonyx error</Copy>\n",
+        )
+        .expect("error boundary should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Start).expect("request should handle");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert!(raw.contains("Shell"));
+        assert!(raw.contains("Custom Axonyx error"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

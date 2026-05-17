@@ -650,6 +650,8 @@ mod tests {
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
         assert!(page.contains("@axonyx/ui/foundry/SectionCard.ax"));
+        assert!(target_dir.join("app/not-found.ax").exists());
+        assert!(target_dir.join("app/error.ax").exists());
 
         let axonyx_toml =
             fs::read_to_string(target_dir.join("Axonyx.toml")).expect("config should read");

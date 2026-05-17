@@ -20,6 +20,8 @@ const APP_DB_MOD_RS: &str = include_str!("../templates/minimal/src/db/mod.rs.tpl
 const APP_AXONYX_TOML: &str = include_str!("../templates/minimal/Axonyx.toml.tpl");
 const APP_LAYOUT_AX: &str = include_str!("../templates/minimal/app/layout.ax.tpl");
 const APP_PAGE_AX: &str = include_str!("../templates/minimal/app/page.ax.tpl");
+const APP_NOT_FOUND_AX: &str = include_str!("../templates/minimal/app/not-found.ax.tpl");
+const APP_ERROR_AX: &str = include_str!("../templates/minimal/app/error.ax.tpl");
 const APP_POSTS_PAGE_AX: &str = include_str!("../templates/minimal/app/posts/page.ax.tpl");
 const APP_POSTS_LOADER_AX: &str = include_str!("../templates/minimal/app/posts/loader.ax.tpl");
 const APP_POSTS_ACTIONS_AX: &str = include_str!("../templates/minimal/app/posts/actions.ax.tpl");
@@ -32,6 +34,8 @@ const APP_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/minimal/public/f
 
 const SITE_APP_LAYOUT_AX: &str = include_str!("../templates/site/app/layout.ax.tpl");
 const SITE_APP_PAGE_AX: &str = include_str!("../templates/site/app/page.ax.tpl");
+const SITE_APP_NOT_FOUND_AX: &str = include_str!("../templates/site/app/not-found.ax.tpl");
+const SITE_APP_ERROR_AX: &str = include_str!("../templates/site/app/error.ax.tpl");
 const SITE_APP_POSTS_PAGE_AX: &str = include_str!("../templates/site/app/posts/page.ax.tpl");
 const SITE_APP_POSTS_LOADER_AX: &str = include_str!("../templates/site/app/posts/loader.ax.tpl");
 const SITE_APP_POSTS_ACTIONS_AX: &str = include_str!("../templates/site/app/posts/actions.ax.tpl");
@@ -44,6 +48,8 @@ const SITE_PUBLIC_BRAND_MARK_SVG: &str =
 
 const DOCS_APP_LAYOUT_AX: &str = include_str!("../templates/docs/app/layout.ax.tpl");
 const DOCS_APP_PAGE_AX: &str = include_str!("../templates/docs/app/page.ax.tpl");
+const DOCS_APP_NOT_FOUND_AX: &str = include_str!("../templates/docs/app/not-found.ax.tpl");
+const DOCS_APP_ERROR_AX: &str = include_str!("../templates/docs/app/error.ax.tpl");
 const DOCS_APP_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/getting-started/page.ax.tpl");
 const DOCS_APP_REFERENCE_AX: &str = include_str!("../templates/docs/app/reference/page.ax.tpl");
@@ -121,6 +127,14 @@ pub fn template_files(
                     contents: apply_vars(APP_PAGE_AX, &vars),
                 },
                 TemplateFile {
+                    relative_path: "app/not-found.ax",
+                    contents: apply_vars(APP_NOT_FOUND_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/error.ax",
+                    contents: apply_vars(APP_ERROR_AX, &vars),
+                },
+                TemplateFile {
                     relative_path: "app/posts/page.ax",
                     contents: apply_vars(APP_POSTS_PAGE_AX, &vars),
                 },
@@ -159,6 +173,14 @@ pub fn template_files(
                 TemplateFile {
                     relative_path: "app/page.ax",
                     contents: apply_vars(SITE_APP_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/not-found.ax",
+                    contents: apply_vars(SITE_APP_NOT_FOUND_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/error.ax",
+                    contents: apply_vars(SITE_APP_ERROR_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "app/posts/page.ax",
@@ -203,6 +225,14 @@ pub fn template_files(
                 TemplateFile {
                     relative_path: "app/page.ax",
                     contents: apply_vars(DOCS_APP_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/not-found.ax",
+                    contents: apply_vars(DOCS_APP_NOT_FOUND_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/error.ax",
+                    contents: apply_vars(DOCS_APP_ERROR_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "app/getting-started/page.ax",

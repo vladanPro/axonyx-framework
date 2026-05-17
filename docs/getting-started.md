@@ -189,6 +189,16 @@ Generated apps currently include:
 - `src/generated/` for generated backend Rust output
 - `src/db/` and `src/domain/` as early integration seams
 
+## Route Boundaries
+
+Generated apps include optional framework-native boundary pages:
+
+- `app/not-found.ax` renders with status `404` when no `app/**/page.ax` route matches.
+- `app/error.ax` renders with status `500` when a matched route fails during rendering.
+
+Both files are normal `.ax` pages and are wrapped by `app/layout.ax`, so the site
+keeps the same shell even when a route is missing or a render error happens.
+
 ## Next Step To Close Core
 
 After the first run loop works, use the proof checklist to verify the full framework story:
