@@ -7065,7 +7065,7 @@ action SetTheme
   input:
     theme: string
 
-  patch "root:theme:1" = input.theme
+  patch theme = input.theme
   return ok
 "#,
         )

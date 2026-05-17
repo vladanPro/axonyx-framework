@@ -62,7 +62,7 @@ action SetTheme
   input:
     theme: string
 
-  patch "root:theme:1" = input.theme
+  patch theme = input.theme
   return ok
 ```
 
@@ -80,9 +80,10 @@ When a form/action request sends `Accept: application/ax-patch+json` or
 ```
 
 The browser can pass each patch to `window.__axonyx.state.applyPatch(...)`.
-The string signal id is intentionally explicit in this first contract; future
-compiler work can lower friendlier syntax such as `patch theme = input.theme`
-into the same patch protocol.
+For the current V1 contract, a simple identifier such as `theme` lowers to
+`root:theme:1`. Explicit signal strings such as `patch "root:theme:2" = value`
+remain available as an escape hatch until The Melt owns a full cross-file signal
+binding table.
 
 ## Env Convention
 
