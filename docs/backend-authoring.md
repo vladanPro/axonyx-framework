@@ -85,6 +85,12 @@ For the current V1 contract, a simple identifier such as `theme` lowers to
 remain available as an escape hatch until The Melt owns a full cross-file signal
 binding table.
 
+When a rendered page contains a form whose `action` points at
+`/__axonyx/action`, Axonyx injects a small action runtime. It submits the form as
+`application/ax-patch+json`, adds `__ax_patch=1`, applies returned patches through
+`window.__axonyx.state.applyPatch(...)`, and falls back to redirect navigation
+when no patches are returned.
+
 ## Env Convention
 
 Examples:
