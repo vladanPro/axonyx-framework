@@ -149,7 +149,7 @@ action submitComment
 -> async Rust function
 -> form/body parser
 -> action lifecycle result
--> redirect, error, or patch
+-> redirect, error, or application/ax-patch+json patch response
 ```
 
 ### Signal
@@ -257,4 +257,3 @@ If a feature requires the user to think about race conditions, loading flags, ca
 The runtime may be async.
 
 The Axonyx authoring model should feel stable.
-

@@ -32,6 +32,7 @@ loader PostsList
 - `insert`
 - `update`
 - `delete`
+- `patch`
 - `revalidate`
 - `return`
 - `send`
@@ -51,6 +52,37 @@ That separation is important:
 - `.ax` authoring owns developer ergonomics
 - lowering owns execution shape
 - runtime owns environment and transport behavior
+
+## Action Patch Protocol
+
+Actions can now emit state patches for progressive interactivity:
+
+```ax
+action SetTheme
+  input:
+    theme: string
+
+  patch "root:theme:1" = input.theme
+  return ok
+```
+
+When a form/action request sends `Accept: application/ax-patch+json` or
+`__ax_patch=1`, the dev server returns:
+
+```json
+{
+  "ok": true,
+  "redirect": "/",
+  "patches": [
+    { "op": "set", "signal": "root:theme:1", "value": "gold", "source": "action" }
+  ]
+}
+```
+
+The browser can pass each patch to `window.__axonyx.state.applyPatch(...)`.
+The string signal id is intentionally explicit in this first contract; future
+compiler work can lower friendlier syntax such as `patch theme = input.theme`
+into the same patch protocol.
 
 ## Env Convention
 

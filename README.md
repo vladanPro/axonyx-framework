@@ -13,6 +13,7 @@ Axonyx can already scaffold apps, render `.ax` pages, build static output, serve
 - dynamic route params and query context
 - route boundaries through `app/not-found.ax` and `app/error.ax`
 - route-local `loader.ax` and `actions.ax` draft support
+- first action patch response contract through `application/ax-patch+json`
 - backend-oriented `.ax` files for loaders, actions, routes, and jobs
 - static builds through `cargo ax build`
 - route-aware dev/start server through `cargo ax run dev` and `cargo ax run start`

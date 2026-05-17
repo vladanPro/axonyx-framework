@@ -24,7 +24,8 @@ use axonyx_runtime::server_prelude::{
 };
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
-    preview_ax_route_with_request_context_and_imports, AxPreviewHttpResponse, AxPreviewStore,
+    preview_ax_route_with_request_context_and_imports, AxPreviewActionResult,
+    AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -4332,9 +4333,76 @@ fn handle_action_request(
         )
     })?;
 
+    if wants_action_patch_response(request, &input_fields) {
+        write_ax_response(stream, &action_patch_response(&route, &result)?)?;
+        return Ok(());
+    }
+
     let redirect_to = result.redirect_to.unwrap_or(route.request_path);
     write_redirect_response(stream, "303 See Other", &redirect_to)?;
     Ok(())
+}
+
+fn wants_action_patch_response(
+    request: &AxHttpRequest,
+    input_fields: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    input_fields
+        .get("__ax_patch")
+        .is_some_and(|value| parse_boolish(value))
+        || request
+            .headers
+            .get("accept")
+            .is_some_and(|value| value.contains("application/ax-patch+json"))
+}
+
+fn action_patch_response(
+    route: &ResolvedRoute,
+    result: &AxPreviewActionResult,
+) -> Result<AxHttpResponse> {
+    let redirect_to = result
+        .redirect_to
+        .clone()
+        .unwrap_or_else(|| route.request_path.clone());
+    let body = serde_json::to_vec(&serde_json::json!({
+        "ok": true,
+        "redirect": redirect_to,
+        "value": ax_value_to_json(&result.value),
+        "patches": result.patches.iter().map(state_patch_to_json).collect::<Vec<_>>(),
+    }))
+    .context("failed to serialize action patch response")?;
+
+    Ok(
+        AxHttpResponse::bytes(200, "application/ax-patch+json; charset=utf-8", body)
+            .with_no_store(),
+    )
+}
+
+fn state_patch_to_json(patch: &AxPreviewStatePatch) -> serde_json::Value {
+    serde_json::json!({
+        "op": patch.op,
+        "signal": patch.signal,
+        "value": ax_value_to_json(&patch.value),
+        "source": patch.source,
+    })
+}
+
+fn ax_value_to_json(value: &AxValue) -> serde_json::Value {
+    match value {
+        AxValue::Null => serde_json::Value::Null,
+        AxValue::String(value) => serde_json::Value::String(value.clone()),
+        AxValue::Number(value) => serde_json::Value::Number((*value).into()),
+        AxValue::Bool(value) => serde_json::Value::Bool(*value),
+        AxValue::Record(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), ax_value_to_json(value)))
+                .collect(),
+        ),
+        AxValue::List(items) => {
+            serde_json::Value::Array(items.iter().map(ax_value_to_json).collect())
+        }
+    }
 }
 
 fn parse_form_body(body: &[u8]) -> std::collections::BTreeMap<String, String> {
@@ -6978,6 +7046,66 @@ axonyx-runtime = "0.1.0"
         assert!(raw.starts_with("HTTP/1.1 500 Internal Server Error"));
         assert!(raw.contains("Shell"));
         assert!(raw.contains("Custom Axonyx error"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn action_request_can_return_state_patch_response() {
+        let root = make_temp_dir("action-patch-response");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetTheme
+  input:
+    theme: string
+
+  patch "root:theme:1" = input.theme
+  return ok
+"#,
+        )
+        .expect("actions should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Dev).expect("request should handle");
+        });
+
+        let body = "__ax_patch=1&theme=gold";
+        let request = format!(
+            "POST /__axonyx/action?path=%2F&name=SetTheme HTTP/1.1\r\nHost: localhost\r\nAccept: application/ax-patch+json\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(request.as_bytes())
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 200 OK"));
+        assert!(raw.contains("Content-Type: application/ax-patch+json; charset=utf-8"));
+        assert!(raw.contains("\"redirect\":\"/\""));
+        assert!(raw.contains("\"signal\":\"root:theme:1\""));
+        assert!(raw.contains("\"value\":\"gold\""));
+        assert!(raw.contains("\"source\":\"action\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
