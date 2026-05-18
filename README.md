@@ -161,6 +161,9 @@ page state filter: String = ""
 
 Use `app state` for app-wide concerns like language or theme, `layout state` for
 shared route shell state, and `page state` for local route state.
+Action patch responses resolve short authoring names like `patch theme = ...`
+through the route manifest before sending browser patches, so the client receives
+the stable scoped signal key.
 
 ## Common Commands
 

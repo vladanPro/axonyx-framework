@@ -4660,7 +4660,8 @@ fn action_patch_response(
     route: &ResolvedRoute,
     result: &AxPreviewActionResult,
 ) -> Result<AxHttpResponse> {
-    validate_action_patches(route, &result.patches)?;
+    let patches = normalize_action_patches(route, &result.patches)?;
+    validate_action_patches(route, &patches)?;
 
     let redirect_to = result
         .redirect_to
@@ -4670,7 +4671,7 @@ fn action_patch_response(
         "ok": true,
         "redirect": redirect_to,
         "value": ax_value_to_json(&result.value),
-        "patches": result.patches.iter().map(state_patch_to_json).collect::<Vec<_>>(),
+        "patches": patches.iter().map(state_patch_to_json).collect::<Vec<_>>(),
     }))
     .context("failed to serialize action patch response")?;
 
@@ -4678,6 +4679,27 @@ fn action_patch_response(
         AxHttpResponse::bytes(200, "application/ax-patch+json; charset=utf-8", body)
             .with_no_store(),
     )
+}
+
+fn normalize_action_patches(
+    route: &ResolvedRoute,
+    patches: &[AxPreviewStatePatch],
+) -> Result<Vec<AxPreviewStatePatch>> {
+    if patches.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let manifest = collect_route_state_manifest(route)?;
+    Ok(patches
+        .iter()
+        .map(|patch| {
+            let mut patch = patch.clone();
+            if let Some(signal) = manifest.resolve_signal_key(&patch.signal) {
+                patch.signal = signal;
+            }
+            patch
+        })
+        .collect())
 }
 
 fn validate_action_patches(route: &ResolvedRoute, patches: &[AxPreviewStatePatch]) -> Result<()> {
@@ -4691,7 +4713,7 @@ fn validate_action_patches(route: &ResolvedRoute, patches: &[AxPreviewStatePatch
     }
 
     for patch in patches {
-        let Some(expected_ty) = manifest.get(&patch.signal) else {
+        let Some(expected_ty) = manifest.signal_types.get(&patch.signal) else {
             continue;
         };
         if state_patch_value_matches_type(&patch.value, expected_ty) {
@@ -4709,10 +4731,8 @@ fn validate_action_patches(route: &ResolvedRoute, patches: &[AxPreviewStatePatch
     Ok(())
 }
 
-fn collect_route_state_manifest(
-    route: &ResolvedRoute,
-) -> Result<std::collections::BTreeMap<String, String>> {
-    let mut signals = std::collections::BTreeMap::new();
+fn collect_route_state_manifest(route: &ResolvedRoute) -> Result<RouteStateManifest> {
+    let mut signals = RouteStateManifest::default();
 
     for path in route
         .layout_paths
@@ -4749,12 +4769,35 @@ fn collect_route_state_manifest(
 
         for signal in manifest.signals {
             let legacy_key = format!("root:{}:{}", signal.name, signal.id.index);
-            signals.insert(signal.key, signal.ty.clone());
-            signals.insert(legacy_key, signal.ty);
+            signals.insert(signal.name, signal.key, legacy_key, signal.ty);
         }
     }
 
     Ok(signals)
+}
+
+#[derive(Debug, Default)]
+struct RouteStateManifest {
+    signal_types: std::collections::BTreeMap<String, String>,
+    aliases: std::collections::BTreeMap<String, String>,
+}
+
+impl RouteStateManifest {
+    fn insert(&mut self, name: String, key: String, legacy_key: String, ty: String) {
+        self.signal_types.insert(key.clone(), ty.clone());
+        self.signal_types.insert(legacy_key.clone(), ty);
+        self.aliases.entry(name).or_insert_with(|| key.clone());
+        self.aliases.insert(legacy_key, key.clone());
+        self.aliases.insert(key.clone(), key);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.signal_types.is_empty()
+    }
+
+    fn resolve_signal_key(&self, signal: &str) -> Option<String> {
+        self.aliases.get(signal).cloned()
+    }
 }
 
 fn state_patch_value_matches_type(value: &AxValue, expected_ty: &str) -> bool {
@@ -7632,8 +7675,11 @@ axonyx-runtime = "0.1.0"
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
-        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
-            .expect("page should write");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\npage state theme: String = \"silver\"\n<Copy>Home</Copy>\n",
+        )
+        .expect("page should write");
         fs::write(
             root.join("app/actions.ax"),
             r#"
@@ -7646,6 +7692,14 @@ action SetTheme
 "#,
         )
         .expect("actions should write");
+        let route = resolve_route(&root, "/")
+            .expect("route should resolve")
+            .expect("route should exist");
+        let manifest = collect_route_state_manifest(&route).expect("state manifest should collect");
+        assert_eq!(
+            manifest.resolve_signal_key("root:theme:1").as_deref(),
+            Some("page:root:theme:1")
+        );
         let state = DevServerState {
             root: root.clone(),
             preview_store: Mutex::new(AxPreviewStore::default()),
@@ -7679,7 +7733,10 @@ action SetTheme
         assert!(raw.starts_with("HTTP/1.1 200 OK"));
         assert!(raw.contains("Content-Type: application/ax-patch+json; charset=utf-8"));
         assert!(raw.contains("\"redirect\":\"/\""));
-        assert!(raw.contains("\"signal\":\"root:theme:1\""));
+        assert!(
+            raw.contains("\"signal\":\"page:root:theme:1\""),
+            "raw response was: {raw}"
+        );
         assert!(raw.contains("\"value\":\"gold\""));
         assert!(raw.contains("\"source\":\"action\""));
 
@@ -7697,7 +7754,7 @@ action SetTheme
             r#"
 page Home
 
-state count: Number = 0
+page state count: Number = 0
 
 <input bind:value={count} />
 "#,
@@ -7720,7 +7777,7 @@ state count: Number = 0
 
         assert!(error
             .to_string()
-            .contains("state patch for 'root:count:1' expected Number but got String"));
+            .contains("state patch for 'page:root:count:1' expected Number but got String"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
