@@ -616,6 +616,7 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
         checks.extend(doctor_ui_checks(root, cargo_source.as_deref()));
     }
 
+    checks.push(doctor_state_manifest_check(root));
     checks.push(doctor_ax_sources_check(root));
 
     checks
@@ -632,6 +633,37 @@ fn doctor_server_streaming_check(root: &Path) -> DoctorCheck {
             "Page route streaming is disabled; use ?__ax_stream=1 or [server].stream_pages = true to test it.".to_string()
         },
         hint: None,
+    }
+}
+
+fn doctor_state_manifest_check(root: &Path) -> DoctorCheck {
+    match collect_state_report(root) {
+        Ok(report) => {
+            let signal_count = report
+                .files
+                .iter()
+                .map(|file| file.signals.len())
+                .sum::<usize>();
+            DoctorCheck {
+                code: "state-manifest",
+                severity: DoctorSeverity::Ok,
+                message: if signal_count == 0 {
+                    "No app state declarations found.".to_string()
+                } else {
+                    format!(
+                        "State manifest builds successfully for {signal_count} signal{}.",
+                        if signal_count == 1 { "" } else { "s" }
+                    )
+                },
+                hint: None,
+            }
+        }
+        Err(error) => DoctorCheck {
+            code: "state-manifest",
+            severity: DoctorSeverity::Error,
+            message: format!("State manifest failed: {error}"),
+            hint: Some("Run `cargo ax state` to inspect state declarations and manifest output."),
+        },
     }
 }
 
@@ -6745,6 +6777,66 @@ axonyx-runtime = "0.1.7"
 
         assert_eq!(streaming.severity, DoctorSeverity::Ok);
         assert!(streaming.message.contains("enabled"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_reports_state_manifest_status() {
+        let root = make_temp_dir("doctor-state-manifest");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+state theme = "silver"
+
+<input bind:value={theme} />
+"#,
+        )
+        .expect("page should write");
+
+        let checks = doctor_checks(&root);
+        let state = checks
+            .iter()
+            .find(|check| check.code == "state-manifest")
+            .expect("state manifest check should exist");
+
+        assert_eq!(state.severity, DoctorSeverity::Ok);
+        assert!(state.message.contains("1 signal"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_reports_state_manifest_errors() {
+        let root = make_temp_dir("doctor-state-manifest-error");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+state theme = Runtime.Env.public.THEME
+
+<Copy>{theme}</Copy>
+"#,
+        )
+        .expect("page should write");
+
+        let checks = doctor_checks(&root);
+        let state = checks
+            .iter()
+            .find(|check| check.code == "state-manifest")
+            .expect("state manifest check should exist");
+
+        assert_eq!(state.severity, DoctorSeverity::Error);
+        assert!(state.message.contains("State manifest failed"));
+        assert_eq!(
+            state.hint,
+            Some("Run `cargo ax state` to inspect state declarations and manifest output.")
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
