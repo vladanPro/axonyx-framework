@@ -151,6 +151,17 @@ route-aware scopes such as `app:language:1`, `layout:docs:sidebarOpen:1`, and
 `page:settings:filter:1`, while the runtime still keeps legacy `root:*` signal
 keys compatible during the transition.
 
+State declarations can be authored with explicit ownership:
+
+```ax
+app state language: String = "sr"
+layout state sidebarOpen: Bool = false
+page state filter: String = ""
+```
+
+Use `app state` for app-wide concerns like language or theme, `layout state` for
+shared route shell state, and `page state` for local route state.
+
 ## Common Commands
 
 From an app root:

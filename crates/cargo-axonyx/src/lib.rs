@@ -19,7 +19,7 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
-use axonyx_core::state_prelude::{build_state_manifest_with_scope, AxStateValue};
+use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
 use axonyx_runtime::server_prelude::{
     AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
 };
@@ -3656,26 +3656,34 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
             )
         })?;
         let scope = state_scope_for_path(root, &path);
-        let manifest = build_state_manifest_with_scope(&file, &scope)
+        let manifest =
+            build_state_manifest_with_scope_mapper(&file, &scope, |state, default_scope| {
+                scoped_state_decl_scope(root, &path, state.scope.as_deref())
+                    .unwrap_or_else(|| default_scope.to_string())
+            })
             .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
         if manifest.is_empty() {
             continue;
         }
 
+        let signals = manifest
+            .signals
+            .into_iter()
+            .zip(file.states.iter())
+            .map(|(signal, state)| StateReportSignal {
+                name: signal.name,
+                key: signal.key,
+                scope: signal.scope,
+                owner: scoped_state_decl_owner(root, &path, state.scope.as_deref())
+                    .unwrap_or_else(|| state_owner_for_path(root, &path)),
+                ty: signal.ty,
+                initial: signal.initial,
+            })
+            .collect();
+
         files.push(StateReportFile {
             file: display_relative_path(root, &path),
-            signals: manifest
-                .signals
-                .into_iter()
-                .map(|signal| StateReportSignal {
-                    name: signal.name,
-                    key: signal.key,
-                    scope: signal.scope,
-                    owner: state_owner_for_path(root, &path),
-                    ty: signal.ty,
-                    initial: signal.initial,
-                })
-                .collect(),
+            signals,
         });
     }
 
@@ -3683,10 +3691,12 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
 }
 
 fn source_has_state_declaration(source: &str) -> bool {
-    source
-        .lines()
-        .map(str::trim_start)
-        .any(|line| line.starts_with("state "))
+    source.lines().map(str::trim_start).any(|line| {
+        line.starts_with("state ")
+            || line.starts_with("app state ")
+            || line.starts_with("layout state ")
+            || line.starts_with("page state ")
+    })
 }
 
 fn state_scope_for_path(root: &Path, path: &Path) -> String {
@@ -3731,6 +3741,37 @@ fn state_owner_for_path(root: &Path, path: &Path) -> String {
         "layout.ax" => format!("layout:{route}"),
         "page.ax" => format!("page:{route}"),
         other => format!("file:{other}"),
+    }
+}
+
+fn scoped_state_decl_scope(root: &Path, path: &Path, scope: Option<&str>) -> Option<String> {
+    let scope = scope?;
+    let app_root = root.join("app");
+    let relative = path.strip_prefix(&app_root).unwrap_or(path);
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let route = route_pattern_for_app_relative_dir(parent);
+    let route_scope = scope_route_fragment(&route);
+
+    match scope {
+        "app" => Some("app".to_string()),
+        "layout" => Some(format!("layout:{route_scope}")),
+        "page" => Some(format!("page:{route_scope}")),
+        _ => None,
+    }
+}
+
+fn scoped_state_decl_owner(root: &Path, path: &Path, scope: Option<&str>) -> Option<String> {
+    let scope = scope?;
+    let app_root = root.join("app");
+    let relative = path.strip_prefix(&app_root).unwrap_or(path);
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let route = route_pattern_for_app_relative_dir(parent);
+
+    match scope {
+        "app" => Some("app".to_string()),
+        "layout" => Some(format!("layout:{route}")),
+        "page" => Some(format!("page:{route}")),
+        _ => None,
     }
 }
 
@@ -4699,7 +4740,11 @@ fn collect_route_state_manifest(
         });
         let root = app_root.parent().unwrap_or_else(|| Path::new(""));
         let scope = state_scope_for_path(root, path);
-        let manifest = build_state_manifest_with_scope(&file, &scope)
+        let manifest =
+            build_state_manifest_with_scope_mapper(&file, &scope, |state, default_scope| {
+                scoped_state_decl_scope(root, path, state.scope.as_deref())
+                    .unwrap_or_else(|| default_scope.to_string())
+            })
             .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
 
         for signal in manifest.signals {
@@ -6198,7 +6243,7 @@ route POST "/api/posts/:slug"
             r#"
 page RootLayout
 
-state language: String = "sr"
+app state language: String = "sr"
 
 <Slot />
 "#,
@@ -6209,8 +6254,8 @@ state language: String = "sr"
             r#"
 page Home
 
-state theme: String = "silver"
-state count: Number = 0
+page state theme: String = "silver"
+page state count: Number = 0
 
 <input bind:value={theme} />
 "#,
@@ -6221,7 +6266,7 @@ state count: Number = 0
             r#"
 page SettingsLayout
 
-state sidebarOpen: Bool = false
+layout state sidebarOpen: Bool = false
 
 <Slot />
 "#,
@@ -6232,7 +6277,7 @@ state sidebarOpen: Bool = false
             r#"
 page Settings
 
-state enabled = signal(true)
+page state enabled = signal(true)
 
 <input bind:checked={enabled} />
 "#,
