@@ -91,6 +91,10 @@ When a rendered page contains a form whose `action` points at
 `window.__axonyx.state.applyPatch(...)`, and falls back to redirect navigation
 when no patches are returned.
 
+Patch responses are validated against the route's current state manifest when
+the signal is known. For example, a patch targeting `state count: Number = 0`
+must return a numeric patch value instead of a string.
+
 ## Env Convention
 
 Examples:

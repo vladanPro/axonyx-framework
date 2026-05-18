@@ -4533,6 +4533,8 @@ fn action_patch_response(
     route: &ResolvedRoute,
     result: &AxPreviewActionResult,
 ) -> Result<AxHttpResponse> {
+    validate_action_patches(route, &result.patches)?;
+
     let redirect_to = result
         .redirect_to
         .clone()
@@ -4549,6 +4551,89 @@ fn action_patch_response(
         AxHttpResponse::bytes(200, "application/ax-patch+json; charset=utf-8", body)
             .with_no_store(),
     )
+}
+
+fn validate_action_patches(route: &ResolvedRoute, patches: &[AxPreviewStatePatch]) -> Result<()> {
+    if patches.is_empty() {
+        return Ok(());
+    }
+
+    let manifest = collect_route_state_manifest(route)?;
+    if manifest.is_empty() {
+        return Ok(());
+    }
+
+    for patch in patches {
+        let Some(expected_ty) = manifest.get(&patch.signal) else {
+            continue;
+        };
+        if state_patch_value_matches_type(&patch.value, expected_ty) {
+            continue;
+        }
+
+        bail!(
+            "state patch for '{}' expected {} but got {}",
+            patch.signal,
+            expected_ty,
+            ax_value_type_name(&patch.value)
+        );
+    }
+
+    Ok(())
+}
+
+fn collect_route_state_manifest(
+    route: &ResolvedRoute,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut signals = std::collections::BTreeMap::new();
+
+    for path in route
+        .layout_paths
+        .iter()
+        .chain(std::iter::once(&route.page_path))
+    {
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("failed to read '{}'", path.display()))?;
+        if !source_has_state_declaration(&source) {
+            continue;
+        }
+
+        let file = parse_ax_v2(&source).with_context(|| {
+            format!(
+                "failed to parse state declarations from '{}'",
+                path.display()
+            )
+        })?;
+        let manifest = build_state_manifest(&file)
+            .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
+
+        for signal in manifest.signals {
+            signals.insert(signal.key, signal.ty);
+        }
+    }
+
+    Ok(signals)
+}
+
+fn state_patch_value_matches_type(value: &AxValue, expected_ty: &str) -> bool {
+    match expected_ty {
+        "String" => matches!(value, AxValue::String(_)),
+        "Number" => matches!(value, AxValue::Number(_)),
+        "Bool" => matches!(value, AxValue::Bool(_)),
+        "Unknown" => true,
+        _ => true,
+    }
+}
+
+fn ax_value_type_name(value: &AxValue) -> &'static str {
+    match value {
+        AxValue::Null => "Null",
+        AxValue::String(_) => "String",
+        AxValue::Number(_) => "Number",
+        AxValue::Bool(_) => "Bool",
+        AxValue::Record(_) => "Record",
+        AxValue::List(_) => "List",
+    }
 }
 
 fn state_patch_to_json(patch: &AxPreviewStatePatch) -> serde_json::Value {
@@ -7413,6 +7498,45 @@ action SetTheme
         assert!(raw.contains("\"signal\":\"root:theme:1\""));
         assert!(raw.contains("\"value\":\"gold\""));
         assert!(raw.contains("\"source\":\"action\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn action_patch_response_rejects_known_state_type_mismatch() {
+        let root = make_temp_dir("action-patch-type-mismatch");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+state count: Number = 0
+
+<input bind:value={count} />
+"#,
+        )
+        .expect("page should write");
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let result = AxPreviewActionResult {
+            redirect_to: None,
+            value: AxValue::Null,
+            patches: vec![AxPreviewStatePatch::set(
+                "root:count:1",
+                AxValue::String("not-a-number".to_string()),
+            )],
+        };
+
+        let error =
+            action_patch_response(&route, &result).expect_err("mismatched state patch should fail");
+
+        assert!(error
+            .to_string()
+            .contains("state patch for 'root:count:1' expected Number but got String"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
