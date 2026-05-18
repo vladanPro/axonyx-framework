@@ -317,6 +317,10 @@ Add the Foundry UI package when needed:
 cargo ax add ui
 ```
 
+`cargo ax add cms` and `cargo ax add blockbit` are reserved for the future
+Blockbit CMS module. CMS stays outside framework core; Axonyx core provides the
+runtime primitives that Blockbit will build on.
+
 Today, `cargo ax add ui` and the `site` / `docs` templates use the published `axonyx-ui` Cargo package by default.
 
 ## Runtime Source Options

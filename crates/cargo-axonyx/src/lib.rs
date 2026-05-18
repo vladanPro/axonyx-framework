@@ -189,6 +189,8 @@ enum SchemaFormat {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModuleKind {
+    Blockbit,
+    Cms,
     Docs,
     Ui,
 }
@@ -2869,9 +2871,17 @@ fn add_module(module: ModuleKind) -> Result<()> {
             add_ui_module(&root, &axonyx_toml)?;
             println!("Added ui module.");
         }
+        ModuleKind::Cms | ModuleKind::Blockbit => add_reserved_cms_module()?,
     }
 
     Ok(())
+}
+
+fn add_reserved_cms_module() -> Result<()> {
+    bail!(
+        "Blockbit CMS is a future Axonyx module, not part of framework core yet. \
+         For now, build with Axonyx primitives: routes, loaders, actions, state patches, content collections, and UI."
+    )
 }
 
 fn run_dev_server(args: DevArgs) -> Result<()> {
@@ -6641,6 +6651,27 @@ page Home
         };
         assert_eq!(args.host, "0.0.0.0");
         assert_eq!(args.port, 4100);
+    }
+
+    #[test]
+    fn parses_reserved_cms_add_modules() {
+        let cms = Cli::try_parse_from(["cargo-ax", "add", "cms"])
+            .expect("cms module command should parse");
+        let Commands::Add(args) = cms.command else {
+            panic!("expected add command");
+        };
+        assert_eq!(args.module, ModuleKind::Cms);
+
+        let blockbit = Cli::try_parse_from(["cargo-ax", "add", "blockbit"])
+            .expect("blockbit module command should parse");
+        let Commands::Add(args) = blockbit.command else {
+            panic!("expected add command");
+        };
+        assert_eq!(args.module, ModuleKind::Blockbit);
+
+        let error = add_reserved_cms_module().expect_err("cms module should not install yet");
+        assert!(error.to_string().contains("future Axonyx module"));
+        assert!(error.to_string().contains("not part of framework core"));
     }
 
     #[test]
