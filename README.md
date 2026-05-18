@@ -158,6 +158,7 @@ cargo ax doctor
 cargo ax check
 cargo ax schema pull ./sample-posts.json --name Post
 cargo ax content
+cargo ax state
 cargo ax build
 cargo ax run dev
 ```
@@ -190,6 +191,7 @@ Use JSON output for editor tooling:
 ```bash
 cargo ax doctor --format json
 cargo ax routes --format json
+cargo ax state --format json
 ```
 
 ## Build

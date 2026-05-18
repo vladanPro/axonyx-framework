@@ -19,6 +19,7 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
+use axonyx_core::state_prelude::{build_state_manifest, AxStateValue};
 use axonyx_runtime::server_prelude::{
     AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
 };
@@ -59,6 +60,7 @@ enum Commands {
     Routes(RoutesArgs),
     Run(RunArgs),
     Schema(SchemaArgs),
+    State(StateArgs),
     Stream(DevArgs),
     Upgrade,
 }
@@ -135,6 +137,13 @@ struct RunArgs {
 struct SchemaArgs {
     #[command(subcommand)]
     command: SchemaCommands,
+}
+
+#[derive(Debug, Parser)]
+struct StateArgs {
+    /// Output format for the state manifest.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,6 +336,26 @@ struct RoutesReport {
     routes: Vec<RouteManifestItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct StateReport {
+    files: Vec<StateReportFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct StateReportFile {
+    file: String,
+    signals: Vec<StateReportSignal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct StateReportSignal {
+    name: String,
+    key: String,
+    scope: String,
+    ty: String,
+    initial: AxStateValue,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ContentManifest {
     collections: Vec<ContentCollectionManifest>,
@@ -394,6 +423,7 @@ fn run() -> Result<()> {
         Commands::Routes(args) => routes_command(args),
         Commands::Run(args) => run_command(args),
         Commands::Schema(args) => schema_command(args),
+        Commands::State(args) => state_command(args),
         Commands::Stream(args) => run_stream_server(args),
         Commands::Upgrade => upgrade_command(),
     }
@@ -990,6 +1020,20 @@ fn schema_command(args: SchemaArgs) -> Result<()> {
     match args.command {
         SchemaCommands::Pull(args) => schema_pull_command(args),
     }
+}
+
+fn state_command(args: StateArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_state_report(&root)?;
+
+    match args.format {
+        CheckFormat::Text => print_state_text(&report),
+        CheckFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+
+    Ok(())
 }
 
 fn schema_pull_command(args: SchemaPullArgs) -> Result<()> {
@@ -3549,6 +3593,93 @@ fn print_routes_text(report: &RoutesReport) {
     }
 }
 
+fn collect_state_report(root: &Path) -> Result<StateReport> {
+    let mut paths = Vec::new();
+    collect_ax_files(&root.join("app"), &mut paths)?;
+    paths.sort();
+
+    let mut files = Vec::new();
+    for path in paths {
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read '{}'", path.display()))?;
+        if !source_has_state_declaration(&source) {
+            continue;
+        }
+
+        let file = parse_ax_v2(&source).with_context(|| {
+            format!(
+                "failed to parse state declarations from '{}'",
+                path.display()
+            )
+        })?;
+        let manifest = build_state_manifest(&file)
+            .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
+        if manifest.is_empty() {
+            continue;
+        }
+
+        files.push(StateReportFile {
+            file: display_relative_path(root, &path),
+            signals: manifest
+                .signals
+                .into_iter()
+                .map(|signal| StateReportSignal {
+                    name: signal.name,
+                    key: signal.key,
+                    scope: signal.scope,
+                    ty: signal.ty,
+                    initial: signal.initial,
+                })
+                .collect(),
+        });
+    }
+
+    Ok(StateReport { files })
+}
+
+fn source_has_state_declaration(source: &str) -> bool {
+    source
+        .lines()
+        .map(str::trim_start)
+        .any(|line| line.starts_with("state "))
+}
+
+fn print_state_text(report: &StateReport) {
+    if report.files.is_empty() {
+        println!("No state declarations found in app/**/*.ax.");
+        return;
+    }
+
+    println!("State manifest:");
+    for file in &report.files {
+        println!("  {}", file.file);
+        for signal in &file.signals {
+            println!(
+                "    {:<18} key={} type={} initial={}",
+                signal.name,
+                signal.key,
+                signal.ty,
+                format_state_value(&signal.initial)
+            );
+        }
+    }
+}
+
+fn format_state_value(value: &AxStateValue) -> String {
+    match value {
+        AxStateValue::Null => "null".to_string(),
+        AxStateValue::String(value) => format!("{value:?}"),
+        AxStateValue::Bool(value) => value.to_string(),
+        AxStateValue::Number(value) => {
+            if value.fract() == 0.0 {
+                format!("{value:.0}")
+            } else {
+                value.to_string()
+            }
+        }
+    }
+}
+
 fn collect_backend_sources(root: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
     let routes_root = root.join("routes");
     let jobs_root = root.join("jobs");
@@ -5830,6 +5961,59 @@ route POST "/api/posts/:slug"
         let json = serde_json::to_string(&report).expect("routes report should serialize");
         assert!(json.contains("\"stream_pages\":true"));
         assert!(json.contains("\"routes\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn state_report_collects_app_state_declarations() {
+        let root = make_temp_dir("state-report");
+        fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+state theme: String = "silver"
+state count: Number = 0
+
+<input bind:value={theme} />
+"#,
+        )
+        .expect("home page should write");
+        fs::write(
+            root.join("app/settings/page.ax"),
+            r#"
+page Settings
+
+state enabled = signal(true)
+
+<input bind:checked={enabled} />
+"#,
+        )
+        .expect("settings page should write");
+        fs::write(
+            root.join("app/settings/actions.ax"),
+            "action Save\n  return ok\n",
+        )
+        .expect("actions should write");
+
+        let report = collect_state_report(&root).expect("state report should collect");
+
+        assert_eq!(report.files.len(), 2);
+        assert_eq!(report.files[0].file, "app/page.ax");
+        assert_eq!(report.files[0].signals.len(), 2);
+        assert_eq!(report.files[0].signals[0].name, "theme");
+        assert_eq!(report.files[0].signals[0].key, "root:theme:1");
+        assert_eq!(report.files[0].signals[0].ty, "String");
+        assert_eq!(
+            report.files[0].signals[0].initial,
+            AxStateValue::String("silver".to_string())
+        );
+        assert_eq!(report.files[1].file, "app/settings/page.ax");
+        assert_eq!(report.files[1].signals[0].name, "enabled");
+        assert_eq!(report.files[1].signals[0].key, "root:enabled:1");
+        assert_eq!(report.files[1].signals[0].initial, AxStateValue::Bool(true));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
