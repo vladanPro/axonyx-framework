@@ -20,6 +20,7 @@ Axonyx can already scaffold apps, render `.ax` pages, build static output, serve
 - strict project diagnostics through `cargo ax doctor --deny-warnings`
 - early typed data checks for `type Post`, `List<Post>`, and `<Each>` field access
 - first state bridge contracts through stable `SignalId`, `data-ax-signal`, and typed patch events
+- first Melt state manifest for `.ax` `state` declarations
 - reusable Foundry UI imports through `@axonyx/ui/...`
 - generated apps consuming published crates from crates.io
 
@@ -142,6 +143,11 @@ state count: Number = 0
 ```
 
 Axonyx lowers this into stable `data-ax-signal` / `data-ax-bind` metadata and injects the small state bridge only when a page uses signal bindings. The browser bridge exposes `window.__axonyx.state` with `get`, `set`, `subscribe`, `applyPatch`, and `snapshot`.
+
+The first Melt state manifest lives in `axonyx-core::state::build_state_manifest`.
+It extracts top-level `.ax` state declarations into stable signal records with
+`id`, `key`, `name`, `scope`, `ty`, and `initial`, using the current
+`root:<name>:<index>` key convention.
 
 ## Common Commands
 
