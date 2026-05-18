@@ -184,6 +184,10 @@ fields:
 It renders a regular `form` pointed at `/__axonyx/action` and includes the
 internal patch marker automatically. `ActionStatus` renders a status message that
 is shown from the form lifecycle state managed by the small action runtime.
+Route actions coerce declared `input:` fields before execution: `string` stays
+text, `bool` accepts browser checkbox-style values such as `on`, and integer
+fields such as `i64` / `u64` must parse successfully or the action fails with a
+clear runtime error.
 
 ## Common Commands
 
