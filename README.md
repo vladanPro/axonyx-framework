@@ -174,12 +174,16 @@ fields:
     <option value="silver">Silver</option>
     <option value="gold">Gold</option>
   </select>
+  <ActionStatus state="pending">Saving theme...</ActionStatus>
+  <ActionStatus state="complete">Theme saved.</ActionStatus>
+  <ActionStatus state="error">Theme could not be saved.</ActionStatus>
   <Button type="submit">Apply</Button>
 </ActionForm>
 ```
 
 It renders a regular `form` pointed at `/__axonyx/action` and includes the
-internal patch marker automatically.
+internal patch marker automatically. `ActionStatus` renders a status message that
+is shown from the form lifecycle state managed by the small action runtime.
 
 ## Common Commands
 
