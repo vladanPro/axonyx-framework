@@ -146,8 +146,10 @@ Axonyx lowers this into stable `data-ax-signal` / `data-ax-bind` metadata and in
 
 The first Melt state manifest lives in `axonyx-core::state::build_state_manifest`.
 It extracts top-level `.ax` state declarations into stable signal records with
-`id`, `key`, `name`, `scope`, `ty`, and `initial`, using the current
-`root:<name>:<index>` key convention.
+`id`, `key`, `name`, `scope`, `ty`, and `initial`. Framework reports now assign
+route-aware scopes such as `app:language:1`, `layout:docs:sidebarOpen:1`, and
+`page:settings:filter:1`, while the runtime still keeps legacy `root:*` signal
+keys compatible during the transition.
 
 ## Common Commands
 

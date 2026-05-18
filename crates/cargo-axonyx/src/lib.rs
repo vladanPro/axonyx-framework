@@ -19,7 +19,7 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
-use axonyx_core::state_prelude::{build_state_manifest, AxStateValue};
+use axonyx_core::state_prelude::{build_state_manifest_with_scope, AxStateValue};
 use axonyx_runtime::server_prelude::{
     AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
 };
@@ -354,6 +354,7 @@ struct StateReportSignal {
     name: String,
     key: String,
     scope: String,
+    owner: String,
     ty: String,
     initial: AxStateValue,
 }
@@ -3654,7 +3655,8 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
                 path.display()
             )
         })?;
-        let manifest = build_state_manifest(&file)
+        let scope = state_scope_for_path(root, &path);
+        let manifest = build_state_manifest_with_scope(&file, &scope)
             .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
         if manifest.is_empty() {
             continue;
@@ -3669,6 +3671,7 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
                     name: signal.name,
                     key: signal.key,
                     scope: signal.scope,
+                    owner: state_owner_for_path(root, &path),
                     ty: signal.ty,
                     initial: signal.initial,
                 })
@@ -3686,6 +3689,88 @@ fn source_has_state_declaration(source: &str) -> bool {
         .any(|line| line.starts_with("state "))
 }
 
+fn state_scope_for_path(root: &Path, path: &Path) -> String {
+    let app_root = root.join("app");
+    let relative = path.strip_prefix(&app_root).unwrap_or(path);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+
+    if file_name == "layout.ax" && parent.components().next().is_none() {
+        return "app".to_string();
+    }
+
+    let route = route_pattern_for_app_relative_dir(parent);
+    let route_scope = scope_route_fragment(&route);
+
+    match file_name {
+        "layout.ax" => format!("layout:{route_scope}"),
+        "page.ax" => format!("page:{route_scope}"),
+        other => format!("file:{}", other.trim_end_matches(".ax")),
+    }
+}
+
+fn state_owner_for_path(root: &Path, path: &Path) -> String {
+    let app_root = root.join("app");
+    let relative = path.strip_prefix(&app_root).unwrap_or(path);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+
+    if file_name == "layout.ax" && parent.components().next().is_none() {
+        return "app".to_string();
+    }
+
+    let route = route_pattern_for_app_relative_dir(parent);
+
+    match file_name {
+        "layout.ax" => format!("layout:{route}"),
+        "page.ax" => format!("page:{route}"),
+        other => format!("file:{other}"),
+    }
+}
+
+fn app_root_for_app_path(path: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+
+    loop {
+        if current.file_name().and_then(|name| name.to_str()) == Some("app") {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn route_pattern_for_app_relative_dir(relative: &Path) -> String {
+    let segments = relative
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    route_pattern_from_segments(&segments)
+}
+
+fn scope_route_fragment(route: &str) -> String {
+    if route == "/" {
+        return "root".to_string();
+    }
+    route
+        .trim_matches('/')
+        .replace('/', ".")
+        .replace(':', "$")
+        .replace(['[', ']'], "")
+}
+
 fn print_state_text(report: &StateReport) {
     if report.files.is_empty() {
         println!("No state declarations found in app/**/*.ax.");
@@ -3697,9 +3782,10 @@ fn print_state_text(report: &StateReport) {
         println!("  {}", file.file);
         for signal in &file.signals {
             println!(
-                "    {:<18} key={} type={} initial={}",
+                "    {:<18} key={} owner={} type={} initial={}",
                 signal.name,
                 signal.key,
+                signal.owner,
                 signal.ty,
                 format_state_value(&signal.initial)
             );
@@ -4604,11 +4690,22 @@ fn collect_route_state_manifest(
                 path.display()
             )
         })?;
-        let manifest = build_state_manifest(&file)
+        let app_root = app_root_for_app_path(&route.page_path).unwrap_or_else(|| {
+            route
+                .page_path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf()
+        });
+        let root = app_root.parent().unwrap_or_else(|| Path::new(""));
+        let scope = state_scope_for_path(root, path);
+        let manifest = build_state_manifest_with_scope(&file, &scope)
             .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
 
         for signal in manifest.signals {
-            signals.insert(signal.key, signal.ty);
+            let legacy_key = format!("root:{}:{}", signal.name, signal.id.index);
+            signals.insert(signal.key, signal.ty.clone());
+            signals.insert(legacy_key, signal.ty);
         }
     }
 
@@ -6097,6 +6194,17 @@ route POST "/api/posts/:slug"
         let root = make_temp_dir("state-report");
         fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
         fs::write(
+            root.join("app/layout.ax"),
+            r#"
+page RootLayout
+
+state language: String = "sr"
+
+<Slot />
+"#,
+        )
+        .expect("root layout should write");
+        fs::write(
             root.join("app/page.ax"),
             r#"
 page Home
@@ -6108,6 +6216,17 @@ state count: Number = 0
 "#,
         )
         .expect("home page should write");
+        fs::write(
+            root.join("app/settings/layout.ax"),
+            r#"
+page SettingsLayout
+
+state sidebarOpen: Bool = false
+
+<Slot />
+"#,
+        )
+        .expect("settings layout should write");
         fs::write(
             root.join("app/settings/page.ax"),
             r#"
@@ -6127,20 +6246,40 @@ state enabled = signal(true)
 
         let report = collect_state_report(&root).expect("state report should collect");
 
-        assert_eq!(report.files.len(), 2);
-        assert_eq!(report.files[0].file, "app/page.ax");
-        assert_eq!(report.files[0].signals.len(), 2);
-        assert_eq!(report.files[0].signals[0].name, "theme");
-        assert_eq!(report.files[0].signals[0].key, "root:theme:1");
-        assert_eq!(report.files[0].signals[0].ty, "String");
+        assert_eq!(report.files.len(), 4);
+        assert_eq!(report.files[0].file, "app/layout.ax");
+        assert_eq!(report.files[0].signals[0].name, "language");
+        assert_eq!(report.files[0].signals[0].key, "app:language:1");
+        assert_eq!(report.files[0].signals[0].scope, "app");
+        assert_eq!(report.files[0].signals[0].owner, "app");
+
+        assert_eq!(report.files[1].file, "app/page.ax");
+        assert_eq!(report.files[1].signals.len(), 2);
+        assert_eq!(report.files[1].signals[0].name, "theme");
+        assert_eq!(report.files[1].signals[0].key, "page:root:theme:1");
+        assert_eq!(report.files[1].signals[0].scope, "page:root");
+        assert_eq!(report.files[1].signals[0].owner, "page:/");
+        assert_eq!(report.files[1].signals[0].ty, "String");
         assert_eq!(
-            report.files[0].signals[0].initial,
+            report.files[1].signals[0].initial,
             AxStateValue::String("silver".to_string())
         );
-        assert_eq!(report.files[1].file, "app/settings/page.ax");
-        assert_eq!(report.files[1].signals[0].name, "enabled");
-        assert_eq!(report.files[1].signals[0].key, "root:enabled:1");
-        assert_eq!(report.files[1].signals[0].initial, AxStateValue::Bool(true));
+
+        assert_eq!(report.files[2].file, "app/settings/layout.ax");
+        assert_eq!(report.files[2].signals[0].name, "sidebarOpen");
+        assert_eq!(
+            report.files[2].signals[0].key,
+            "layout:settings:sidebarOpen:1"
+        );
+        assert_eq!(report.files[2].signals[0].scope, "layout:settings");
+        assert_eq!(report.files[2].signals[0].owner, "layout:/settings");
+
+        assert_eq!(report.files[3].file, "app/settings/page.ax");
+        assert_eq!(report.files[3].signals[0].name, "enabled");
+        assert_eq!(report.files[3].signals[0].key, "page:settings:enabled:1");
+        assert_eq!(report.files[3].signals[0].scope, "page:settings");
+        assert_eq!(report.files[3].signals[0].owner, "page:/settings");
+        assert_eq!(report.files[3].signals[0].initial, AxStateValue::Bool(true));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
