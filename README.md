@@ -165,6 +165,22 @@ Action patch responses resolve short authoring names like `patch theme = ...`
 through the route manifest before sending browser patches, so the client receives
 the stable scoped signal key.
 
+Use `ActionForm` to target route actions without manually wiring Axonyx transport
+fields:
+
+```ax
+<ActionForm name="SetTheme">
+  <select name="theme">
+    <option value="silver">Silver</option>
+    <option value="gold">Gold</option>
+  </select>
+  <Button type="submit">Apply</Button>
+</ActionForm>
+```
+
+It renders a regular `form` pointed at `/__axonyx/action` and includes the
+internal patch marker automatically.
+
 ## Common Commands
 
 From an app root:
