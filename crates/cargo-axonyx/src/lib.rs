@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use axonyx_core::ax_ast_prelude::AxImport;
+use axonyx_core::ax_ast_prelude::{AxExpr, AxImport};
 use axonyx_core::ax_backend_ast_prelude::AxBackendBlock;
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
@@ -52,6 +52,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Add(AddArgs),
+    Actions(ActionsArgs),
     Build(BuildArgs),
     Check(CheckArgs),
     Content(ContentArgs),
@@ -63,6 +64,13 @@ enum Commands {
     State(StateArgs),
     Stream(DevArgs),
     Upgrade,
+}
+
+#[derive(Debug, Parser)]
+struct ActionsArgs {
+    /// Output format for the action manifest.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
 }
 
 #[derive(Debug, Parser)]
@@ -338,6 +346,32 @@ struct RoutesReport {
     routes: Vec<RouteManifestItem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActionReport {
+    routes: Vec<ActionRouteReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActionRouteReport {
+    route: String,
+    file: String,
+    actions: Vec<ActionItemReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActionItemReport {
+    name: String,
+    inputs: Vec<ActionInputReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActionInputReport {
+    name: String,
+    ty: String,
+    optional: bool,
+    default: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct StateReport {
     files: Vec<StateReportFile>,
@@ -418,6 +452,7 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::Add(args) => add_module(args.module),
+        Commands::Actions(args) => actions_command(args),
         Commands::Build(args) => build_command(args),
         Commands::Check(args) => check_command(args),
         Commands::Content(args) => content_command(args),
@@ -444,6 +479,20 @@ fn normalized_cli_args() -> Vec<OsString> {
     }
 
     args
+}
+
+fn actions_command(args: ActionsArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_action_report(&root)?;
+
+    match args.format {
+        CheckFormat::Text => print_actions_text(&report),
+        CheckFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+
+    Ok(())
 }
 
 fn build_command(args: BuildArgs) -> Result<()> {
@@ -1035,6 +1084,58 @@ fn routes_report(root: &Path) -> Result<RoutesReport> {
         stream_pages: axonyx_config_bool(root, "server", "stream_pages").unwrap_or(false),
         routes: collect_app_route_manifest(root)?,
     })
+}
+
+fn collect_action_report(root: &Path) -> Result<ActionReport> {
+    let mut routes = Vec::new();
+
+    for route in collect_page_route_manifest(root)? {
+        let Some(actions_file) = &route.actions else {
+            continue;
+        };
+        let actions_path = root.join(actions_file);
+        let source = fs::read_to_string(&actions_path)
+            .with_context(|| format!("failed to read '{}'", actions_path.display()))?;
+        let document = parse_backend_ax(&source).with_context(|| {
+            format!("failed to parse action source '{}'", actions_path.display())
+        })?;
+
+        let actions = document
+            .blocks
+            .into_iter()
+            .filter_map(|block| {
+                let AxBackendBlock::Action(action) = block else {
+                    return None;
+                };
+
+                let inputs = action
+                    .input
+                    .into_iter()
+                    .map(|field| ActionInputReport {
+                        name: field.name,
+                        ty: field.ty,
+                        optional: field.optional,
+                        default: field.default.as_ref().map(format_ax_expr),
+                    })
+                    .collect();
+
+                Some(ActionItemReport {
+                    name: action.name,
+                    inputs,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if !actions.is_empty() {
+            routes.push(ActionRouteReport {
+                route: route.route,
+                file: actions_file.clone(),
+                actions,
+            });
+        }
+    }
+
+    Ok(ActionReport { routes })
 }
 
 fn content_command(args: ContentArgs) -> Result<()> {
@@ -3633,6 +3734,64 @@ fn print_routes_text(report: &RoutesReport) {
         }
 
         println!("  {:<28} {}", route.route, details.join(" "));
+    }
+}
+
+fn print_actions_text(report: &ActionReport) {
+    if report.routes.is_empty() {
+        println!("No route-local actions found in app/**/actions.ax.");
+        return;
+    }
+
+    println!("Actions:");
+    for route in &report.routes {
+        println!("  {:<28} file={}", route.route, route.file);
+        for action in &route.actions {
+            println!("    {}", action.name);
+            if action.inputs.is_empty() {
+                println!("      inputs: none");
+                continue;
+            }
+
+            for input in &action.inputs {
+                let required = if input.optional {
+                    "optional"
+                } else {
+                    "required"
+                };
+                let default = input
+                    .default
+                    .as_ref()
+                    .map(|value| format!(" default={value}"))
+                    .unwrap_or_default();
+
+                println!(
+                    "      {:<18} type={} {}{}",
+                    input.name, input.ty, required, default
+                );
+            }
+        }
+    }
+}
+
+fn format_ax_expr(expr: &AxExpr) -> String {
+    match expr {
+        AxExpr::String(value) => format!("{value:?}"),
+        AxExpr::Number(value) => value.to_string(),
+        AxExpr::Bool(value) => value.to_string(),
+        AxExpr::Identifier(value) => value.clone(),
+        AxExpr::Member { object, property } => format!("{}.{}", format_ax_expr(object), property),
+        AxExpr::OptionalMember { object, property } => {
+            format!("{}?.{}", format_ax_expr(object), property)
+        }
+        AxExpr::Call { path, args } => {
+            let args = args
+                .iter()
+                .map(format_ax_expr)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({args})", path.join("."))
+        }
     }
 }
 
@@ -6273,6 +6432,69 @@ route POST "/api/posts/:slug"
         let json = serde_json::to_string(&report).expect("routes report should serialize");
         assert!(json.contains("\"stream_pages\":true"));
         assert!(json.contains("\"routes\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn action_report_collects_route_local_inputs() {
+        let root = make_temp_dir("action-report");
+        fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("home page should write");
+        fs::write(
+            root.join("app/settings/page.ax"),
+            "page Settings\n<Copy>Settings</Copy>\n",
+        )
+        .expect("settings page should write");
+        fs::write(
+            root.join("app/settings/actions.ax"),
+            r#"
+action SetTheme
+  input:
+    theme: string = "silver"
+    newsletter?: bool = false
+    count: i64 = 0
+
+  patch theme = input.theme
+
+action ClearTheme
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let report = collect_action_report(&root).expect("action report should collect");
+
+        assert_eq!(report.routes.len(), 1);
+        assert_eq!(report.routes[0].route, "/settings");
+        assert_eq!(report.routes[0].file, "app/settings/actions.ax");
+        assert_eq!(report.routes[0].actions.len(), 2);
+        assert_eq!(report.routes[0].actions[0].name, "SetTheme");
+        assert_eq!(
+            report.routes[0].actions[0].inputs,
+            vec![
+                ActionInputReport {
+                    name: "theme".to_string(),
+                    ty: "string".to_string(),
+                    optional: false,
+                    default: Some("\"silver\"".to_string()),
+                },
+                ActionInputReport {
+                    name: "newsletter".to_string(),
+                    ty: "bool".to_string(),
+                    optional: true,
+                    default: Some("false".to_string()),
+                },
+                ActionInputReport {
+                    name: "count".to_string(),
+                    ty: "i64".to_string(),
+                    optional: false,
+                    default: Some("0".to_string()),
+                },
+            ]
+        );
+        assert!(report.routes[0].actions[1].inputs.is_empty());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

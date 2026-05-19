@@ -200,6 +200,7 @@ From an app root:
 cargo ax doctor
 cargo ax check
 cargo ax schema pull ./sample-posts.json --name Post
+cargo ax actions
 cargo ax content
 cargo ax state
 cargo ax build
@@ -234,6 +235,7 @@ Use JSON output for editor tooling:
 ```bash
 cargo ax doctor --format json
 cargo ax routes --format json
+cargo ax actions --format json
 cargo ax state --format json
 ```
 
@@ -311,6 +313,18 @@ cargo ax routes
 ```
 
 This lists `app/**/page.ax` page routes, `routes/**/*.ax` backend routes, dynamic params, nested layout count, and route-local `loader.ax` / `actions.ax` files.
+
+Inspect route-local action contracts:
+
+```bash
+cargo ax actions
+cargo ax actions --format json
+```
+
+This reports each `app/**/actions.ax` action, its route, and declared `input:`
+fields with type, optional marker, and default value. It is the first small DX
+step toward Axonyx endpoint/schema discovery without making developers guess
+form contracts.
 
 Inspect content collections:
 

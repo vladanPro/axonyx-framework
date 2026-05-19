@@ -13,6 +13,7 @@ cargo install cargo-axonyx
 ## Commands
 
 ```bash
+cargo ax actions
 cargo ax check
 cargo ax content
 cargo ax doctor
@@ -40,6 +41,10 @@ source diagnostics.
 `cargo ax routes` prints page/API routes and the current server
 `stream_pages` setting. JSON output is a report object with `stream_pages` and
 `routes`.
+
+`cargo ax actions` prints route-local action contracts from `app/**/actions.ax`,
+including input type, optional markers, and default values. JSON output is meant
+for docs, editor tooling, and future endpoint/schema discovery.
 
 `cargo ax stream` starts the dev server with a visible streaming probe URL. It is
 not a replacement for `cargo ax run dev`; it exists to test Axonyx chunked
