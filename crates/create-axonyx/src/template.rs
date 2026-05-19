@@ -54,6 +54,9 @@ const DOCS_APP_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/getting-started/page.ax.tpl");
 const DOCS_APP_REFERENCE_AX: &str = include_str!("../templates/docs/app/reference/page.ax.tpl");
 const DOCS_APP_EXAMPLES_AX: &str = include_str!("../templates/docs/app/examples/page.ax.tpl");
+const DOCS_APP_FEEDBACK_PAGE_AX: &str = include_str!("../templates/docs/app/feedback/page.ax.tpl");
+const DOCS_APP_FEEDBACK_ACTIONS_AX: &str =
+    include_str!("../templates/docs/app/feedback/actions.ax.tpl");
 const DOCS_APP_README: &str = include_str!("../templates/docs/README.md.tpl");
 const DOCS_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/docs/public/favicon.svg.tpl");
 const DOCS_PUBLIC_BRAND_MARK_SVG: &str =
@@ -67,6 +70,7 @@ pub fn template_files(
 ) -> Vec<TemplateFile> {
     let vars = [
         ("{{APP_NAME}}", project_name),
+        ("{{APP_SLUG}}", project_name),
         ("{{AXONYX_RUNTIME_DEPENDENCY}}", runtime_dependency),
         ("{{AXONYX_RUNTIME_SOURCE_NOTE}}", runtime_source_note),
     ];
@@ -245,6 +249,14 @@ pub fn template_files(
                 TemplateFile {
                     relative_path: "app/examples/page.ax",
                     contents: apply_vars(DOCS_APP_EXAMPLES_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/feedback/page.ax",
+                    contents: apply_vars(DOCS_APP_FEEDBACK_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/feedback/actions.ax",
+                    contents: apply_vars(DOCS_APP_FEEDBACK_ACTIONS_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "public/favicon.svg",

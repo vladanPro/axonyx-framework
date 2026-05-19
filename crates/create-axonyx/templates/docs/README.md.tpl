@@ -24,12 +24,17 @@ should be authored in JSX-like `.ax`.
 
 ```bash
 cargo ax check
+cargo ax actions
 cargo ax doctor
 cargo ax build --clean
 cargo ax run dev
 ```
 
 This validates `.ax` sources, regenerates `src/generated/backend.rs`, writes static HTML into `dist/`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+
+`cargo ax actions` prints route-local action contracts from `app/**/actions.ax`.
+In this template it shows the `/feedback` action inputs, including optional
+defaults such as `name?: string = "anonymous"` and `tone?: string = "idea"`.
 
 Static build output:
 
@@ -39,6 +44,7 @@ dist/
   getting-started/index.html
   reference/index.html
   examples/index.html
+  feedback/index.html
 ```
 
 Dynamic docs routes can be prerendered through `Axonyx.toml`:
@@ -69,6 +75,7 @@ Suggested first edit:
 
 - docs-first `app/page.ax`
 - section pages for `getting-started`, `reference`, and `examples`
+- feedback action demo in `app/feedback/page.ax`
 - reusable Foundry imports from `@axonyx/ui/...`
 - static brand assets in `public/`
 - room to add explicit `routes/` and `jobs/` later when the docs site needs APIs or automation
@@ -79,3 +86,4 @@ Suggested first edit:
 - `/getting-started`
 - `/reference`
 - `/examples`
+- `/feedback`

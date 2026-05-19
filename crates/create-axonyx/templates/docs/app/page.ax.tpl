@@ -23,6 +23,7 @@ page DocsHome
     </Copy>
     <Button slot="actions" href="/getting-started" variant="primary">Get started</Button>
     <Button slot="actions" href="/reference" variant="ghost">Open reference</Button>
+    <Button slot="actions" href="/feedback" variant="ghost">Feedback demo</Button>
   </PageHeader>
 
   <ContentGrid cols={3} gap="lg">
@@ -51,6 +52,15 @@ page DocsHome
           practice.
         </Copy>
         <Button href="/examples" variant="ghost">Open section</Button>
+      </Stack>
+    </SectionCard>
+    <SectionCard title="Action Feedback">
+      <Stack gap="md" align="start">
+        <Copy>
+          Try a route-local ActionForm with typed/defaulted inputs and lifecycle
+          status messages.
+        </Copy>
+        <Button href="/feedback" variant="ghost">Open feedback demo</Button>
       </Stack>
     </SectionCard>
   </ContentGrid>

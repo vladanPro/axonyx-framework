@@ -81,6 +81,10 @@ page GettingStarted
           <code>cargo ax run dev</code>
         </li>
         <li>
+          Inspect route-local actions.
+          <code>cargo ax actions</code>
+        </li>
+        <li>
           Or generate a quick preview file.
           <code>cargo run</code>
         </li>
