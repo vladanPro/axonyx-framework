@@ -189,7 +189,8 @@ text, `bool` accepts browser checkbox-style values such as `on`, and integer
 fields such as `i64` / `u64` must parse successfully or the action fails with a
 clear runtime error. Optional action inputs use `?`, for example
 `summary?: string`; missing optional fields become `Null`, while missing required
-non-boolean fields fail before the action body runs.
+non-boolean fields fail before the action body runs. Inputs can also define
+literal defaults, such as `language?: string = "sr"` or `count: i64 = 0`.
 
 ## Common Commands
 
