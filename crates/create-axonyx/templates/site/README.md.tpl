@@ -24,12 +24,17 @@ should be authored in JSX-like `.ax`.
 
 ```bash
 cargo ax check
+cargo ax actions
 cargo ax doctor
 cargo ax build --clean
 cargo ax run dev
 ```
 
 This validates `.ax` sources, regenerates `src/generated/backend.rs`, writes static HTML into `dist/`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+
+`cargo ax actions` prints the route-local action contracts from `app/**/actions.ax`.
+In this template it shows the `CreatePost` inputs, including the optional
+`status?: string = "draft"` default used by the `ActionForm` on `/posts`.
 
 Static build output:
 
@@ -68,6 +73,8 @@ Suggested first edit:
 
 - landing-focused `app/page.ax`
 - featured posts section in `app/posts/page.ax`
+- action-backed form demo with `ActionForm`, `ActionStatus`, typed inputs, and
+  defaulted optional action fields
 - reusable Foundry imports from `@axonyx/ui/...`
 - same backend route/loader/action/job draft structure as the minimal template
 

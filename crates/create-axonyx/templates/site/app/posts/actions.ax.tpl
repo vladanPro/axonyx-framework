@@ -2,11 +2,14 @@ action CreatePost
   input:
     title: string
     excerpt: string
+    status?: string = "draft"
 
   insert "posts"
     title: input.title
     excerpt: input.excerpt
+    status: input.status
 
+  patch draftStatus = input.status
   revalidate "/posts"
   return ok
 
