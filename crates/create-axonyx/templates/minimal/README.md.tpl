@@ -4,18 +4,21 @@ Generated with `create-axonyx`.
 
 {{AXONYX_RUNTIME_SOURCE_NOTE}}
 
-If you selected the registry runtime source before the package is published, switch to `--runtime-source git` or `--runtime-source path` until the first public release is available.
-
 ## Build And Run
 
 ```bash
 cargo ax check
+cargo ax actions
 cargo ax doctor
 cargo ax build --clean
 cargo ax run dev
 ```
 
 This validates `.ax` sources, regenerates `src/generated/backend.rs`, writes static HTML into `dist/`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+
+`cargo ax actions` prints route-local action contracts from `app/**/actions.ax`.
+In this template it shows the `CreatePost` inputs, including the optional
+`status?: string = "draft"` field used by the `ActionForm` on `/posts`.
 
 Static build output:
 
@@ -49,6 +52,8 @@ This starter follows the recommended AX v2 authoring path:
 - JSX-like `.ax` files
 - `app/layout.ax` and `app/page.ax` route entrypoints
 - optional route-local `loader.ax` and `actions.ax`
+- action-backed form demo with `ActionForm`, `ActionStatus`, typed inputs, and
+  defaulted optional action fields
 
 Older indentation-first `.ax` syntax still exists in the framework for compatibility,
 but new app work should prefer JSX-like `.ax`.

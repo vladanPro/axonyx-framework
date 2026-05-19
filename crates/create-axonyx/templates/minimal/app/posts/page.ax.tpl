@@ -1,15 +1,28 @@
 page Posts
 
+page state draftStatus: String = "ready"
+
 <Container max="xl">
   <Card title="Create post" recipe="hero-card">
     <Copy tone="muted">
-      This form posts into route-local actions.ax during dev preview.
+      This form uses ActionForm, typed inputs, and the small action runtime
+      during dev preview.
     </Copy>
-    <form method="post" action={action CreatePost} class="ax-form">
+    <ActionForm name="CreatePost">
       <input type="text" name="title" placeholder="Post title" class="ax-input" />
-      <textarea name="excerpt" placeholder="Short excerpt" class="ax-textarea"></textarea>
+      <textarea name="excerpt" placeholder="Short excerpt" class="ax-textarea">
+      </textarea>
+      <select name="status" class="ax-select">
+        <option value="draft">draft</option>
+        <option value="published">published</option>
+      </select>
       <Button type="submit" tone="primary">Create post</Button>
-    </form>
+      <ActionStatus state="pending">Saving post...</ActionStatus>
+      <ActionStatus state="complete">Post saved.</ActionStatus>
+      <ActionStatus state="error">Post could not be saved.</ActionStatus>
+    </ActionForm>
+    <Copy tone="muted">Last submitted status:</Copy>
+    <strong bind:text={draftStatus}>{draftStatus}</strong>
   </Card>
   <Grid cols={3} gap="md" recipe="content-grid">
     <If when={load PostsList}>
