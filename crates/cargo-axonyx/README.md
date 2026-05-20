@@ -70,7 +70,12 @@ response support while UI streaming is being shaped.
 cargo ax stream
 # open http://127.0.0.1:3000/__axonyx/stream
 # open http://127.0.0.1:3000/__axonyx/stream/html
+# open http://127.0.0.1:3000/__axonyx/events
 ```
+
+`/__axonyx/events` is the first Server-Sent Events probe. It uses the shared
+`AxHttpResponse::sse_events` runtime contract and is intended to become the
+foundation for live state patch streams, CMS events, and build/runtime signals.
 
 ## Package Model
 

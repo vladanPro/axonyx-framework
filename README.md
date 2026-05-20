@@ -67,6 +67,16 @@ This is intentionally a runtime choice, not an authoring burden: `.ax` pages,
 loaders, actions, and state patches keep the same shape while Axonyx chooses the
 transport layer underneath.
 
+The Tokio preview path also exposes the first SSE probe:
+
+```bash
+cargo ax run dev --transport tokio
+# open /__axonyx/events
+```
+
+This is the first `axonyx-server-net` step toward live patch streams, CMS event
+feeds, and worker/build notifications.
+
 Check and build:
 
 ```bash

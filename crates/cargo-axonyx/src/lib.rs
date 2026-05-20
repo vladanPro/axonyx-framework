@@ -22,6 +22,7 @@ use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
 use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
 use axonyx_runtime::server_prelude::{
     AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
+    AxSseEvent,
 };
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
@@ -4618,6 +4619,11 @@ fn handle_http_request(
         return Ok(stream_html_probe_response());
     }
 
+    if mode == AxServerMode::Dev && request.method == "GET" && request.target == "/__axonyx/events"
+    {
+        return Ok(sse_probe_response());
+    }
+
     if request.method == "GET" {
         if let Some(asset) = load_package_asset(&state.root, &request.target)? {
             return Ok(AxHttpResponse::bytes(200, asset.content_type, asset.body).with_no_store());
@@ -4780,6 +4786,14 @@ fn stream_html_probe_response() -> AxHttpResponse {
         ],
     )
     .with_no_store()
+}
+
+fn sse_probe_response() -> AxHttpResponse {
+    AxHttpResponse::sse_events([
+        AxSseEvent::named("axonyx", r#"{"phase":"start"}"#).with_id("1"),
+        AxSseEvent::named("patch", r#"{"scope":"page","patches":[]}"#).with_id("2"),
+        AxSseEvent::named("axonyx", r#"{"phase":"end"}"#).with_id("3"),
+    ])
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
