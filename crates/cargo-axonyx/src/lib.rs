@@ -30,6 +30,7 @@ use axonyx_runtime::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const DOCS_LAYOUT_AX: &str = include_str!("../templates/docs/app/docs/layout.ax.tpl");
 const DOCS_HOME_AX: &str = include_str!("../templates/docs/app/docs/page.ax.tpl");
@@ -127,6 +128,10 @@ struct DevArgs {
 
     #[arg(long, default_value_t = 3000)]
     port: u16,
+
+    /// HTTP transport implementation. std is stable; tokio is the async preview path.
+    #[arg(long, value_enum, default_value_t = ServerTransport::Std)]
+    transport: ServerTransport,
 }
 
 #[derive(Debug, Parser)]
@@ -208,6 +213,21 @@ enum SchemaFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ServerTransport {
+    Std,
+    Tokio,
+}
+
+impl ServerTransport {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Std => "std",
+            Self::Tokio => "tokio",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModuleKind {
     Blockbit,
     Cms,
@@ -270,6 +290,11 @@ struct StdNetAxServer {
     state: Arc<DevServerState>,
 }
 
+struct TokioAxServer {
+    config: AxServerConfig,
+    state: Arc<DevServerState>,
+}
+
 impl AxServer for StdNetAxServer {
     fn config(&self) -> &AxServerConfig {
         &self.config
@@ -299,6 +324,25 @@ impl AxServer for StdNetAxServer {
             }
         }
 
+        Ok(())
+    }
+}
+
+impl AxServer for TokioAxServer {
+    fn config(&self) -> &AxServerConfig {
+        &self.config
+    }
+
+    fn serve(&self) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .context("failed to build Tokio runtime")?;
+        let config = self.config.clone();
+        let state = Arc::clone(&self.state);
+
+        runtime.block_on(async move { serve_tokio(config, state).await })?;
         Ok(())
     }
 }
@@ -3042,13 +3086,14 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
         root,
         preview_store: Mutex::new(preview_store),
     });
-    let server = StdNetAxServer {
-        config: server_config,
-        state: shared_state,
-    };
+    let transport = args.transport;
 
     print_backend_build_status(&backend_status);
-    println!("Axonyx {} server listening at http://{bind}", mode.label());
+    println!(
+        "Axonyx {} server listening at http://{bind} using {} transport",
+        mode.label(),
+        transport.label()
+    );
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
     );
@@ -3060,7 +3105,22 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     }
     println!("Press Ctrl+C to stop.");
 
-    server.serve().map_err(|error| anyhow::anyhow!("{error}"))
+    match transport {
+        ServerTransport::Std => {
+            let server = StdNetAxServer {
+                config: server_config,
+                state: shared_state,
+            };
+            server.serve().map_err(|error| anyhow::anyhow!("{error}"))
+        }
+        ServerTransport::Tokio => {
+            let server = TokioAxServer {
+                config: server_config,
+                state: shared_state,
+            };
+            server.serve().map_err(|error| anyhow::anyhow!("{error}"))
+        }
+    }
 }
 
 fn compile_backend_from_app_root(root: &Path) -> Result<BackendBuildStatus> {
@@ -4536,45 +4596,44 @@ fn handle_connection(
         return Ok(());
     };
 
+    let response = handle_http_request(state, mode, request)?;
+    write_ax_response(&mut stream, &response)?;
+    Ok(())
+}
+
+fn handle_http_request(
+    state: &DevServerState,
+    mode: AxServerMode,
+    request: AxHttpRequest,
+) -> Result<AxHttpResponse> {
     if mode == AxServerMode::Dev && request.method == "GET" && request.target == "/__axonyx/stream"
     {
-        write_ax_response(&mut stream, &stream_probe_response())?;
-        return Ok(());
+        return Ok(stream_probe_response());
     }
 
     if mode == AxServerMode::Dev
         && request.method == "GET"
         && request.target == "/__axonyx/stream/html"
     {
-        write_ax_response(&mut stream, &stream_html_probe_response())?;
-        return Ok(());
+        return Ok(stream_html_probe_response());
     }
 
     if request.method == "GET" {
         if let Some(asset) = load_package_asset(&state.root, &request.target)? {
-            write_response(&mut stream, "200 OK", asset.content_type, &asset.body)?;
-            return Ok(());
+            return Ok(AxHttpResponse::bytes(200, asset.content_type, asset.body).with_no_store());
         }
 
         if let Some(asset) = load_public_asset(&state.root, &request.target)? {
-            write_response(&mut stream, "200 OK", asset.content_type, &asset.body)?;
-            return Ok(());
+            return Ok(AxHttpResponse::bytes(200, asset.content_type, asset.body).with_no_store());
         }
     }
 
     if request.method == "POST" && request.target.starts_with("/__axonyx/action") {
-        handle_action_request(&mut stream, state, &request)?;
-        return Ok(());
+        return handle_action_request(state, &request);
     }
 
     if request.method == "GET" && request.target == "/favicon.ico" {
-        write_response(
-            &mut stream,
-            "204 No Content",
-            "text/plain; charset=utf-8",
-            b"",
-        )?;
-        return Ok(());
+        return Ok(AxHttpResponse::text(204, "").with_no_store());
     }
 
     if mode == AxServerMode::Dev
@@ -4583,59 +4642,32 @@ fn handle_connection(
     {
         let request_path = extract_version_path(&request.target).unwrap_or_else(|| "/".to_string());
         let Some(route) = resolve_route(&state.root, &request_path)? else {
-            write_response(
-                &mut stream,
-                "404 Not Found",
-                "text/plain; charset=utf-8",
-                b"route not found",
-            )?;
-            return Ok(());
+            return Ok(AxHttpResponse::text(404, "route not found").with_no_store());
         };
 
         let version = route_version(&state.root, &route)?;
-        write_response(
-            &mut stream,
-            "200 OK",
-            "text/plain; charset=utf-8",
-            version.as_bytes(),
-        )?;
-        return Ok(());
+        return Ok(AxHttpResponse::text(200, version).with_no_store());
     }
 
     if let Some(response) = execute_backend_route_request(state, &request)? {
-        write_ax_response(&mut stream, &preview_response_to_http(response))?;
-        return Ok(());
+        return Ok(preview_response_to_http(response));
     }
 
     if request.method != "GET" {
-        write_response(
-            &mut stream,
-            "405 Method Not Allowed",
-            "text/plain; charset=utf-8",
-            b"Method Not Allowed",
-        )?;
-        return Ok(());
+        return Ok(AxHttpResponse::text(405, "Method Not Allowed").with_no_store());
     }
 
     let Some(route) = resolve_route(&state.root, &request.target)? else {
         if looks_like_asset_request(&request.target) {
-            write_response(
-                &mut stream,
-                "404 Not Found",
-                "text/plain; charset=utf-8",
-                b"asset not found",
-            )?;
-            return Ok(());
+            return Ok(AxHttpResponse::text(404, "asset not found").with_no_store());
         }
 
-        let response = render_not_found_response(
+        return render_not_found_response(
             state,
             &request.target,
             mode.inject_dev_client(),
             should_stream_page_route(&state.root, &request.target),
-        )?;
-        write_ax_response(&mut stream, &response)?;
-        return Ok(());
+        );
     };
 
     let response = match render_route_response(
@@ -4653,8 +4685,41 @@ fn handle_connection(
             should_stream_page_route(&state.root, &request.target),
         )?,
     };
-    write_ax_response(&mut stream, &response)?;
-    Ok(())
+    Ok(response)
+}
+
+async fn serve_tokio(
+    config: AxServerConfig,
+    state: Arc<DevServerState>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let bind = config.bind_addr();
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .with_context(|| format!("failed to bind Axonyx Tokio server at {bind}"))?;
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let state = Arc::clone(&state);
+        let mode = config.mode;
+
+        tokio::spawn(async move {
+            if let Err(error) = handle_tokio_connection(stream, state, mode).await {
+                eprintln!("Axonyx {} Tokio server error: {error:#}", mode.label());
+            }
+        });
+    }
+}
+
+async fn handle_tokio_connection(
+    mut stream: tokio::net::TcpStream,
+    state: Arc<DevServerState>,
+    mode: AxServerMode,
+) -> Result<()> {
+    let Some(request) = read_http_request_async(&mut stream).await? else {
+        return Ok(());
+    };
+    let response = handle_http_request(&state, mode, request)?;
+    write_ax_response_async(&mut stream, &response).await
 }
 
 fn execute_backend_route_request(
@@ -4777,6 +4842,79 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
     }))
 }
 
+async fn read_http_request_async(
+    stream: &mut tokio::net::TcpStream,
+) -> Result<Option<AxHttpRequest>> {
+    let read = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut buffer = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let mut header_end = None;
+
+        loop {
+            let read = stream
+                .read(&mut chunk)
+                .await
+                .context("failed to read request from async dev client")?;
+            if read == 0 {
+                if buffer.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
+
+            buffer.extend_from_slice(&chunk[..read]);
+
+            if header_end.is_none() {
+                header_end = find_header_end(&buffer);
+            }
+
+            if let Some(end) = header_end {
+                let header_text = String::from_utf8_lossy(&buffer[..end]);
+                let content_length = parse_content_length(&header_text);
+                let total = end + 4 + content_length;
+                if buffer.len() >= total {
+                    break;
+                }
+            }
+        }
+
+        parse_http_request_buffer(&buffer)
+    })
+    .await
+    .context("timed out reading request from async dev client")?;
+
+    read
+}
+
+fn parse_http_request_buffer(buffer: &[u8]) -> Result<Option<AxHttpRequest>> {
+    let Some(header_end) = find_header_end(buffer) else {
+        return Ok(None);
+    };
+
+    let header_text = String::from_utf8_lossy(&buffer[..header_end]);
+    let mut lines = header_text.lines();
+    let Some(request_line) = lines.next() else {
+        return Ok(None);
+    };
+
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or("/").to_string();
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let body_start = header_end + 4;
+    let body = buffer[body_start..].to_vec();
+
+    Ok(Some(AxHttpRequest {
+        method,
+        target,
+        headers,
+        body,
+    }))
+}
+
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -4794,57 +4932,30 @@ fn parse_content_length(headers: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn handle_action_request(
-    stream: &mut TcpStream,
-    state: &DevServerState,
-    request: &AxHttpRequest,
-) -> Result<()> {
+fn handle_action_request(state: &DevServerState, request: &AxHttpRequest) -> Result<AxHttpResponse> {
     let content_type = request
         .headers
         .get("content-type")
         .map(String::as_str)
         .unwrap_or("");
     if !content_type.starts_with("application/x-www-form-urlencoded") {
-        write_response(
-            stream,
-            "415 Unsupported Media Type",
-            "text/plain; charset=utf-8",
-            b"expected application/x-www-form-urlencoded",
-        )?;
-        return Ok(());
+        return Ok(AxHttpResponse::text(415, "expected application/x-www-form-urlencoded")
+            .with_no_store());
     }
 
     let request_path =
         extract_action_query_param(&request.target, "path").unwrap_or_else(|| "/".to_string());
     let action_name = extract_action_query_param(&request.target, "name").unwrap_or_default();
     if action_name.is_empty() {
-        write_response(
-            stream,
-            "400 Bad Request",
-            "text/plain; charset=utf-8",
-            b"missing action name",
-        )?;
-        return Ok(());
+        return Ok(AxHttpResponse::text(400, "missing action name").with_no_store());
     }
 
     let Some(route) = resolve_route(&state.root, &request_path)? else {
-        write_response(
-            stream,
-            "404 Not Found",
-            "text/plain; charset=utf-8",
-            b"route not found",
-        )?;
-        return Ok(());
+        return Ok(AxHttpResponse::text(404, "route not found").with_no_store());
     };
 
     let Some(actions_path) = &route.actions_path else {
-        write_response(
-            stream,
-            "404 Not Found",
-            "text/plain; charset=utf-8",
-            b"actions.ax not found for route",
-        )?;
-        return Ok(());
+        return Ok(AxHttpResponse::text(404, "actions.ax not found for route").with_no_store());
     };
 
     let action_source = fs::read_to_string(actions_path)
@@ -4869,13 +4980,11 @@ fn handle_action_request(
     })?;
 
     if wants_action_patch_response(request, &input_fields) {
-        write_ax_response(stream, &action_patch_response(&route, &result)?)?;
-        return Ok(());
+        return action_patch_response(&route, &result);
     }
 
     let redirect_to = result.redirect_to.unwrap_or(route.request_path);
-    write_redirect_response(stream, "303 See Other", &redirect_to)?;
-    Ok(())
+    Ok(redirect_response(303, &redirect_to))
 }
 
 fn wants_action_patch_response(
@@ -5099,16 +5208,10 @@ fn parse_form_body(body: &[u8]) -> std::collections::BTreeMap<String, String> {
     fields
 }
 
-fn write_redirect_response(stream: &mut TcpStream, status: &str, location: &str) -> Result<()> {
-    let status = status
-        .split_whitespace()
-        .next()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(303);
-    let response = AxHttpResponse::text(status, "")
+fn redirect_response(status: u16, location: &str) -> AxHttpResponse {
+    AxHttpResponse::text(status, "")
         .with_header("Location", location)
-        .with_no_store();
-    write_ax_response(stream, &response)
+        .with_no_store()
 }
 
 fn load_public_asset(root: &Path, request_path: &str) -> Result<Option<StaticAsset>> {
@@ -6039,21 +6142,6 @@ fn inject_dev_client(html: &str, request_path: &str) -> String {
     }
 }
 
-fn write_response(
-    stream: &mut TcpStream,
-    status: &str,
-    content_type: &str,
-    body: &[u8],
-) -> Result<()> {
-    let status_code = status
-        .split_whitespace()
-        .next()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(200);
-    let response = AxHttpResponse::bytes(status_code, content_type, body.to_vec()).with_no_store();
-    write_ax_response(stream, &response)
-}
-
 fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Result<()> {
     let status = response.status_line();
     let mut header = format!(
@@ -6092,6 +6180,57 @@ fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Resul
     Ok(())
 }
 
+async fn write_ax_response_async(
+    stream: &mut tokio::net::TcpStream,
+    response: &AxHttpResponse,
+) -> Result<()> {
+    let header = render_response_header(response);
+
+    stream
+        .write_all(header.as_bytes())
+        .await
+        .context("failed to write async response headers")?;
+    if response.body.is_streaming() {
+        write_chunked_body_async(stream, response).await?;
+    } else {
+        for chunk in response.body.chunks_iter() {
+            stream
+                .write_all(chunk)
+                .await
+                .context("failed to write async response body")?;
+        }
+    }
+    stream
+        .flush()
+        .await
+        .context("failed to flush async response")?;
+    Ok(())
+}
+
+fn render_response_header(response: &AxHttpResponse) -> String {
+    let status = response.status_line();
+    let mut header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nConnection: close\r\n",
+        response.content_type
+    );
+    if response.body.is_streaming() {
+        header.push_str("Transfer-Encoding: chunked\r\n");
+    } else {
+        header.push_str(&format!("Content-Length: {}\r\n", response.body_len()));
+    }
+    if response.header_value("Cache-Control").is_none() {
+        header.push_str("Cache-Control: no-store\r\n");
+    }
+    for (name, value) in &response.headers {
+        header.push_str(name);
+        header.push_str(": ");
+        header.push_str(value);
+        header.push_str("\r\n");
+    }
+    header.push_str("\r\n");
+    header
+}
+
 fn write_chunked_body(stream: &mut TcpStream, response: &AxHttpResponse) -> Result<()> {
     for chunk in response.body.chunks_iter() {
         write!(stream, "{:X}\r\n", chunk.len()).context("failed to write chunk header")?;
@@ -6105,6 +6244,31 @@ fn write_chunked_body(stream: &mut TcpStream, response: &AxHttpResponse) -> Resu
     stream
         .write_all(b"0\r\n\r\n")
         .context("failed to finish chunked response")?;
+    Ok(())
+}
+
+async fn write_chunked_body_async(
+    stream: &mut tokio::net::TcpStream,
+    response: &AxHttpResponse,
+) -> Result<()> {
+    for chunk in response.body.chunks_iter() {
+        stream
+            .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
+            .await
+            .context("failed to write async chunk header")?;
+        stream
+            .write_all(chunk)
+            .await
+            .context("failed to write async response chunk")?;
+        stream
+            .write_all(b"\r\n")
+            .await
+            .context("failed to finish async response chunk")?;
+    }
+    stream
+        .write_all(b"0\r\n\r\n")
+        .await
+        .context("failed to finish async chunked response")?;
     Ok(())
 }
 
@@ -7312,6 +7476,33 @@ page Home
         };
         assert_eq!(args.host, "0.0.0.0");
         assert_eq!(args.port, 4100);
+        assert_eq!(args.transport, ServerTransport::Std);
+    }
+
+    #[test]
+    fn parses_tokio_transport_for_run_dev() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "run",
+            "dev",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "4101",
+            "--transport",
+            "tokio",
+        ])
+        .expect("tokio transport should parse");
+
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        let RunCommands::Dev(args) = args.command else {
+            panic!("expected run dev command");
+        };
+        assert_eq!(args.host, "127.0.0.1");
+        assert_eq!(args.port, 4101);
+        assert_eq!(args.transport, ServerTransport::Tokio);
     }
 
     #[test]

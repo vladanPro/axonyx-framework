@@ -19,6 +19,7 @@ cargo ax content
 cargo ax doctor
 cargo ax build --clean
 cargo ax run dev
+cargo ax run dev --transport tokio
 cargo ax stream
 ```
 
@@ -30,6 +31,18 @@ cd my-site
 cargo ax doctor
 cargo ax run dev
 ```
+
+The default dev/start server still uses the stable `std` transport. The Tokio
+transport is available as the async preview path:
+
+```bash
+cargo ax run dev --transport tokio
+cargo ax run start --host 0.0.0.0 --port 3000 --transport tokio
+```
+
+Axonyx keeps the authoring model synchronous and structured; the runtime decides
+whether the request path uses the std transport, Tokio tasks, streaming, or a
+future worker layer behind the scenes.
 
 `cargo ax doctor` verifies the app structure, runtime dependency, server page
 streaming mode, Axonyx UI package resolution, stylesheet wiring, and `.ax`

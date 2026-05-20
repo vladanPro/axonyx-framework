@@ -24,5 +24,6 @@ clap.workspace = true
 toml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio = { version = "1.48.0", features = ["io-util", "net", "rt-multi-thread", "time"] }
 axonyx-core.workspace = true
 axonyx-runtime.workspace = true

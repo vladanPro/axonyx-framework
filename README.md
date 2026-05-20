@@ -56,6 +56,17 @@ cd my-site
 cargo ax run dev
 ```
 
+The stable server path uses the standard library transport. The async preview
+path is available with Tokio:
+
+```bash
+cargo ax run dev --transport tokio
+```
+
+This is intentionally a runtime choice, not an authoring burden: `.ax` pages,
+loaders, actions, and state patches keep the same shape while Axonyx chooses the
+transport layer underneath.
+
 Check and build:
 
 ```bash
