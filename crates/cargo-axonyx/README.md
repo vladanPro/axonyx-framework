@@ -44,7 +44,9 @@ source diagnostics.
 
 `cargo ax actions` prints route-local action contracts from `app/**/actions.ax`,
 including input type, optional markers, and default values. JSON output is meant
-for docs, editor tooling, and future endpoint/schema discovery.
+for docs, editor tooling, and future endpoint/schema discovery. Use
+`cargo ax actions --route /posts` or `cargo ax actions --name CreatePost` to
+filter larger apps.
 
 `cargo ax stream` starts the dev server with a visible streaming probe URL. It is
 not a replacement for `cargo ax run dev`; it exists to test Axonyx chunked

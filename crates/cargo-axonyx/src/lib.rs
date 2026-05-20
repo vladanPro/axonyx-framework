@@ -71,6 +71,14 @@ struct ActionsArgs {
     /// Output format for the action manifest.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
+
+    /// Show only actions for a single route path, for example /feedback.
+    #[arg(long)]
+    route: Option<String>,
+
+    /// Show only an action with this name.
+    #[arg(long)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -483,7 +491,7 @@ fn normalized_cli_args() -> Vec<OsString> {
 
 fn actions_command(args: ActionsArgs) -> Result<()> {
     let root = app_root()?;
-    let report = collect_action_report(&root)?;
+    let report = filter_action_report(collect_action_report(&root)?, &args);
 
     match args.format {
         CheckFormat::Text => print_actions_text(&report),
@@ -493,6 +501,21 @@ fn actions_command(args: ActionsArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn filter_action_report(mut report: ActionReport, args: &ActionsArgs) -> ActionReport {
+    if let Some(route_filter) = args.route.as_deref() {
+        report.routes.retain(|route| route.route == route_filter);
+    }
+
+    if let Some(name_filter) = args.name.as_deref() {
+        for route in &mut report.routes {
+            route.actions.retain(|action| action.name == name_filter);
+        }
+        report.routes.retain(|route| !route.actions.is_empty());
+    }
+
+    report
 }
 
 fn build_command(args: BuildArgs) -> Result<()> {
@@ -6497,6 +6520,48 @@ action ClearTheme
         assert!(report.routes[0].actions[1].inputs.is_empty());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn action_report_filters_by_route_and_name() {
+        let report = ActionReport {
+            routes: vec![
+                ActionRouteReport {
+                    route: "/settings".to_string(),
+                    file: "app/settings/actions.ax".to_string(),
+                    actions: vec![
+                        ActionItemReport {
+                            name: "SetTheme".to_string(),
+                            inputs: Vec::new(),
+                        },
+                        ActionItemReport {
+                            name: "ClearTheme".to_string(),
+                            inputs: Vec::new(),
+                        },
+                    ],
+                },
+                ActionRouteReport {
+                    route: "/feedback".to_string(),
+                    file: "app/feedback/actions.ax".to_string(),
+                    actions: vec![ActionItemReport {
+                        name: "SendFeedback".to_string(),
+                        inputs: Vec::new(),
+                    }],
+                },
+            ],
+        };
+        let args = ActionsArgs {
+            format: CheckFormat::Text,
+            route: Some("/settings".to_string()),
+            name: Some("ClearTheme".to_string()),
+        };
+
+        let filtered = filter_action_report(report, &args);
+
+        assert_eq!(filtered.routes.len(), 1);
+        assert_eq!(filtered.routes[0].route, "/settings");
+        assert_eq!(filtered.routes[0].actions.len(), 1);
+        assert_eq!(filtered.routes[0].actions[0].name, "ClearTheme");
     }
 
     #[test]

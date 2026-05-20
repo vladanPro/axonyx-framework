@@ -319,6 +319,8 @@ Inspect route-local action contracts:
 ```bash
 cargo ax actions
 cargo ax actions --format json
+cargo ax actions --route /posts
+cargo ax actions --name CreatePost
 ```
 
 This reports each `app/**/actions.ax` action, its route, and declared `input:`
