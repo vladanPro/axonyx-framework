@@ -38,7 +38,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.8";
-const AXONYX_UI_VERSION: &str = "0.0.33";
+const AXONYX_UI_VERSION: &str = "0.0.34";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -7382,7 +7382,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.33\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.34\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -7678,7 +7678,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains("axonyx-runtime = \"0.1.8\""));
-        assert!(updated.contains("version = \"0.0.33\""));
+        assert!(updated.contains("version = \"0.0.34\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
