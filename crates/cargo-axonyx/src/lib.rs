@@ -79,6 +79,10 @@ struct ActionsArgs {
     /// Show only an action with this name.
     #[arg(long)]
     name: Option<String>,
+
+    /// Render action input contracts as .ax type declarations.
+    #[arg(long)]
+    schema: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -494,7 +498,13 @@ fn actions_command(args: ActionsArgs) -> Result<()> {
     let report = filter_action_report(collect_action_report(&root)?, &args);
 
     match args.format {
-        CheckFormat::Text => print_actions_text(&report),
+        CheckFormat::Text => {
+            if args.schema {
+                print_actions_schema_text(&report);
+            } else {
+                print_actions_text(&report);
+            }
+        }
         CheckFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -3797,6 +3807,49 @@ fn print_actions_text(report: &ActionReport) {
     }
 }
 
+fn print_actions_schema_text(report: &ActionReport) {
+    if report.routes.is_empty() {
+        println!("No route-local actions found in app/**/actions.ax.");
+        return;
+    }
+
+    for route in &report.routes {
+        println!("// {}", route.route);
+        for action in &route.actions {
+            println!("type {}Input {{", action.name);
+            if action.inputs.is_empty() {
+                println!("  // no inputs");
+            } else {
+                for input in &action.inputs {
+                    let marker = if input.optional { "?" } else { "" };
+                    let default = input
+                        .default
+                        .as_ref()
+                        .map(|value| format!(" = {value}"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {}{}: {}{}",
+                        input.name,
+                        marker,
+                        ax_schema_type(&input.ty),
+                        default
+                    );
+                }
+            }
+            println!("}}\n");
+        }
+    }
+}
+
+fn ax_schema_type(input_ty: &str) -> &'static str {
+    match input_ty.to_ascii_lowercase().as_str() {
+        "string" | "str" => "String",
+        "bool" | "boolean" => "Bool",
+        "i64" | "u64" | "int" | "integer" | "number" => "Number",
+        _ => "String",
+    }
+}
+
 fn format_ax_expr(expr: &AxExpr) -> String {
     match expr {
         AxExpr::String(value) => format!("{value:?}"),
@@ -6554,6 +6607,7 @@ action ClearTheme
             format: CheckFormat::Text,
             route: Some("/settings".to_string()),
             name: Some("ClearTheme".to_string()),
+            schema: false,
         };
 
         let filtered = filter_action_report(report, &args);
@@ -6562,6 +6616,14 @@ action ClearTheme
         assert_eq!(filtered.routes[0].route, "/settings");
         assert_eq!(filtered.routes[0].actions.len(), 1);
         assert_eq!(filtered.routes[0].actions[0].name, "ClearTheme");
+    }
+
+    #[test]
+    fn action_schema_maps_inputs_to_ax_types() {
+        assert_eq!(ax_schema_type("string"), "String");
+        assert_eq!(ax_schema_type("bool"), "Bool");
+        assert_eq!(ax_schema_type("i64"), "Number");
+        assert_eq!(ax_schema_type("unknown"), "String");
     }
 
     #[test]

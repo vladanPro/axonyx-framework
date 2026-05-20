@@ -321,6 +321,7 @@ cargo ax actions
 cargo ax actions --format json
 cargo ax actions --route /posts
 cargo ax actions --name CreatePost
+cargo ax actions --name CreatePost --schema
 ```
 
 This reports each `app/**/actions.ax` action, its route, and declared `input:`

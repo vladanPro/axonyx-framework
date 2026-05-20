@@ -46,7 +46,8 @@ source diagnostics.
 including input type, optional markers, and default values. JSON output is meant
 for docs, editor tooling, and future endpoint/schema discovery. Use
 `cargo ax actions --route /posts` or `cargo ax actions --name CreatePost` to
-filter larger apps.
+filter larger apps. Use `cargo ax actions --name CreatePost --schema` to print a
+copy/paste `.ax` input type declaration.
 
 `cargo ax stream` starts the dev server with a visible streaming probe URL. It is
 not a replacement for `cargo ax run dev`; it exists to test Axonyx chunked
