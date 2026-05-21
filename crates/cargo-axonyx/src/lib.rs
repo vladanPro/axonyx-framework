@@ -5226,9 +5226,7 @@ fn parse_form_body(body: &[u8]) -> std::collections::BTreeMap<String, String> {
 }
 
 fn redirect_response(status: u16, location: &str) -> AxHttpResponse {
-    AxHttpResponse::text(status, "")
-        .with_header("Location", location)
-        .with_no_store()
+    AxHttpResponse::redirect_with_status(status, location).with_no_store()
 }
 
 fn load_public_asset(root: &Path, request_path: &str) -> Result<Option<StaticAsset>> {
@@ -6179,6 +6177,11 @@ fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Resul
         header.push_str(value);
         header.push_str("\r\n");
     }
+    for cookie in &response.set_cookies {
+        header.push_str("Set-Cookie: ");
+        header.push_str(cookie);
+        header.push_str("\r\n");
+    }
     header.push_str("\r\n");
 
     stream
@@ -6242,6 +6245,11 @@ fn render_response_header(response: &AxHttpResponse) -> String {
         header.push_str(name);
         header.push_str(": ");
         header.push_str(value);
+        header.push_str("\r\n");
+    }
+    for cookie in &response.set_cookies {
+        header.push_str("Set-Cookie: ");
+        header.push_str(cookie);
         header.push_str("\r\n");
     }
     header.push_str("\r\n");
@@ -8054,6 +8062,18 @@ axonyx-runtime = "0.1.0"
         assert!(raw.contains("Transfer-Encoding: chunked\r\n"));
         assert!(!raw.contains("Content-Length:"));
         assert!(raw.ends_with("5\r\nHello\r\n7\r\n Axonyx\r\n0\r\n\r\n"));
+    }
+
+    #[test]
+    fn render_response_header_writes_multiple_set_cookie_headers() {
+        let response = AxHttpResponse::text(200, "ok")
+            .with_cookie(axonyx_runtime::server::AxCookie::new("a", "1").with_path("/"))
+            .with_cookie(axonyx_runtime::server::AxCookie::new("b", "2").with_path("/"));
+
+        let header = render_response_header(&response);
+
+        assert!(header.contains("Set-Cookie: a=1; Path=/\r\n"));
+        assert!(header.contains("Set-Cookie: b=2; Path=/\r\n"));
     }
 
     #[test]
