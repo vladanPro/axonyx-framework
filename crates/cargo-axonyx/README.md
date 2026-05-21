@@ -82,7 +82,7 @@ foundation for live state patch streams, CMS events, and build/runtime signals.
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.1.8"
+axonyx-runtime = "0.1.9"
 axonyx-ui = "0.0.34"
 ```
 

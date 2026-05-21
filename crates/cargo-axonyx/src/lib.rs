@@ -21,8 +21,7 @@ use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
 use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
 use axonyx_runtime::server_prelude::{
-    AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
-    AxSseEvent,
+    AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode, AxSseEvent,
 };
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_sources,
@@ -39,7 +38,7 @@ const DOCS_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.8";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.9";
 const AXONYX_UI_VERSION: &str = "0.0.34";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
@@ -4946,15 +4945,19 @@ fn parse_content_length(headers: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn handle_action_request(state: &DevServerState, request: &AxHttpRequest) -> Result<AxHttpResponse> {
+fn handle_action_request(
+    state: &DevServerState,
+    request: &AxHttpRequest,
+) -> Result<AxHttpResponse> {
     let content_type = request
         .headers
         .get("content-type")
         .map(String::as_str)
         .unwrap_or("");
     if !content_type.starts_with("application/x-www-form-urlencoded") {
-        return Ok(AxHttpResponse::text(415, "expected application/x-www-form-urlencoded")
-            .with_no_store());
+        return Ok(
+            AxHttpResponse::text(415, "expected application/x-www-form-urlencoded").with_no_store(),
+        );
     }
 
     let request_path =
@@ -7614,7 +7617,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.8"
+axonyx-runtime = "0.1.9"
 
 [dependencies.axonyx-ui]
 path = "vendor/axonyx-ui"
@@ -7661,7 +7664,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.8"
+axonyx-runtime = "0.1.9"
 "#,
         )
         .expect("cargo manifest should write");
@@ -7760,7 +7763,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.8"
+axonyx-runtime = "0.1.9"
 "#,
         )
         .expect("cargo manifest should write");
@@ -7882,7 +7885,7 @@ serde_json = "1"
         );
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
-        assert!(updated.contains("axonyx-runtime = \"0.1.8\""));
+        assert!(updated.contains("axonyx-runtime = \"0.1.9\""));
         assert!(updated.contains("version = \"0.0.34\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
