@@ -2909,6 +2909,7 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidAssignment { line }
         | AxBackendParseError::InvalidHeader { line }
         | AxBackendParseError::InvalidCookie { line }
+        | AxBackendParseError::InvalidRequirement { line }
         | AxBackendParseError::InvalidReturn { line }
         | AxBackendParseError::InvalidSend { line }
         | AxBackendParseError::InvalidQuerySource { line }
