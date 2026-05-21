@@ -4758,7 +4758,12 @@ fn execute_backend_route_request(
 }
 
 fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
-    AxHttpResponse::bytes(response.status, response.content_type, response.body).with_no_store()
+    let mut http = AxHttpResponse::bytes(response.status, response.content_type, response.body)
+        .with_no_store();
+    for (name, value) in response.headers {
+        http = http.with_header(name, value);
+    }
+    http
 }
 
 fn stream_probe_response() -> AxHttpResponse {
