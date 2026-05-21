@@ -2907,6 +2907,8 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidField { line }
         | AxBackendParseError::InvalidMutation { line }
         | AxBackendParseError::InvalidAssignment { line }
+        | AxBackendParseError::InvalidHeader { line }
+        | AxBackendParseError::InvalidCookie { line }
         | AxBackendParseError::InvalidReturn { line }
         | AxBackendParseError::InvalidSend { line }
         | AxBackendParseError::InvalidQuerySource { line }
@@ -4763,6 +4765,7 @@ fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
     for (name, value) in response.headers {
         http = http.with_header(name, value);
     }
+    http.set_cookies.extend(response.set_cookies);
     http
 }
 
