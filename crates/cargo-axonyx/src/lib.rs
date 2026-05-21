@@ -8533,7 +8533,7 @@ page state count: Number = 0
         fs::create_dir_all(root.join("routes").join("api")).expect("routes dir should exist");
         fs::write(
             root.join("routes").join("api").join("session.ax"),
-            "route POST \"/api/session\"\n  data theme = request.cookies.theme\n  data agent = request.headers.user_agent\n  data body = request.body\n  header \"X-Agent\" = agent\n  cookie \"theme\" = theme\n  return json(body)\n",
+            "route POST \"/api/session\"\n  data theme = request.cookies.theme\n  data agent = request.headers.user_agent\n  data title = request.form.title\n  header \"X-Agent\" = agent\n  cookie \"theme\" = theme\n  return json(title)\n",
         )
         .expect("route should write");
 
@@ -8544,7 +8544,7 @@ page state count: Number = 0
         let request = AxHttpRequest::new("POST", "/api/session")
             .with_header("Cookie", "theme=gold")
             .with_header("User-Agent", "AxonyxTest")
-            .with_body(b"name=Axonyx".to_vec());
+            .with_body(b"title=Hello+Axonyx".to_vec());
 
         let response = execute_backend_route_request(&state, &request)
             .expect("backend route request should succeed")
@@ -8560,7 +8560,7 @@ page state count: Number = 0
             .iter()
             .any(|cookie| cookie == "theme=gold; Path=/"));
         let body = String::from_utf8(response.body).expect("json response should be utf-8");
-        assert_eq!(body, "\"name=Axonyx\"");
+        assert_eq!(body, "\"Hello Axonyx\"");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
