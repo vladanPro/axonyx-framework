@@ -24,7 +24,7 @@ use axonyx_runtime::server_prelude::{
     AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode, AxSseEvent,
 };
 use axonyx_runtime::{
-    execute_preview_action_sources, execute_preview_route_sources,
+    execute_preview_action_sources, execute_preview_route_request_sources,
     preview_ax_route_with_request_context_and_imports, AxPreviewActionResult,
     AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
 };
@@ -4750,13 +4750,12 @@ fn execute_backend_route_request(
         .lock()
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
 
-    execute_preview_route_sources(&source_refs, &request.method, &request.target, &mut store)
-        .with_context(|| {
-            format!(
-                "failed to execute backend route {} {}",
-                request.method, request.target
-            )
-        })
+    execute_preview_route_request_sources(&source_refs, request, &mut store).with_context(|| {
+        format!(
+            "failed to execute backend route {} {}",
+            request.method, request.target
+        )
+    })
 }
 
 fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
@@ -8524,6 +8523,44 @@ page state count: Number = 0
         let body = String::from_utf8(response.body).expect("json response should be utf-8");
         assert!(body.contains("Draft Preview"));
         assert!(!body.contains("Hello Axonyx"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn executes_backend_route_request_with_request_context() {
+        let root = make_temp_dir("api-route-request-context");
+        fs::create_dir_all(root.join("routes").join("api")).expect("routes dir should exist");
+        fs::write(
+            root.join("routes").join("api").join("session.ax"),
+            "route POST \"/api/session\"\n  data theme = request.cookies.theme\n  data agent = request.headers.user_agent\n  data body = request.body\n  header \"X-Agent\" = agent\n  cookie \"theme\" = theme\n  return json(body)\n",
+        )
+        .expect("route should write");
+
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let request = AxHttpRequest::new("POST", "/api/session")
+            .with_header("Cookie", "theme=gold")
+            .with_header("User-Agent", "AxonyxTest")
+            .with_body(b"name=Axonyx".to_vec());
+
+        let response = execute_backend_route_request(&state, &request)
+            .expect("backend route request should succeed")
+            .expect("backend route should match");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.headers.get("X-Agent").map(String::as_str),
+            Some("AxonyxTest")
+        );
+        assert!(response
+            .set_cookies
+            .iter()
+            .any(|cookie| cookie == "theme=gold; Path=/"));
+        let body = String::from_utf8(response.body).expect("json response should be utf-8");
+        assert_eq!(body, "\"name=Axonyx\"");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
