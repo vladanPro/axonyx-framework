@@ -81,6 +81,7 @@ Axonyx backend env convention:
 - `Runtime.Env.public.app_env` -> `AX_PUBLIC_APP_ENV`
 - `Runtime.Env.secret.db_driver` -> `AX_SECRET_DB_DIALECT` with fallback to `AX_SECRET_DB_DRIVER`
 - `Runtime.Env.secret.db_url` -> `AX_SECRET_DB_URL`
+- `Auth.signedSession` -> `AX_SECRET_SESSION_KEY`
 
 Recommended data config:
 
@@ -101,6 +102,13 @@ API transport convention:
 - `AX_PUBLIC_DATA_API_URL=https://...`
 - `AX_SECRET_DATA_API_KEY=...`
 - provider-specific aliases can map into the same config shape
+
+Auth convention:
+
+- `Auth.bearer` reads `Authorization: Bearer ...`
+- `Auth.session` reads the plain `session` cookie
+- `Auth.signedSession` verifies the `session` cookie with `AX_SECRET_SESSION_KEY`
+- `cargo ax check` reports `axonyx-auth-secret` when a route uses signed sessions without that secret
 
 ## Axonyx Structure
 

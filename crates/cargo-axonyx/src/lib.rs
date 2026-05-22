@@ -12,6 +12,7 @@ use anyhow::{bail, Context, Result};
 use axonyx_core::ax_ast_prelude::{AxExpr, AxImport};
 use axonyx_core::ax_backend_ast_prelude::AxBackendBlock;
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
+use axonyx_core::ax_backend_lowering_prelude::{lower_backend_document, AxStepPlan, AxValuePlan};
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_lowering_prelude::AxValue;
 use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
@@ -2459,7 +2460,7 @@ fn check_ax_source_with_root(
 ) -> Vec<CheckDiagnostic> {
     if looks_like_backend_ax(source) {
         return match parse_backend_ax(source) {
-            Ok(_) => Vec::new(),
+            Ok(document) => check_backend_requirements(path, source, root, &document),
             Err(error) => vec![diagnostic_from_parse_error(
                 path,
                 CheckParseError::Backend(error),
@@ -2483,6 +2484,104 @@ fn check_ax_source_with_root(
         diagnostics.extend(check_imports(root, path, source, &document.imports));
     }
     diagnostics
+}
+
+fn check_backend_requirements(
+    path: &Path,
+    source: &str,
+    root: Option<&Path>,
+    document: &axonyx_core::ax_backend_ast_prelude::AxBackendDocument,
+) -> Vec<CheckDiagnostic> {
+    let plan = match lower_backend_document(document) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return vec![CheckDiagnostic {
+                file: display_path(path),
+                line: 1,
+                column: 1,
+                severity: "error",
+                code: "axonyx-backend-lower",
+                message: error.to_string(),
+            }]
+        }
+    };
+
+    if !backend_plan_uses_signed_session(&plan)
+        || auth_secret_configured(root, "AX_SECRET_SESSION_KEY")
+    {
+        return Vec::new();
+    }
+
+    vec![CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, "Auth.signedSession"),
+        column: 1,
+        severity: "error",
+        code: "axonyx-auth-secret",
+        message: "Auth.signedSession requires AX_SECRET_SESSION_KEY. Set it in the environment or local .env file.".to_string(),
+    }]
+}
+
+fn backend_plan_uses_signed_session(
+    plan: &axonyx_core::ax_backend_lowering_prelude::AxBackendPlan,
+) -> bool {
+    plan.handlers.iter().any(|handler| {
+        handler.steps.iter().any(|step| match step {
+            AxStepPlan::Let {
+                value: AxValuePlan::Expr(expr),
+                ..
+            }
+            | AxStepPlan::Require { value: expr, .. }
+            | AxStepPlan::Return(
+                axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Expr(expr)
+                | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Json(expr),
+            )
+            | AxStepPlan::Patch { value: expr, .. }
+            | AxStepPlan::Header { value: expr, .. }
+            | AxStepPlan::Cookie { value: expr, .. }
+            | AxStepPlan::ClearCookie { name: expr }
+            | AxStepPlan::Revalidate { target: expr } => expr.code.contains("Auth.signedSession"),
+            AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => fields
+                .iter()
+                .any(|field| field.value.code.contains("Auth.signedSession")),
+            AxStepPlan::Send { payload, .. } => payload.code.contains("Auth.signedSession"),
+            AxStepPlan::Let { .. } | AxStepPlan::Delete { .. } | AxStepPlan::Return(_) => false,
+        })
+    })
+}
+
+fn auth_secret_configured(root: Option<&Path>, key: &str) -> bool {
+    std::env::var_os(key).is_some()
+        || root
+            .map(|root| {
+                env_file_defines_key(&root.join(".env"), key)
+                    || env_file_defines_key(&root.join(".env.local"), key)
+            })
+            .unwrap_or(false)
+}
+
+fn env_file_defines_key(path: &Path, key: &str) -> bool {
+    let Ok(source) = fs::read_to_string(path) else {
+        return false;
+    };
+
+    source.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty()
+            && !line.starts_with('#')
+            && line
+                .split_once('=')
+                .map(|(name, value)| name.trim() == key && !value.trim().is_empty())
+                .unwrap_or(false)
+    })
+}
+
+fn line_for_source_pattern(source: &str, pattern: &str) -> usize {
+    source
+        .lines()
+        .position(|line| line.contains(pattern))
+        .map(|index| index + 1)
+        .unwrap_or(1)
 }
 
 fn check_type_annotations(
@@ -6434,6 +6533,15 @@ fn content_type_for(path: &Path) -> &'static str {
 mod tests {
     use super::*;
 
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+        TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test env lock should not be poisoned")
+    }
+
     fn make_temp_dir(name: &str) -> PathBuf {
         let unique = format!(
             "axonyx-cargo-test-{}-{}",
@@ -9416,6 +9524,71 @@ type Post {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 2);
         assert_eq!(diagnostics[0].code, "axonyx-backend-parse");
+    }
+
+    #[test]
+    fn check_app_sources_reports_missing_signed_session_secret() {
+        let _guard = lock_test_env();
+        let secret_prev = std::env::var("AX_SECRET_SESSION_KEY").ok();
+        std::env::remove_var("AX_SECRET_SESSION_KEY");
+
+        let root = make_temp_dir("check-auth-signed-session-secret");
+        fs::create_dir_all(root.join("routes/api")).expect("routes dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("routes/api/admin.ax"),
+            r#"
+route GET "/api/admin"
+  require Auth.signedSession else redirect("/login")
+  return json("ok")
+"#,
+        )
+        .expect("route should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 3);
+        assert_eq!(diagnostics[0].code, "axonyx-auth-secret");
+        assert!(diagnostics[0].message.contains("AX_SECRET_SESSION_KEY"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+        if let Some(value) = secret_prev {
+            std::env::set_var("AX_SECRET_SESSION_KEY", value);
+        }
+    }
+
+    #[test]
+    fn check_app_sources_accepts_signed_session_secret_from_env_file() {
+        let _guard = lock_test_env();
+        let secret_prev = std::env::var("AX_SECRET_SESSION_KEY").ok();
+        std::env::remove_var("AX_SECRET_SESSION_KEY");
+
+        let root = make_temp_dir("check-auth-signed-session-env-file");
+        fs::create_dir_all(root.join("routes/api")).expect("routes dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(root.join(".env"), "AX_SECRET_SESSION_KEY=local-secret\n")
+            .expect("env should write");
+        fs::write(
+            root.join("routes/api/admin.ax"),
+            r#"
+route GET "/api/admin"
+  require Auth.signedSession else redirect("/login")
+  return json("ok")
+"#,
+        )
+        .expect("route should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+        if let Some(value) = secret_prev {
+            std::env::set_var("AX_SECRET_SESSION_KEY", value);
+        }
     }
 
     #[test]
