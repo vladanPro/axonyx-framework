@@ -10,9 +10,12 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use axonyx_core::ax_ast_prelude::{AxExpr, AxImport};
-use axonyx_core::ax_backend_ast_prelude::AxBackendBlock;
+use axonyx_core::ax_backend_ast_prelude::{AxBackendBlock, AxBackendDocument};
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
-use axonyx_core::ax_backend_lowering_prelude::{lower_backend_document, AxStepPlan, AxValuePlan};
+use axonyx_core::ax_backend_lowering_prelude::{
+    lower_backend_document, AxBackendPlan, AxHandlerKind, AxReturnPlan, AxRustExpr, AxStepPlan,
+    AxValuePlan,
+};
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_lowering_prelude::AxValue;
 use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
@@ -2490,7 +2493,7 @@ fn check_backend_requirements(
     path: &Path,
     source: &str,
     root: Option<&Path>,
-    document: &axonyx_core::ax_backend_ast_prelude::AxBackendDocument,
+    document: &AxBackendDocument,
 ) -> Vec<CheckDiagnostic> {
     let plan = match lower_backend_document(document) {
         Ok(plan) => plan,
@@ -2506,25 +2509,161 @@ fn check_backend_requirements(
         }
     };
 
+    let mut diagnostics = check_backend_route_inputs(path, source, document, &plan);
+
     if !backend_plan_uses_signed_session(&plan)
         || auth_secret_configured(root, "AX_SECRET_SESSION_KEY")
     {
-        return Vec::new();
+        return diagnostics;
     }
 
-    vec![CheckDiagnostic {
+    diagnostics.push(CheckDiagnostic {
         file: display_path(path),
         line: line_for_source_pattern(source, "Auth.signedSession"),
         column: 1,
         severity: "error",
         code: "axonyx-auth-secret",
         message: "Auth.signedSession requires AX_SECRET_SESSION_KEY. Set it in the environment or local .env file.".to_string(),
-    }]
+    });
+
+    diagnostics
 }
 
-fn backend_plan_uses_signed_session(
-    plan: &axonyx_core::ax_backend_lowering_prelude::AxBackendPlan,
-) -> bool {
+fn check_backend_route_inputs(
+    path: &Path,
+    source: &str,
+    document: &AxBackendDocument,
+    plan: &AxBackendPlan,
+) -> Vec<CheckDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for block in &document.blocks {
+        let AxBackendBlock::Route(route) = block else {
+            continue;
+        };
+
+        let mut seen = std::collections::BTreeSet::new();
+        for field in &route.input {
+            if !is_supported_route_input_type(&field.ty) {
+                diagnostics.push(CheckDiagnostic {
+                    file: display_path(path),
+                    line: line_for_source_pattern(source, &format!("{}:", field.name)),
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-route-input-type",
+                    message: format!(
+                        "route input `{}` uses unsupported type `{}`. Supported route input types are string, bool, i64, u64, and f64.",
+                        field.name, field.ty
+                    ),
+                });
+            }
+
+            if !seen.insert(field.name.clone()) {
+                diagnostics.push(CheckDiagnostic {
+                    file: display_path(path),
+                    line: line_for_repeated_source_pattern(source, &format!("{}:", field.name), 2),
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-route-input-duplicate",
+                    message: format!("route input `{}` is declared more than once.", field.name),
+                });
+            }
+        }
+    }
+
+    for handler in &plan.handlers {
+        let AxHandlerKind::Route { input, .. } = &handler.kind else {
+            continue;
+        };
+
+        if input.is_empty() && handler_steps_use_input_scope(&handler.steps) {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_source_pattern(source, "input."),
+                column: 1,
+                severity: "error",
+                code: "axonyx-route-input-missing",
+                message:
+                    "route uses `input.*` but has no `input:` section. Add typed route input fields or read request.form/request.json explicitly."
+                        .to_string(),
+            });
+        }
+    }
+
+    diagnostics
+}
+
+fn is_supported_route_input_type(ty: &str) -> bool {
+    matches!(
+        ty.trim().to_ascii_lowercase().as_str(),
+        "string"
+            | "bool"
+            | "boolean"
+            | "i64"
+            | "int"
+            | "integer"
+            | "u64"
+            | "f64"
+            | "float"
+            | "number"
+    )
+}
+
+fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
+    steps.iter().any(|step| match step {
+        AxStepPlan::Let {
+            value: AxValuePlan::Expr(expr),
+            ..
+        } => expr_uses_input_scope(expr),
+        AxStepPlan::Let {
+            value: AxValuePlan::Query(query),
+            ..
+        } => query_uses_input_scope(query),
+        AxStepPlan::Require { value, .. } => expr_uses_input_scope(value),
+        AxStepPlan::Return(AxReturnPlan::Expr(expr) | AxReturnPlan::Json(expr)) => {
+            expr_uses_input_scope(expr)
+        }
+        AxStepPlan::Patch { signal, value } => {
+            expr_uses_input_scope(signal) || expr_uses_input_scope(value)
+        }
+        AxStepPlan::Header { name, value } | AxStepPlan::Cookie { name, value } => {
+            expr_uses_input_scope(name) || expr_uses_input_scope(value)
+        }
+        AxStepPlan::ClearCookie { name } => expr_uses_input_scope(name),
+        AxStepPlan::Revalidate { target } => expr_uses_input_scope(target),
+        AxStepPlan::Insert { fields, .. } => fields
+            .iter()
+            .any(|field| expr_uses_input_scope(&field.value)),
+        AxStepPlan::Update {
+            fields, filters, ..
+        } => {
+            fields
+                .iter()
+                .any(|field| expr_uses_input_scope(&field.value))
+                || filters
+                    .iter()
+                    .any(|filter| expr_uses_input_scope(&filter.value))
+        }
+        AxStepPlan::Delete { filters, .. } => filters
+            .iter()
+            .any(|filter| expr_uses_input_scope(&filter.value)),
+        AxStepPlan::Send { payload, .. } => expr_uses_input_scope(payload),
+        AxStepPlan::Return(_) => false,
+    })
+}
+
+fn expr_uses_input_scope(expr: &AxRustExpr) -> bool {
+    expr.code == "input" || expr.code.starts_with("input.")
+}
+
+fn query_uses_input_scope(query: &axonyx_core::ax_backend_lowering_prelude::AxQueryPlan) -> bool {
+    query
+        .filters
+        .iter()
+        .any(|filter| expr_uses_input_scope(&filter.value))
+}
+
+fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
     plan.handlers.iter().any(|handler| {
         handler.steps.iter().any(|step| match step {
             AxStepPlan::Let {
@@ -2582,6 +2721,16 @@ fn line_for_source_pattern(source: &str, pattern: &str) -> usize {
         .position(|line| line.contains(pattern))
         .map(|index| index + 1)
         .unwrap_or(1)
+}
+
+fn line_for_repeated_source_pattern(source: &str, pattern: &str, occurrence: usize) -> usize {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains(pattern))
+        .nth(occurrence.saturating_sub(1))
+        .map(|(index, _)| index + 1)
+        .unwrap_or_else(|| line_for_source_pattern(source, pattern))
 }
 
 fn check_type_annotations(
@@ -9589,6 +9738,67 @@ route GET "/api/admin"
         if let Some(value) = secret_prev {
             std::env::set_var("AX_SECRET_SESSION_KEY", value);
         }
+    }
+
+    #[test]
+    fn check_ax_source_reports_route_input_missing_section() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/posts.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+route POST "/api/posts"
+  return json(input.title)
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 3);
+        assert_eq!(diagnostics[0].code, "axonyx-route-input-missing");
+        assert!(diagnostics[0].message.contains("input:"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_route_input_unsupported_type() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/posts.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+route POST "/api/posts"
+  input:
+    title: PostTitle
+
+  return json(input.title)
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 4);
+        assert_eq!(diagnostics[0].code, "axonyx-route-input-type");
+        assert!(diagnostics[0].message.contains("PostTitle"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_duplicate_route_input_field() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/posts.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+route POST "/api/posts"
+  input:
+    title: string
+    title: string
+
+  return json(input.title)
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 5);
+        assert_eq!(diagnostics[0].code, "axonyx-route-input-duplicate");
+        assert!(diagnostics[0].message.contains("title"));
     }
 
     #[test]
