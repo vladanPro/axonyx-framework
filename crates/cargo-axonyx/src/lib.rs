@@ -58,6 +58,7 @@ pub struct Cli {
 enum Commands {
     Add(AddArgs),
     Actions(ActionsArgs),
+    Api(ApiArgs),
     Build(BuildArgs),
     Check(CheckArgs),
     Content(ContentArgs),
@@ -69,6 +70,17 @@ enum Commands {
     State(StateArgs),
     Stream(DevArgs),
     Upgrade,
+}
+
+#[derive(Debug, Parser)]
+struct ApiArgs {
+    /// Output format for the API contract report.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+
+    /// Render API request contracts as .ax type declarations.
+    #[arg(long)]
+    schema: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -408,6 +420,20 @@ struct RoutesReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApiReport {
+    routes: Vec<ApiRouteReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApiRouteReport {
+    method: String,
+    route: String,
+    file: String,
+    params: Vec<String>,
+    inputs: Vec<ActionInputReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ActionReport {
     routes: Vec<ActionRouteReport>,
 }
@@ -514,6 +540,7 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Add(args) => add_module(args.module),
         Commands::Actions(args) => actions_command(args),
+        Commands::Api(args) => api_command(args),
         Commands::Build(args) => build_command(args),
         Commands::Check(args) => check_command(args),
         Commands::Content(args) => content_command(args),
@@ -1166,6 +1193,41 @@ fn routes_report(root: &Path) -> Result<RoutesReport> {
         stream_pages: axonyx_config_bool(root, "server", "stream_pages").unwrap_or(false),
         routes: collect_app_route_manifest(root)?,
     })
+}
+
+fn api_command(args: ApiArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_api_report(&root)?;
+
+    if args.schema {
+        print_api_schema_text(&report);
+        return Ok(());
+    }
+
+    match args.format {
+        CheckFormat::Text => print_api_text(&report),
+        CheckFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_api_report(root: &Path) -> Result<ApiReport> {
+    let routes = collect_app_route_manifest(root)?
+        .into_iter()
+        .filter(|route| route.kind == "api")
+        .map(|route| ApiRouteReport {
+            method: route.method.unwrap_or_else(|| "*".to_string()),
+            route: route.route,
+            file: route.file,
+            params: route.params,
+            inputs: route.inputs,
+        })
+        .collect();
+
+    Ok(ApiReport { routes })
 }
 
 fn collect_action_report(root: &Path) -> Result<ActionReport> {
@@ -4113,6 +4175,81 @@ fn route_input_label(input: &ActionInputReport) -> String {
         .unwrap_or_else(|| format!("{}{marker}:{}", input.name, input.ty))
 }
 
+fn print_api_text(report: &ApiReport) {
+    if report.routes.is_empty() {
+        println!("No API routes found in routes/**/*.ax.");
+        return;
+    }
+
+    println!("API:");
+    for route in &report.routes {
+        let mut details = vec![format!("file={}", route.file)];
+        if !route.params.is_empty() {
+            details.push(format!("params={}", route.params.join(",")));
+        }
+        if route.inputs.is_empty() {
+            details.push("inputs=none".to_string());
+        } else {
+            details.push(format!(
+                "inputs={}",
+                route
+                    .inputs
+                    .iter()
+                    .map(route_input_label)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+
+        println!(
+            "  {:<6} {:<28} {}",
+            route.method,
+            route.route,
+            details.join(" ")
+        );
+    }
+}
+
+fn print_api_schema_text(report: &ApiReport) {
+    if report.routes.is_empty() {
+        println!("// No API routes found in routes/**/*.ax.");
+        return;
+    }
+
+    for route in &report.routes {
+        println!("// {} {}", route.method, route.route);
+        println!("type {}Request {{", api_route_type_name(route));
+        if route.inputs.is_empty() {
+            println!("  // no input body");
+        } else {
+            for input in &route.inputs {
+                let marker = if input.optional { "?" } else { "" };
+                let default = input
+                    .default
+                    .as_ref()
+                    .map(|value| format!(" = {value}"))
+                    .unwrap_or_default();
+                println!(
+                    "  {}{}: {}{}",
+                    input.name,
+                    marker,
+                    ax_schema_type(&input.ty),
+                    default
+                );
+            }
+        }
+        println!("}}\n");
+    }
+}
+
+fn api_route_type_name(route: &ApiRouteReport) -> String {
+    format!(
+        "{}{}",
+        sanitize_type_name(&route.method.to_ascii_lowercase()),
+        sanitize_type_name(&route.route)
+    )
+}
+
 fn print_actions_text(report: &ActionReport) {
     if report.routes.is_empty() {
         println!("No route-local actions found in app/**/actions.ax.");
@@ -6990,6 +7127,55 @@ route POST "/api/posts/:slug"
                 },
             ]
         );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn api_report_collects_typed_route_contracts() {
+        let root = make_temp_dir("api-report-contracts");
+        fs::create_dir_all(root.join("routes/api")).expect("api routes dir should exist");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts"
+  return ok
+
+route POST "/api/posts"
+  input:
+    title: string
+    featured?: bool = false
+
+  return json(input.title)
+"#,
+        )
+        .expect("route source should write");
+
+        let report = collect_api_report(&root).expect("api report should collect");
+
+        assert_eq!(report.routes.len(), 2);
+        assert_eq!(report.routes[0].method, "GET");
+        assert_eq!(report.routes[0].route, "/api/posts");
+        assert!(report.routes[0].inputs.is_empty());
+        assert_eq!(report.routes[1].method, "POST");
+        assert_eq!(
+            report.routes[1].inputs,
+            vec![
+                ActionInputReport {
+                    name: "title".to_string(),
+                    ty: "string".to_string(),
+                    optional: false,
+                    default: None,
+                },
+                ActionInputReport {
+                    name: "featured".to_string(),
+                    ty: "bool".to_string(),
+                    optional: true,
+                    default: Some("false".to_string()),
+                },
+            ]
+        );
+        assert_eq!(api_route_type_name(&report.routes[1]), "PostApiPosts");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
