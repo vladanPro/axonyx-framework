@@ -75,8 +75,25 @@ Suggested first edit:
 - featured posts section in `app/posts/page.ax`
 - action-backed form demo with `ActionForm`, `ActionStatus`, typed inputs, and
   defaulted optional action fields
+- typed `POST /api/posts` route input example in `routes/api/posts.ax`
 - reusable Foundry imports from `@axonyx/ui/...`
 - same backend route/loader/action/job draft structure as the minimal template
+
+## Typed API Route Example
+
+`routes/api/posts.ax` includes a typed body example:
+
+```ax
+route POST "/api/posts"
+  input:
+    title: string
+    excerpt?: string = ""
+    featured?: bool = false
+
+  return json(input.title)
+```
+
+This reads form data first, then JSON body fields, and gives clear `cargo ax check` diagnostics when the route input shape is invalid.
 
 ## Env
 

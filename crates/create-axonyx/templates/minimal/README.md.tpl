@@ -138,3 +138,27 @@ src/
 - `app/posts/loader.ax`
 - `app/posts/actions.ax`
 - `routes/api/posts.ax`
+
+## Typed API Route Example
+
+`routes/api/posts.ax` includes a typed `POST /api/posts` example:
+
+```ax
+route POST "/api/posts"
+  input:
+    title: string
+    excerpt?: string = ""
+    featured?: bool = false
+
+  return json(input.title)
+```
+
+Try it with JSON:
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/posts \
+  -H "Content-Type: application/json" \
+  -d "{\"title\":\"Hello Axonyx\",\"featured\":true}"
+```
+
+`cargo ax check` validates the `input:` block before build, including missing sections, duplicate fields, and unsupported route input types.
