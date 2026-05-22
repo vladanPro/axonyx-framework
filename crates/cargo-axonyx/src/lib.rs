@@ -398,6 +398,7 @@ struct RouteManifestItem {
     loader: Option<String>,
     actions: Option<String>,
     params: Vec<String>,
+    inputs: Vec<ActionInputReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3971,6 +3972,7 @@ fn app_route_manifest_item(
             .exists()
             .then(|| display_relative_path(root, &actions_path)),
         params,
+        inputs: Vec::new(),
     })
 }
 
@@ -4006,6 +4008,16 @@ fn collect_backend_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>>
                 loader: None,
                 actions: None,
                 params: route_params_from_pattern(&route.path),
+                inputs: route
+                    .input
+                    .into_iter()
+                    .map(|field| ActionInputReport {
+                        name: field.name,
+                        ty: field.ty,
+                        optional: field.optional,
+                        default: field.default.as_ref().map(format_ax_expr),
+                    })
+                    .collect(),
             });
         }
     }
@@ -4076,9 +4088,29 @@ fn print_routes_text(report: &RoutesReport) {
         if !route.params.is_empty() {
             details.push(format!("params={}", route.params.join(",")));
         }
+        if !route.inputs.is_empty() {
+            details.push(format!(
+                "inputs={}",
+                route
+                    .inputs
+                    .iter()
+                    .map(route_input_label)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
 
         println!("  {:<28} {}", route.route, details.join(" "));
     }
+}
+
+fn route_input_label(input: &ActionInputReport) -> String {
+    let marker = if input.optional { "?" } else { "" };
+    input
+        .default
+        .as_ref()
+        .map(|default| format!("{}{marker}:{}={default}", input.name, input.ty))
+        .unwrap_or_else(|| format!("{}{marker}:{}", input.name, input.ty))
 }
 
 fn print_actions_text(report: &ActionReport) {
@@ -6920,6 +6952,10 @@ route GET "/api/posts"
   return ok
 
 route POST "/api/posts/:slug"
+  input:
+    title: string
+    featured?: bool = false
+
   return ok
 "#,
         )
@@ -6937,6 +6973,23 @@ route POST "/api/posts/:slug"
         assert_eq!(routes[1].method.as_deref(), Some("POST"));
         assert_eq!(routes[1].route, "/api/posts/:slug");
         assert_eq!(routes[1].params, vec!["slug"]);
+        assert_eq!(
+            routes[1].inputs,
+            vec![
+                ActionInputReport {
+                    name: "title".to_string(),
+                    ty: "string".to_string(),
+                    optional: false,
+                    default: None,
+                },
+                ActionInputReport {
+                    name: "featured".to_string(),
+                    ty: "bool".to_string(),
+                    optional: true,
+                    default: Some("false".to_string()),
+                },
+            ]
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
