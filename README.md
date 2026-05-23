@@ -36,7 +36,7 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 ```toml
 [dependencies]
 axonyx-runtime = "0.1.9"
-axonyx-ui = "0.0.34"
+axonyx-ui = "0.0.38"
 ```
 
 ## Quick Start
@@ -226,6 +226,7 @@ cargo ax content
 cargo ax state
 cargo ax build
 cargo ax run dev
+cargo ax test
 ```
 
 `cargo ax schema pull` accepts sample JSON as a draft, but it can also read a typed
@@ -250,6 +251,11 @@ Use strict doctor mode in CI:
 ```bash
 cargo ax doctor --deny-warnings
 ```
+
+`cargo ax test` is reserved for Aegis, the future Rust-first QA runner for
+component, route, and browser checks. In the current beta it is a preview
+placeholder only; use `cargo ax check`, `cargo ax doctor --deny-warnings`, and
+`cargo ax build --clean` for real validation today.
 
 Use JSON output for editor tooling:
 

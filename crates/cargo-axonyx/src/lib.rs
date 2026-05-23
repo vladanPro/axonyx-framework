@@ -43,7 +43,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.10";
-const AXONYX_UI_VERSION: &str = "0.0.34";
+const AXONYX_UI_VERSION: &str = "0.0.38";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -69,6 +69,7 @@ enum Commands {
     Schema(SchemaArgs),
     State(StateArgs),
     Stream(DevArgs),
+    Test(TestArgs),
     Upgrade,
 }
 
@@ -187,6 +188,12 @@ struct StateArgs {
     format: CheckFormat,
 }
 
+#[derive(Debug, Parser)]
+struct TestArgs {
+    #[command(subcommand)]
+    command: Option<TestCommands>,
+}
+
 #[derive(Debug, Subcommand)]
 enum RunCommands {
     Dev(DevArgs),
@@ -196,6 +203,13 @@ enum RunCommands {
 #[derive(Debug, Subcommand)]
 enum SchemaCommands {
     Pull(SchemaPullArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum TestCommands {
+    Components,
+    Routes,
+    Browser,
 }
 
 #[derive(Debug, Parser)]
@@ -551,6 +565,7 @@ fn run() -> Result<()> {
         Commands::Schema(args) => schema_command(args),
         Commands::State(args) => state_command(args),
         Commands::Stream(args) => run_stream_server(args),
+        Commands::Test(args) => test_command(args),
         Commands::Upgrade => upgrade_command(),
     }
 }
@@ -1310,6 +1325,40 @@ fn state_command(args: StateArgs) -> Result<()> {
         CheckFormat::Text => print_state_text(&report),
         CheckFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+
+    Ok(())
+}
+
+fn test_command(args: TestArgs) -> Result<()> {
+    match args.command {
+        None => {
+            println!("Axonyx test is reserved for Aegis, the future Rust-first QA runner.");
+            println!();
+            println!("Use these stable checks today:");
+            println!("  cargo ax check");
+            println!("  cargo ax doctor --deny-warnings");
+            println!("  cargo ax build --clean");
+            println!();
+            println!("Reserved Aegis commands:");
+            println!("  cargo ax test components");
+            println!("  cargo ax test routes");
+            println!("  cargo ax test browser");
+            println!();
+            println!("Status: preview placeholder only; no tests were executed.");
+        }
+        Some(TestCommands::Components) => {
+            println!("Aegis component tests are reserved for a future Axonyx release.");
+            println!("Status: preview placeholder only; no component tests were executed.");
+        }
+        Some(TestCommands::Routes) => {
+            println!("Aegis route tests are reserved for a future Axonyx release.");
+            println!("Status: preview placeholder only; no route tests were executed.");
+        }
+        Some(TestCommands::Browser) => {
+            println!("Aegis browser tests are reserved for a future Axonyx release.");
+            println!("Status: preview placeholder only; no browser tests were executed.");
         }
     }
 
@@ -8035,6 +8084,27 @@ page Home
     }
 
     #[test]
+    fn parses_reserved_test_command() {
+        let cli = Cli::try_parse_from(["cargo-ax", "test"]).expect("test command should parse");
+
+        let Commands::Test(args) = cli.command else {
+            panic!("expected test command");
+        };
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn parses_reserved_test_browser_command() {
+        let cli = Cli::try_parse_from(["cargo-ax", "test", "browser"])
+            .expect("test browser command should parse");
+
+        let Commands::Test(args) = cli.command else {
+            panic!("expected test command");
+        };
+        assert!(matches!(args.command, Some(TestCommands::Browser)));
+    }
+
+    #[test]
     fn parses_reserved_cms_add_modules() {
         let cms = Cli::try_parse_from(["cargo-ax", "add", "cms"])
             .expect("cms module command should parse");
@@ -8102,7 +8172,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.34\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.38\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -8398,7 +8468,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains("axonyx-runtime = \"0.1.10\""));
-        assert!(updated.contains("version = \"0.0.34\""));
+        assert!(updated.contains("version = \"0.0.38\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
