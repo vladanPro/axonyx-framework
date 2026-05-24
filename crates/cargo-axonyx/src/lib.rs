@@ -795,6 +795,7 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
         ));
     }
     checks.push(doctor_server_streaming_check(root));
+    checks.push(doctor_aegis_config_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
     let ui_enabled = axonyx_source
@@ -808,6 +809,24 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
     checks.push(doctor_ax_sources_check(root));
 
     checks
+}
+
+fn doctor_aegis_config_check(root: &Path) -> DoctorCheck {
+    if root.join("aegis.toml").exists() {
+        DoctorCheck {
+            code: "aegis-config",
+            severity: DoctorSeverity::Ok,
+            message: "aegis.toml found; `cargo ax test` can run fast route QA.".to_string(),
+            hint: None,
+        }
+    } else {
+        DoctorCheck {
+            code: "aegis-config",
+            severity: DoctorSeverity::Warn,
+            message: "aegis.toml is missing; `cargo ax test` has no route QA config.".to_string(),
+            hint: Some("Run `aegis init` or recreate the starter with the latest create-axonyx."),
+        }
+    }
 }
 
 fn doctor_server_streaming_check(root: &Path) -> DoctorCheck {
@@ -8284,6 +8303,11 @@ page RootLayout
 "#,
         )
         .expect("layout should write");
+        fs::write(
+            app_root.join("aegis.toml"),
+            "base_url = \"http://127.0.0.1:3000\"\n",
+        )
+        .expect("aegis config should write");
 
         let checks = doctor_checks(&app_root);
 
@@ -8293,6 +8317,36 @@ page RootLayout
         assert!(checks.iter().any(|check| check.code == "ui-package-css"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_reports_aegis_config_status() {
+        let root = make_temp_dir("doctor-aegis-config");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+
+        let checks = doctor_checks(&root);
+        let missing = checks
+            .iter()
+            .find(|check| check.code == "aegis-config")
+            .expect("aegis config check should exist");
+        assert_eq!(missing.severity, DoctorSeverity::Warn);
+        assert!(missing.message.contains("missing"));
+
+        fs::write(
+            root.join("aegis.toml"),
+            "base_url = \"http://127.0.0.1:3000\"\n",
+        )
+        .expect("aegis config should write");
+
+        let checks = doctor_checks(&root);
+        let configured = checks
+            .iter()
+            .find(|check| check.code == "aegis-config")
+            .expect("aegis config check should exist");
+        assert_eq!(configured.severity, DoctorSeverity::Ok);
+        assert!(configured.message.contains("cargo ax test"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
