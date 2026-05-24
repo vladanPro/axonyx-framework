@@ -36,6 +36,17 @@ This validates `.ax` sources, regenerates `src/generated/backend.rs`, writes sta
 In this template it shows the `CreatePost` inputs, including the optional
 `status?: string = "draft"` default used by the `ActionForm` on `/posts`.
 
+## Fast QA
+
+This starter includes `aegis.toml` for fast route checks before deploy.
+
+Keep `cargo ax run dev` running, then in a second terminal run:
+
+```bash
+cargo install axonyx-aegis --force
+aegis fast --config aegis.toml
+```
+
 Static build output:
 
 ```text

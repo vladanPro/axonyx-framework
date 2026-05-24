@@ -565,6 +565,47 @@ mod tests {
     }
 
     #[test]
+    fn templates_include_route_specific_aegis_config() {
+        let minimal_files = template::template_files(
+            template::AppTemplate::Minimal,
+            "demo-site",
+            "axonyx-runtime = \"0.1.0\"",
+            "runtime note",
+        );
+        let site_files = template::template_files(
+            template::AppTemplate::Site,
+            "demo-site",
+            "axonyx-runtime = \"0.1.0\"",
+            "runtime note",
+        );
+        let docs_files = template::template_files(
+            template::AppTemplate::Docs,
+            "demo-site",
+            "axonyx-runtime = \"0.1.0\"",
+            "runtime note",
+        );
+
+        let minimal_aegis = minimal_files
+            .iter()
+            .find(|file| file.relative_path == "aegis.toml")
+            .expect("minimal template should include aegis.toml");
+        let site_aegis = site_files
+            .iter()
+            .find(|file| file.relative_path == "aegis.toml")
+            .expect("site template should include aegis.toml");
+        let docs_aegis = docs_files
+            .iter()
+            .find(|file| file.relative_path == "aegis.toml")
+            .expect("docs template should include aegis.toml");
+
+        assert!(minimal_aegis.contents.contains("goto = \"/posts\""));
+        assert!(site_aegis.contents.contains("goto = \"/posts\""));
+        assert!(docs_aegis.contents.contains("goto = \"/getting-started\""));
+        assert!(docs_aegis.contents.contains("goto = \"/reference\""));
+        assert!(!docs_aegis.contents.contains("goto = \"/posts\""));
+    }
+
+    #[test]
     fn create_error_hint_detects_existing_target_directory() {
         let error = anyhow::anyhow!(
             "target directory 'demo-site' already exists (use --force to overwrite)"

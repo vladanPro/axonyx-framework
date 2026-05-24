@@ -30,6 +30,7 @@ const APP_JOB_DIGEST_AX: &str = include_str!("../templates/minimal/jobs/digest.a
 const APP_README: &str = include_str!("../templates/minimal/README.md.tpl");
 const APP_GITIGNORE: &str = include_str!("../templates/minimal/.gitignore.tpl");
 const APP_ENV_EXAMPLE: &str = include_str!("../templates/minimal/.env.example.tpl");
+const APP_AEGIS_TOML: &str = include_str!("../templates/minimal/aegis.toml.tpl");
 const APP_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/minimal/public/favicon.svg.tpl");
 
 const SITE_APP_LAYOUT_AX: &str = include_str!("../templates/site/app/layout.ax.tpl");
@@ -42,6 +43,7 @@ const SITE_APP_POSTS_ACTIONS_AX: &str = include_str!("../templates/site/app/post
 const SITE_APP_ROUTE_POSTS_AX: &str = include_str!("../templates/site/routes/api/posts.ax.tpl");
 const SITE_APP_JOB_DIGEST_AX: &str = include_str!("../templates/site/jobs/digest.ax.tpl");
 const SITE_APP_README: &str = include_str!("../templates/site/README.md.tpl");
+const SITE_APP_AEGIS_TOML: &str = include_str!("../templates/site/aegis.toml.tpl");
 const SITE_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/site/public/favicon.svg.tpl");
 const SITE_PUBLIC_BRAND_MARK_SVG: &str =
     include_str!("../templates/site/public/brand-mark.svg.tpl");
@@ -58,6 +60,7 @@ const DOCS_APP_FEEDBACK_PAGE_AX: &str = include_str!("../templates/docs/app/feed
 const DOCS_APP_FEEDBACK_ACTIONS_AX: &str =
     include_str!("../templates/docs/app/feedback/actions.ax.tpl");
 const DOCS_APP_README: &str = include_str!("../templates/docs/README.md.tpl");
+const DOCS_APP_AEGIS_TOML: &str = include_str!("../templates/docs/aegis.toml.tpl");
 const DOCS_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/docs/public/favicon.svg.tpl");
 const DOCS_PUBLIC_BRAND_MARK_SVG: &str =
     include_str!("../templates/docs/public/brand-mark.svg.tpl");
@@ -78,6 +81,11 @@ pub fn template_files(
     let axonyx_toml = match template {
         AppTemplate::Minimal => APP_AXONYX_TOML.to_string(),
         AppTemplate::Site | AppTemplate::Docs => ui_ready_axonyx_toml(),
+    };
+    let aegis_toml = match template {
+        AppTemplate::Minimal => APP_AEGIS_TOML,
+        AppTemplate::Site => SITE_APP_AEGIS_TOML,
+        AppTemplate::Docs => DOCS_APP_AEGIS_TOML,
     };
 
     let mut files = vec![
@@ -108,6 +116,10 @@ pub fn template_files(
         TemplateFile {
             relative_path: "Axonyx.toml",
             contents: apply_vars(&axonyx_toml, &vars),
+        },
+        TemplateFile {
+            relative_path: "aegis.toml",
+            contents: apply_vars(aegis_toml, &vars),
         },
         TemplateFile {
             relative_path: ".env.example",
