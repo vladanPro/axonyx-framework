@@ -21,6 +21,7 @@ cargo ax build --clean
 cargo ax run dev
 cargo ax run dev --transport tokio
 cargo ax stream
+cargo ax test
 ```
 
 ## Typical Flow
@@ -65,6 +66,15 @@ copy/paste `.ax` input type declaration.
 `cargo ax stream` starts the dev server with a visible streaming probe URL. It is
 not a replacement for `cargo ax run dev`; it exists to test Axonyx chunked
 response support while UI streaming is being shaped.
+
+`cargo ax test` delegates fast route QA to Aegis when an `aegis.toml` file is
+present. Keep `cargo ax run dev` running in one terminal, then run:
+
+```bash
+cargo install axonyx-aegis --force
+cargo ax test
+cargo ax test --format json --fail-fast false
+```
 
 ```bash
 cargo ax stream

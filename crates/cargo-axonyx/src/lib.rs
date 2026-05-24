@@ -190,6 +190,18 @@ struct StateArgs {
 
 #[derive(Debug, Parser)]
 struct TestArgs {
+    /// Aegis fast-test config file.
+    #[arg(long, default_value = "aegis.toml")]
+    config: PathBuf,
+
+    /// Output format passed through to Aegis.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+
+    /// Stop at the first failing Aegis check.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    fail_fast: bool,
+
     #[command(subcommand)]
     command: Option<TestCommands>,
 }
@@ -205,7 +217,7 @@ enum SchemaCommands {
     Pull(SchemaPullArgs),
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 enum TestCommands {
     Components,
     Routes,
@@ -1332,34 +1344,63 @@ fn state_command(args: StateArgs) -> Result<()> {
 }
 
 fn test_command(args: TestArgs) -> Result<()> {
-    match args.command {
-        None => {
-            println!("Axonyx test is reserved for Aegis, the future Rust-first QA runner.");
-            println!();
-            println!("Use these stable checks today:");
-            println!("  cargo ax check");
-            println!("  cargo ax doctor --deny-warnings");
-            println!("  cargo ax build --clean");
-            println!();
-            println!("Reserved Aegis commands:");
-            println!("  cargo ax test components");
-            println!("  cargo ax test routes");
-            println!("  cargo ax test browser");
-            println!();
-            println!("Status: preview placeholder only; no tests were executed.");
-        }
-        Some(TestCommands::Components) => {
+    let mode = args.command.unwrap_or(TestCommands::Routes);
+
+    match mode {
+        TestCommands::Routes => run_aegis_fast_tests(&args),
+        TestCommands::Components => {
             println!("Aegis component tests are reserved for a future Axonyx release.");
-            println!("Status: preview placeholder only; no component tests were executed.");
+            println!("Run route smoke checks today with:");
+            println!("  cargo ax test");
+            Ok(())
         }
-        Some(TestCommands::Routes) => {
-            println!("Aegis route tests are reserved for a future Axonyx release.");
-            println!("Status: preview placeholder only; no route tests were executed.");
-        }
-        Some(TestCommands::Browser) => {
+        TestCommands::Browser => {
             println!("Aegis browser tests are reserved for a future Axonyx release.");
-            println!("Status: preview placeholder only; no browser tests were executed.");
+            println!("Run route smoke checks today with:");
+            println!("  cargo ax test");
+            Ok(())
         }
+    }
+}
+
+fn run_aegis_fast_tests(args: &TestArgs) -> Result<()> {
+    let root = app_root()?;
+    let config_path = if args.config.is_absolute() {
+        args.config.clone()
+    } else {
+        root.join(&args.config)
+    };
+
+    if !config_path.exists() {
+        bail!(
+            "Aegis config '{}' was not found.\nCreate one with `aegis init`, or scaffold a new app with the latest `create-axonyx`.",
+            config_path.display()
+        );
+    }
+
+    let mut command = Command::new("aegis");
+    command
+        .arg("fast")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--format")
+        .arg(match args.format {
+            CheckFormat::Text => "text",
+            CheckFormat::Json => "json",
+        })
+        .arg("--fail-fast")
+        .arg(if args.fail_fast { "true" } else { "false" })
+        .current_dir(&root);
+
+    println!("Running Aegis fast QA from cargo ax test");
+    println!("Config: {}", config_path.display());
+
+    let status = command
+        .status()
+        .context("failed to start `aegis`; install it with `cargo install axonyx-aegis --force`")?;
+
+    if !status.success() {
+        bail!("Aegis fast QA failed with status {status}");
     }
 
     Ok(())
@@ -8091,6 +8132,32 @@ page Home
             panic!("expected test command");
         };
         assert!(args.command.is_none());
+        assert_eq!(args.config, PathBuf::from("aegis.toml"));
+        assert_eq!(args.format, CheckFormat::Text);
+        assert!(args.fail_fast);
+    }
+
+    #[test]
+    fn parses_aegis_test_options() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "test",
+            "--config",
+            "qa/aegis.toml",
+            "--format",
+            "json",
+            "--fail-fast",
+            "false",
+        ])
+        .expect("test options should parse");
+
+        let Commands::Test(args) = cli.command else {
+            panic!("expected test command");
+        };
+        assert!(args.command.is_none());
+        assert_eq!(args.config, PathBuf::from("qa/aegis.toml"));
+        assert_eq!(args.format, CheckFormat::Json);
+        assert!(!args.fail_fast);
     }
 
     #[test]
