@@ -65,6 +65,7 @@ enum Commands {
     Content(ContentArgs),
     Dev(DevArgs),
     Doctor(DoctorArgs),
+    Melt(MeltArgs),
     Routes(RoutesArgs),
     Run(RunArgs),
     Schema(SchemaArgs),
@@ -162,6 +163,13 @@ struct DoctorArgs {
     /// Exit with a non-zero status when warnings are present.
     #[arg(long)]
     deny_warnings: bool,
+}
+
+#[derive(Debug, Parser)]
+struct MeltArgs {
+    /// Output format for the Melt project graph.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
 }
 
 #[derive(Debug, Parser)]
@@ -508,6 +516,44 @@ struct StateReportSignal {
     initial: AxStateValue,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct MeltReport {
+    app: MeltAppReport,
+    layers: Vec<MeltLayerReport>,
+    routes: RoutesReport,
+    api: ApiReport,
+    actions: ActionReport,
+    state: StateReport,
+    content: ContentManifest,
+    diagnostics: Vec<CheckDiagnostic>,
+    summary: MeltSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MeltAppReport {
+    name: String,
+    root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MeltLayerReport {
+    name: &'static str,
+    status: &'static str,
+    detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct MeltSummary {
+    page_routes: usize,
+    api_routes: usize,
+    action_routes: usize,
+    actions: usize,
+    state_signals: usize,
+    content_collections: usize,
+    content_entries: usize,
+    diagnostics: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ContentManifest {
     collections: Vec<ContentCollectionManifest>,
@@ -574,6 +620,7 @@ fn run() -> Result<()> {
         Commands::Content(args) => content_command(args),
         Commands::Dev(args) => run_dev_server(args),
         Commands::Doctor(args) => doctor_command(args),
+        Commands::Melt(args) => melt_command(args),
         Commands::Routes(args) => routes_command(args),
         Commands::Run(args) => run_command(args),
         Commands::Schema(args) => schema_command(args),
@@ -1369,6 +1416,141 @@ fn routes_command(args: RoutesArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn melt_command(args: MeltArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_melt_report(&root)?;
+
+    match args.format {
+        CheckFormat::Text => print_melt_text(&report),
+        CheckFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+
+    if !report.diagnostics.is_empty() {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn collect_melt_report(root: &Path) -> Result<MeltReport> {
+    let routes = routes_report(root)?;
+    let api = collect_api_report(root)?;
+    let actions = collect_action_report(root)?;
+    let state = collect_state_report(root)?;
+    let content = collect_content_manifest(root)?;
+    let diagnostics = check_app_sources(root)?;
+    let summary = melt_summary(&routes, &api, &actions, &state, &content, &diagnostics);
+    let layers = melt_layer_reports(root, &summary);
+
+    Ok(MeltReport {
+        app: MeltAppReport {
+            name: axonyx_config_string(root, "app", "name")
+                .unwrap_or_else(|| "axonyx-app".to_string()),
+            root: display_path(root),
+        },
+        layers,
+        routes,
+        api,
+        actions,
+        state,
+        content,
+        diagnostics,
+        summary,
+    })
+}
+
+fn melt_summary(
+    routes: &RoutesReport,
+    api: &ApiReport,
+    actions: &ActionReport,
+    state: &StateReport,
+    content: &ContentManifest,
+    diagnostics: &[CheckDiagnostic],
+) -> MeltSummary {
+    MeltSummary {
+        page_routes: routes
+            .routes
+            .iter()
+            .filter(|route| route.kind == "page")
+            .count(),
+        api_routes: api.routes.len(),
+        action_routes: actions.routes.len(),
+        actions: actions.routes.iter().map(|route| route.actions.len()).sum(),
+        state_signals: state.files.iter().map(|file| file.signals.len()).sum(),
+        content_collections: content.collections.len(),
+        content_entries: content
+            .collections
+            .iter()
+            .map(|collection| collection.entries.len())
+            .sum(),
+        diagnostics: diagnostics.len(),
+    }
+}
+
+fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport> {
+    let foundry_ready = resolve_package_asset_root(root, "axonyx-ui").is_some()
+        || cargo_manifest_has_dependency_file(&root.join("Cargo.toml"), "axonyx-ui")
+            .unwrap_or(false);
+
+    vec![
+        MeltLayerReport {
+            name: "Axonyx Pages",
+            status: if summary.page_routes > 0 {
+                "ready"
+            } else {
+                "empty"
+            },
+            detail: format!("{} page route(s) discovered.", summary.page_routes),
+        },
+        MeltLayerReport {
+            name: "Axonyx Server",
+            status: "ready",
+            detail: format!(
+                "{} API route(s), {} action route(s), stream_pages={}.",
+                summary.api_routes,
+                summary.action_routes,
+                axonyx_config_bool(root, "server", "stream_pages").unwrap_or(false)
+            ),
+        },
+        MeltLayerReport {
+            name: "Axonyx State",
+            status: if summary.state_signals > 0 {
+                "ready"
+            } else {
+                "empty"
+            },
+            detail: format!("{} state signal(s) declared.", summary.state_signals),
+        },
+        MeltLayerReport {
+            name: "Axonyx Foundry",
+            status: if foundry_ready { "ready" } else { "optional" },
+            detail: if foundry_ready {
+                "Foundry UI package is available.".to_string()
+            } else {
+                "Run `cargo ax add ui` when this app needs Foundry components.".to_string()
+            },
+        },
+        MeltLayerReport {
+            name: "Axonyx Melt",
+            status: if summary.diagnostics == 0 {
+                "ready"
+            } else {
+                "attention"
+            },
+            detail: if summary.diagnostics == 0 {
+                "Project graph collected without source diagnostics.".to_string()
+            } else {
+                format!(
+                    "{} source diagnostic(s) must be fixed.",
+                    summary.diagnostics
+                )
+            },
+        },
+    ]
 }
 
 fn routes_report(root: &Path) -> Result<RoutesReport> {
@@ -4420,6 +4602,49 @@ fn route_params_from_pattern(pattern: &str) -> Vec<String> {
 
 fn display_relative_path(root: &Path, path: &Path) -> String {
     display_path(path.strip_prefix(root).unwrap_or(path))
+}
+
+fn print_melt_text(report: &MeltReport) {
+    println!("Axonyx Melt");
+    println!("  app={} root={}", report.app.name, report.app.root);
+    println!(
+        "  pages={} api={} action_routes={} actions={} state_signals={} content_collections={} content_entries={} diagnostics={}",
+        report.summary.page_routes,
+        report.summary.api_routes,
+        report.summary.action_routes,
+        report.summary.actions,
+        report.summary.state_signals,
+        report.summary.content_collections,
+        report.summary.content_entries,
+        report.summary.diagnostics
+    );
+
+    println!();
+    println!("Framework layers:");
+    for layer in &report.layers {
+        println!("  {:<16} {:<9} {}", layer.name, layer.status, layer.detail);
+    }
+
+    println!();
+    print_routes_text(&report.routes);
+
+    if !report.content.collections.is_empty() {
+        println!();
+        print_content_text(&report.content);
+    }
+
+    if !report.state.files.is_empty() {
+        println!();
+        print_state_text(&report.state);
+    }
+
+    if !report.diagnostics.is_empty() {
+        println!();
+        println!("Diagnostics:");
+        for diagnostic in &report.diagnostics {
+            println!("  {}", format_check_diagnostic(diagnostic));
+        }
+    }
 }
 
 fn print_routes_text(report: &RoutesReport) {
@@ -7638,6 +7863,68 @@ route POST "/api/posts"
         let json = serde_json::to_string(&report).expect("routes report should serialize");
         assert!(json.contains("\"stream_pages\":true"));
         assert!(json.contains("\"routes\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn melt_report_collects_framework_layer_graph() {
+        let root = make_temp_dir("melt-report");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nstream_pages = true\n",
+        )
+        .expect("config should write");
+        fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+page state theme: String = "silver"
+
+<Copy>Home</Copy>
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/settings/page.ax"),
+            "page Settings\n<Copy>Settings</Copy>\n",
+        )
+        .expect("settings page should write");
+        fs::write(
+            root.join("app/settings/actions.ax"),
+            "action Save\n  return ok\n",
+        )
+        .expect("actions should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            "route GET \"/api/posts\"\n  return json(\"ok\")\n",
+        )
+        .expect("api route should write");
+
+        let report = collect_melt_report(&root).expect("melt report should collect");
+
+        assert_eq!(report.app.name, "demo");
+        assert_eq!(report.summary.page_routes, 2);
+        assert_eq!(report.summary.api_routes, 1);
+        assert_eq!(report.summary.action_routes, 1);
+        assert_eq!(report.summary.actions, 1);
+        assert_eq!(report.summary.state_signals, 1);
+        assert_eq!(report.summary.diagnostics, 0);
+        assert!(report
+            .layers
+            .iter()
+            .any(|layer| layer.name == "Axonyx Pages" && layer.status == "ready"));
+        assert!(report
+            .layers
+            .iter()
+            .any(|layer| layer.name == "Axonyx Melt" && layer.status == "ready"));
+
+        let json = serde_json::to_string(&report).expect("melt report should serialize");
+        assert!(json.contains("\"Axonyx Pages\""));
+        assert!(json.contains("\"summary\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

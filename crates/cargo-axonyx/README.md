@@ -17,6 +17,7 @@ cargo ax actions
 cargo ax check
 cargo ax content
 cargo ax doctor
+cargo ax melt
 cargo ax build --clean
 cargo ax run dev
 cargo ax run dev --transport tokio
@@ -68,6 +69,11 @@ future worker layer behind the scenes.
 streaming mode, Axonyx UI package resolution, stylesheet wiring, and `.ax`
 source diagnostics. Text output also summarizes the public framework layers:
 Axonyx Pages, Axonyx Server, Axonyx State, Axonyx Foundry, and Axonyx Melt.
+
+`cargo ax melt` prints the first project graph snapshot across those layers:
+routes, API routes, actions, state declarations, content collections, and source
+diagnostics. Use `cargo ax melt --format json` when docs, CI, or future tooling
+need the same graph as structured data.
 
 `cargo ax content` reads `[content.collections]` from `Axonyx.toml` and prints the current Melt-time content manifest.
 `cargo ax build` writes the same manifest to `dist/_ax/content/manifest.json` when collections are configured.
