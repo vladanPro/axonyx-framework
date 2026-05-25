@@ -684,7 +684,7 @@ fn filter_action_report(mut report: ActionReport, args: &ActionsArgs) -> ActionR
 
 fn build_command(args: BuildArgs) -> Result<()> {
     let root = app_root()?;
-    ensure_no_check_diagnostics(&root)?;
+    ensure_no_melt_diagnostics_for(&root, "build")?;
     let status = compile_backend_from_app_root(&root)?;
     let static_status = build_static_site_from_app_root(&root, &args.out_dir, args.clean)?;
     print_backend_build_status(&status);
@@ -692,18 +692,23 @@ fn build_command(args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
-fn ensure_no_check_diagnostics(root: &Path) -> Result<()> {
-    ensure_no_check_diagnostics_for(root, "build")
-}
-
 fn ensure_no_check_diagnostics_for(root: &Path, phase: &str) -> Result<()> {
     let diagnostics = check_app_sources(root)?;
+    ensure_no_diagnostics_for_phase(&diagnostics, phase)
+}
+
+fn ensure_no_melt_diagnostics_for(root: &Path, phase: &str) -> Result<()> {
+    let report = collect_melt_report(root)?;
+    ensure_no_diagnostics_for_phase(&report.diagnostics, phase)
+}
+
+fn ensure_no_diagnostics_for_phase(diagnostics: &[CheckDiagnostic], phase: &str) -> Result<()> {
     if diagnostics.is_empty() {
         return Ok(());
     }
 
     let mut message = format!("Axonyx diagnostics failed before {phase}:\n");
-    for diagnostic in &diagnostics {
+    for diagnostic in diagnostics {
         message.push_str("  ");
         message.push_str(&format_check_diagnostic(diagnostic));
         message.push('\n');
@@ -8426,7 +8431,37 @@ page Home
         )
         .expect("page should write");
 
-        let error = ensure_no_check_diagnostics(&root).expect_err("diagnostics should fail");
+        let error =
+            ensure_no_check_diagnostics_for(&root, "build").expect_err("diagnostics should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("Axonyx diagnostics failed before build"));
+        assert!(message.contains("app/page.ax"));
+        assert!(message.contains("axonyx-import"));
+        assert!(message.contains("@/components/MissingCard.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_melt_preflight_reports_file_level_diagnostics() {
+        let root = make_temp_dir("build-melt-preflight-diagnostics");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { MissingCard } from "@/components/MissingCard.ax"
+
+page Home
+<MissingCard />
+"#,
+        )
+        .expect("page should write");
+
+        let error =
+            ensure_no_melt_diagnostics_for(&root, "build").expect_err("diagnostics should fail");
         let message = error.to_string();
 
         assert!(message.contains("Axonyx diagnostics failed before build"));
