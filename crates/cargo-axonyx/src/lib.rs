@@ -170,6 +170,10 @@ struct MeltArgs {
     /// Output format for the Melt project graph.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
+
+    /// Only verify that the Melt graph can be collected without diagnostics.
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1442,6 +1446,26 @@ fn routes_command(args: RoutesArgs) -> Result<()> {
 fn melt_command(args: MeltArgs) -> Result<()> {
     let root = app_root()?;
     let report = collect_melt_report(&root)?;
+
+    if args.check {
+        if report.diagnostics.is_empty() {
+            println!(
+                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} content entr{}.",
+                report.summary.page_routes,
+                report.summary.api_routes,
+                report.summary.actions,
+                report.summary.state_signals,
+                report.summary.content_entries,
+                if report.summary.content_entries == 1 { "y" } else { "ies" }
+            );
+            return Ok(());
+        }
+
+        for diagnostic in &report.diagnostics {
+            eprintln!("{}", format_check_diagnostic(diagnostic));
+        }
+        std::process::exit(1);
+    }
 
     match args.format {
         CheckFormat::Text => print_melt_text(&report),
@@ -8881,6 +8905,18 @@ page Home
         assert_eq!(args.host, "0.0.0.0");
         assert_eq!(args.port, Some(4100));
         assert_eq!(args.transport, ServerTransport::Std);
+    }
+
+    #[test]
+    fn parses_melt_check_command() {
+        let cli = Cli::try_parse_from(["cargo-ax", "melt", "--check"])
+            .expect("melt check command should parse");
+
+        let Commands::Melt(args) = cli.command else {
+            panic!("expected melt command");
+        };
+        assert!(args.check);
+        assert_eq!(args.format, CheckFormat::Text);
     }
 
     #[test]

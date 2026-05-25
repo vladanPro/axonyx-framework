@@ -74,7 +74,8 @@ Axonyx Server, Axonyx State, Axonyx Foundry, and Axonyx Melt.
 `cargo ax melt` prints the first project graph snapshot across those layers:
 routes, API routes, actions, state declarations, content collections, and source
 diagnostics. Use `cargo ax melt --format json` when docs, CI, or future tooling
-need the same graph as structured data.
+need the same graph as structured data. Use `cargo ax melt --check` as a short
+CI preflight that verifies the graph can be collected without diagnostics.
 
 `cargo ax content` reads `[content.collections]` from `Axonyx.toml` and prints the current Melt-time content manifest.
 `cargo ax build` uses the Melt graph as its diagnostics preflight, writes the content manifest to `dist/_ax/content/manifest.json` when collections are configured, and always writes the Melt graph to `dist/_ax/melt/graph.json`.
