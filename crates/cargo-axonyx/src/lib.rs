@@ -44,6 +44,7 @@ const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/referen
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.10";
 const AXONYX_UI_VERSION: &str = "0.0.38";
+const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -5167,6 +5168,14 @@ fn handle_http_request(
     mode: AxServerMode,
     request: AxHttpRequest,
 ) -> Result<AxHttpResponse> {
+    if request_body_exceeds_limit(&request) {
+        return Ok(AxHttpResponse::text(
+            413,
+            "Payload Too Large: Axonyx currently accepts request bodies up to 1 MiB.",
+        )
+        .with_no_store());
+    }
+
     if mode == AxServerMode::Dev && request.method == "GET" && request.target == "/__axonyx/stream"
     {
         return Ok(stream_probe_response());
@@ -5386,6 +5395,9 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
         if let Some(end) = header_end {
             let header_text = String::from_utf8_lossy(&buffer[..end]);
             let content_length = parse_content_length(&header_text);
+            if content_length > MAX_REQUEST_BODY_BYTES {
+                break;
+            }
             let total = end + 4 + content_length;
             if buffer.len() >= total {
                 break;
@@ -5450,6 +5462,9 @@ async fn read_http_request_async(
             if let Some(end) = header_end {
                 let header_text = String::from_utf8_lossy(&buffer[..end]);
                 let content_length = parse_content_length(&header_text);
+                if content_length > MAX_REQUEST_BODY_BYTES {
+                    break;
+                }
                 let total = end + 4 + content_length;
                 if buffer.len() >= total {
                     break;
@@ -5509,6 +5524,18 @@ fn parse_content_length(headers: &str) -> usize {
             None
         })
         .unwrap_or(0)
+}
+
+fn request_content_length(request: &AxHttpRequest) -> Option<usize> {
+    request
+        .headers
+        .get("content-length")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
+fn request_body_exceeds_limit(request: &AxHttpRequest) -> bool {
+    request.body.len() > MAX_REQUEST_BODY_BYTES
+        || request_content_length(request).is_some_and(|length| length > MAX_REQUEST_BODY_BYTES)
 }
 
 fn handle_action_request(
@@ -8796,6 +8823,30 @@ axonyx-runtime = "0.1.0"
             fields.get("excerpt").map(String::as_str),
             Some("Fast forms")
         );
+    }
+
+    #[test]
+    fn detects_oversized_request_body_from_header_or_bytes() {
+        let header_request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/api/posts".to_string(),
+            headers: [(
+                "content-length".to_string(),
+                (MAX_REQUEST_BODY_BYTES + 1).to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            body: Vec::new(),
+        };
+        let body_request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/api/posts".to_string(),
+            headers: Default::default(),
+            body: vec![0; MAX_REQUEST_BODY_BYTES + 1],
+        };
+
+        assert!(request_body_exceeds_limit(&header_request));
+        assert!(request_body_exceeds_limit(&body_request));
     }
 
     #[test]
