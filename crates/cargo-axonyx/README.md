@@ -66,7 +66,8 @@ future worker layer behind the scenes.
 
 `cargo ax doctor` verifies the app structure, runtime dependency, server page
 streaming mode, Axonyx UI package resolution, stylesheet wiring, and `.ax`
-source diagnostics.
+source diagnostics. Text output also summarizes the composable Axonyx engines:
+Router, Server, State, UI / Foundry, Aegis, and Melt.
 
 `cargo ax content` reads `[content.collections]` from `Axonyx.toml` and prints the current Melt-time content manifest.
 `cargo ax build` writes the same manifest to `dist/_ax/content/manifest.json` when collections are configured.
