@@ -77,7 +77,7 @@ diagnostics. Use `cargo ax melt --format json` when docs, CI, or future tooling
 need the same graph as structured data.
 
 `cargo ax content` reads `[content.collections]` from `Axonyx.toml` and prints the current Melt-time content manifest.
-`cargo ax build` writes the same manifest to `dist/_ax/content/manifest.json` when collections are configured.
+`cargo ax build` writes the same manifest to `dist/_ax/content/manifest.json` when collections are configured, and always writes the Melt graph to `dist/_ax/melt/graph.json`.
 
 `cargo ax routes` prints page/API routes and the current server
 `stream_pages` setting. JSON output is a report object with `stream_pages` and

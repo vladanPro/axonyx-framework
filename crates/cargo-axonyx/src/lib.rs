@@ -417,11 +417,13 @@ enum StaticBuildStatus {
         prerendered_count: usize,
         skipped_dynamic_count: usize,
         content_collection_count: usize,
+        melt_graph_written: bool,
         output_dir: PathBuf,
     },
     NoPages {
         skipped_dynamic_count: usize,
         content_collection_count: usize,
+        melt_graph_written: bool,
         output_dir: PathBuf,
     },
 }
@@ -4021,11 +4023,13 @@ fn build_static_site_from_app_root(
     copy_public_assets_to_dist(root, &output_dir)?;
     copy_package_assets_to_dist(root, &output_dir)?;
     let content_collection_count = write_content_manifest_to_dist(root, &output_dir)?;
+    let melt_graph_written = write_melt_graph_to_dist(root, &output_dir)?;
 
     if static_routes.is_empty() && prerender_routes.is_empty() {
         return Ok(StaticBuildStatus::NoPages {
             skipped_dynamic_count: dynamic_routes.len(),
             content_collection_count,
+            melt_graph_written,
             output_dir,
         });
     }
@@ -4073,6 +4077,7 @@ fn build_static_site_from_app_root(
         prerendered_count,
         skipped_dynamic_count,
         content_collection_count,
+        melt_graph_written,
         output_dir,
     })
 }
@@ -4364,6 +4369,22 @@ fn write_content_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usiz
     Ok(count)
 }
 
+fn write_melt_graph_to_dist(root: &Path, output_dir: &Path) -> Result<bool> {
+    let report = collect_melt_report(root)?;
+    let target = output_dir.join("_ax").join("melt").join("graph.json");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create '{}'", parent.display()))?;
+    }
+
+    let json =
+        serde_json::to_string_pretty(&report).context("failed to render Melt graph as JSON")?;
+    fs::write(&target, json)
+        .with_context(|| format!("failed to write Melt graph to '{}'", target.display()))?;
+
+    Ok(true)
+}
+
 fn static_route_output_path(output_dir: &Path, route: &str) -> Result<PathBuf> {
     let normalized = normalize_request_path(route)?;
     let segments = path_segments(&normalized);
@@ -4387,6 +4408,7 @@ fn print_static_build_status(status: &StaticBuildStatus) {
             prerendered_count,
             skipped_dynamic_count,
             content_collection_count,
+            melt_graph_written,
             output_dir,
         } => {
             println!(
@@ -4407,10 +4429,17 @@ fn print_static_build_status(status: &StaticBuildStatus) {
                     output_dir.display()
                 );
             }
+            if *melt_graph_written {
+                println!(
+                    "Wrote Melt graph into {}/_ax/melt/graph.json",
+                    output_dir.display()
+                );
+            }
         }
         StaticBuildStatus::NoPages {
             skipped_dynamic_count,
             content_collection_count,
+            melt_graph_written,
             output_dir,
         } => {
             println!(
@@ -4425,6 +4454,12 @@ fn print_static_build_status(status: &StaticBuildStatus) {
             if *content_collection_count > 0 {
                 println!(
                     "Wrote content manifest for {content_collection_count} collection(s) into {}/_ax/content/manifest.json",
+                    output_dir.display()
+                );
+            }
+            if *melt_graph_written {
+                println!(
+                    "Wrote Melt graph into {}/_ax/melt/graph.json",
                     output_dir.display()
                 );
             }
@@ -8487,12 +8522,14 @@ page Docs
                 prerendered_count,
                 skipped_dynamic_count,
                 content_collection_count,
+                melt_graph_written,
                 output_dir,
             } => {
                 assert_eq!(route_count, 2);
                 assert_eq!(prerendered_count, 0);
                 assert_eq!(skipped_dynamic_count, 0);
                 assert_eq!(content_collection_count, 0);
+                assert!(melt_graph_written);
                 assert_eq!(output_dir, root.join("dist"));
             }
             StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
@@ -8505,6 +8542,10 @@ page Docs
         assert!(home.contains("Home page"));
         assert!(docs.contains("Docs page"));
         assert!(root.join("dist/css/site.css").exists());
+        let melt_graph = fs::read_to_string(root.join("dist/_ax/melt/graph.json"))
+            .expect("Melt graph should exist");
+        assert!(melt_graph.contains("\"summary\""));
+        assert!(melt_graph.contains("\"Axonyx Pages\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -8565,23 +8606,27 @@ page BlogPost
             StaticBuildStatus::NoPages {
                 skipped_dynamic_count,
                 content_collection_count,
+                melt_graph_written,
                 output_dir,
             } => {
                 assert_eq!(output_dir, root.join("dist"));
                 assert_eq!(skipped_dynamic_count, 1);
                 assert_eq!(content_collection_count, 0);
+                assert!(melt_graph_written);
             }
             StaticBuildStatus::Generated {
                 route_count,
                 prerendered_count,
                 skipped_dynamic_count,
                 content_collection_count,
+                melt_graph_written,
                 ..
             } => {
                 assert_eq!(route_count, 0);
                 assert_eq!(prerendered_count, 0);
                 assert_eq!(skipped_dynamic_count, 1);
                 assert_eq!(content_collection_count, 0);
+                assert!(melt_graph_written);
             }
         }
         assert!(!root.join("dist/blog/[slug]/index.html").exists());
@@ -8624,12 +8669,14 @@ page BlogPost
                 prerendered_count,
                 skipped_dynamic_count,
                 content_collection_count,
+                melt_graph_written,
                 output_dir,
             } => {
                 assert_eq!(route_count, 0);
                 assert_eq!(prerendered_count, 2);
                 assert_eq!(skipped_dynamic_count, 0);
                 assert_eq!(content_collection_count, 0);
+                assert!(melt_graph_written);
                 assert_eq!(output_dir, root.join("dist"));
             }
             StaticBuildStatus::NoPages { .. } => panic!("prerender pages should be generated"),
@@ -8702,11 +8749,13 @@ page DocDetail
                 prerendered_count,
                 skipped_dynamic_count,
                 content_collection_count,
+                melt_graph_written,
                 ..
             } => {
                 assert_eq!(prerendered_count, 1);
                 assert_eq!(skipped_dynamic_count, 0);
                 assert_eq!(content_collection_count, 1);
+                assert!(melt_graph_written);
             }
             StaticBuildStatus::NoPages { .. } => panic!("content prerender page should build"),
         }
@@ -11641,8 +11690,12 @@ page Home
         match status {
             StaticBuildStatus::Generated {
                 content_collection_count,
+                melt_graph_written,
                 ..
-            } => assert_eq!(content_collection_count, 1),
+            } => {
+                assert_eq!(content_collection_count, 1);
+                assert!(melt_graph_written);
+            }
             StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
         }
 
@@ -11651,6 +11704,9 @@ page Home
         assert!(manifest.contains("\"name\": \"docs\""));
         assert!(manifest.contains("\"path\": \"content/docs/intro.md\""));
         assert!(manifest.contains("\"slug\": \"intro\""));
+        let melt_graph = fs::read_to_string(root.join("dist/_ax/melt/graph.json"))
+            .expect("Melt graph should exist");
+        assert!(melt_graph.contains("\"content_entries\": 1"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
