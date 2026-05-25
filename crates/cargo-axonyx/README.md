@@ -67,8 +67,9 @@ future worker layer behind the scenes.
 
 `cargo ax doctor` verifies the app structure, runtime dependency, server page
 streaming mode, Axonyx UI package resolution, stylesheet wiring, and `.ax`
-source diagnostics. Text output also summarizes the public framework layers:
-Axonyx Pages, Axonyx Server, Axonyx State, Axonyx Foundry, and Axonyx Melt.
+source diagnostics. It also verifies that the Melt project graph can be
+collected. Text output summarizes the public framework layers: Axonyx Pages,
+Axonyx Server, Axonyx State, Axonyx Foundry, and Axonyx Melt.
 
 `cargo ax melt` prints the first project graph snapshot across those layers:
 routes, API routes, actions, state declarations, content collections, and source

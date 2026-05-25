@@ -861,6 +861,7 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
 
     checks.push(doctor_state_manifest_check(root));
     checks.push(doctor_ax_sources_check(root));
+    checks.push(doctor_melt_graph_check(root));
 
     checks
 }
@@ -943,6 +944,40 @@ fn doctor_state_manifest_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message: format!("State manifest failed: {error}"),
             hint: Some("Run `cargo ax state` to inspect state declarations and manifest output."),
+        },
+    }
+}
+
+fn doctor_melt_graph_check(root: &Path) -> DoctorCheck {
+    match collect_melt_report(root) {
+        Ok(report) if report.diagnostics.is_empty() => DoctorCheck {
+            code: "melt-graph",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} content entr{}.",
+                report.summary.page_routes,
+                report.summary.api_routes,
+                report.summary.actions,
+                report.summary.state_signals,
+                report.summary.content_entries,
+                if report.summary.content_entries == 1 { "y" } else { "ies" }
+            ),
+            hint: None,
+        },
+        Ok(report) => DoctorCheck {
+            code: "melt-graph",
+            severity: DoctorSeverity::Error,
+            message: format!(
+                "Melt graph collected with {} source diagnostic(s).",
+                report.summary.diagnostics
+            ),
+            hint: Some("Run `cargo ax melt` or `cargo ax check` to inspect the project graph."),
+        },
+        Err(error) => DoctorCheck {
+            code: "melt-graph",
+            severity: DoctorSeverity::Error,
+            message: format!("Melt graph failed: {error}"),
+            hint: Some("Run `cargo ax melt` to inspect the project graph failure."),
         },
     }
 }
@@ -1310,7 +1345,14 @@ fn doctor_framework_layer_status_lines(checks: &[DoctorCheck]) -> Vec<String> {
             "Foundry UI/theme package resolves",
             "run `cargo ax add ui` when this app needs Foundry components",
         ),
-        doctor_melt_layer_line(checks),
+        doctor_layer_line(
+            "Axonyx Melt",
+            "melt-graph",
+            checks,
+            "project graph can be collected across framework layers",
+            "project graph needs attention before build/deploy",
+            "project graph could not be fully checked",
+        ),
     ]
 }
 
@@ -1344,34 +1386,6 @@ fn doctor_optional_layer_line(
         }
         _ => format!("{name}: optional - {optional}."),
     }
-}
-
-fn doctor_melt_layer_line(checks: &[DoctorCheck]) -> String {
-    let required = [
-        "axonyx-config",
-        "cargo-manifest",
-        "runtime-dependency",
-        "ax-sources",
-    ];
-
-    if required
-        .iter()
-        .any(|code| doctor_check_severity(checks, code) == Some(DoctorSeverity::Error))
-    {
-        return "Axonyx Melt: attention - project graph cannot be trusted until errors are fixed."
-            .to_string();
-    }
-
-    if required
-        .iter()
-        .any(|code| doctor_check_severity(checks, code) == Some(DoctorSeverity::Warn))
-    {
-        return "Axonyx Melt: optional - project graph has warnings before a full build."
-            .to_string();
-    }
-
-    "Axonyx Melt: ready - config, Cargo manifest, runtime dependency, and source graph are visible."
-        .to_string()
 }
 
 fn doctor_check_severity(checks: &[DoctorCheck], code: &str) -> Option<DoctorSeverity> {
@@ -9409,6 +9423,12 @@ axonyx-ui = { path = "vendor/axonyx-ui" }
                 message: "optional".to_string(),
                 hint: None,
             },
+            DoctorCheck {
+                code: "melt-graph",
+                severity: DoctorSeverity::Ok,
+                message: "ok".to_string(),
+                hint: None,
+            },
         ];
 
         let lines = doctor_framework_layer_status_lines(&checks).join("\n");
@@ -9419,6 +9439,40 @@ axonyx-ui = { path = "vendor/axonyx-ui" }
         assert!(lines.contains("Axonyx Foundry: optional"));
         assert!(lines.contains("Axonyx Melt: ready"));
         assert!(!lines.contains("Aegis:"));
+    }
+
+    #[test]
+    fn doctor_reports_melt_graph_status() {
+        let root = make_temp_dir("doctor-melt-graph");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.10"
+"#,
+        )
+        .expect("cargo manifest should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+
+        let checks = doctor_checks(&root);
+        let melt = checks
+            .iter()
+            .find(|check| check.code == "melt-graph")
+            .expect("melt graph check should exist");
+
+        assert_eq!(melt.severity, DoctorSeverity::Ok);
+        assert!(melt.message.contains("1 page route"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
