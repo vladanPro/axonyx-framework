@@ -48,6 +48,10 @@ variable when `--port` is omitted:
 PORT=3000 cargo ax run start --host 0.0.0.0
 ```
 
+`cargo ax run start` also performs the same `.ax` source diagnostics preflight
+as `cargo ax build`, so production starts fail before binding a port when a page
+has import, syntax, or route-source errors.
+
 The server accepts request bodies up to `1mb` by default. Apps can change this
 in `Axonyx.toml`:
 

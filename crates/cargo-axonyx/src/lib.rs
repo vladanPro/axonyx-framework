@@ -644,12 +644,16 @@ fn build_command(args: BuildArgs) -> Result<()> {
 }
 
 fn ensure_no_check_diagnostics(root: &Path) -> Result<()> {
+    ensure_no_check_diagnostics_for(root, "build")
+}
+
+fn ensure_no_check_diagnostics_for(root: &Path, phase: &str) -> Result<()> {
     let diagnostics = check_app_sources(root)?;
     if diagnostics.is_empty() {
         return Ok(());
     }
 
-    let mut message = String::from("Axonyx diagnostics failed before build:\n");
+    let mut message = format!("Axonyx diagnostics failed before {phase}:\n");
     for diagnostic in &diagnostics {
         message.push_str("  ");
         message.push_str(&format_check_diagnostic(diagnostic));
@@ -3447,7 +3451,7 @@ fn hint_for_error(error: &anyhow::Error) -> Option<&'static str> {
 
     if combined.contains("Axonyx diagnostics failed") {
         return Some(
-            "Run `cargo ax check` to see the same file-level diagnostics before building.",
+            "Run `cargo ax check` to see the same file-level diagnostics before building or starting production.",
         );
     }
 
@@ -3540,6 +3544,10 @@ fn run_stream_server(args: DevArgs) -> Result<()> {
 
 fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Result<()> {
     let root = app_root()?;
+    if mode == AxServerMode::Start {
+        ensure_no_check_diagnostics_for(&root, "production start")?;
+    }
+
     let backend_status = compile_backend_from_app_root(&root)?;
     let max_body_bytes = configured_max_request_body_bytes(&root).map_err(anyhow::Error::msg)?;
     let env_port = std::env::var("PORT").ok();
@@ -7942,6 +7950,35 @@ page Home
         let message = error.to_string();
 
         assert!(message.contains("Axonyx diagnostics failed before build"));
+        assert!(message.contains("app/page.ax"));
+        assert!(message.contains("axonyx-import"));
+        assert!(message.contains("@/components/MissingCard.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn start_preflight_reports_diagnostics_before_production_start() {
+        let root = make_temp_dir("start-preflight-diagnostics");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { MissingCard } from "@/components/MissingCard.ax"
+
+page Home
+<MissingCard />
+"#,
+        )
+        .expect("page should write");
+
+        let error = ensure_no_check_diagnostics_for(&root, "production start")
+            .expect_err("diagnostics should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("Axonyx diagnostics failed before production start"));
         assert!(message.contains("app/page.ax"));
         assert!(message.contains("axonyx-import"));
         assert!(message.contains("@/components/MissingCard.ax"));
