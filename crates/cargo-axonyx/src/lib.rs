@@ -447,6 +447,7 @@ struct RouteManifestItem {
     kind: &'static str,
     route: String,
     method: Option<String>,
+    returns: Option<String>,
     file: String,
     layouts: Vec<String>,
     loader: Option<String>,
@@ -470,6 +471,7 @@ struct ApiReport {
 struct ApiRouteReport {
     method: String,
     route: String,
+    returns: Option<String>,
     file: String,
     params: Vec<String>,
     inputs: Vec<ActionInputReport>,
@@ -490,6 +492,7 @@ struct ActionRouteReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ActionItemReport {
     name: String,
+    returns: Option<String>,
     inputs: Vec<ActionInputReport>,
 }
 
@@ -1631,6 +1634,7 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
         .map(|route| ApiRouteReport {
             method: route.method.unwrap_or_else(|| "*".to_string()),
             route: route.route,
+            returns: route.returns,
             file: route.file,
             params: route.params,
             inputs: route.inputs,
@@ -1675,6 +1679,7 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
 
                 Some(ActionItemReport {
                     name: action.name,
+                    returns: action.returns,
                     inputs,
                 })
             })
@@ -4586,6 +4591,7 @@ fn app_route_manifest_item(
         kind: "page",
         route,
         method: None,
+        returns: None,
         file: display_relative_path(root, page_path),
         layouts,
         loader: loader_path
@@ -4626,6 +4632,7 @@ fn collect_backend_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>>
                 kind: "api",
                 route: route.path.clone(),
                 method: Some(route.method),
+                returns: route.returns,
                 file: format!("routes/{relative_path}"),
                 layouts: Vec::new(),
                 loader: None,
@@ -4741,6 +4748,9 @@ fn print_routes_text(report: &RoutesReport) {
         if let Some(method) = &route.method {
             details.push(format!("method={method}"));
         }
+        if let Some(returns) = &route.returns {
+            details.push(format!("returns={returns}"));
+        }
         details.push(format!("file={}", route.file));
         if !route.layouts.is_empty() {
             details.push(format!("layouts={}", route.layouts.len()));
@@ -4788,6 +4798,9 @@ fn print_api_text(report: &ApiReport) {
     println!("API:");
     for route in &report.routes {
         let mut details = vec![format!("file={}", route.file)];
+        if let Some(returns) = &route.returns {
+            details.push(format!("returns={returns}"));
+        }
         if !route.params.is_empty() {
             details.push(format!("params={}", route.params.join(",")));
         }
@@ -4822,6 +4835,9 @@ fn print_api_schema_text(report: &ApiReport) {
 
     for route in &report.routes {
         println!("// {} {}", route.method, route.route);
+        if let Some(returns) = &route.returns {
+            println!("// returns {returns}");
+        }
         println!("type {}Request {{", api_route_type_name(route));
         if route.inputs.is_empty() {
             println!("  // no input body");
@@ -4864,7 +4880,11 @@ fn print_actions_text(report: &ActionReport) {
     for route in &report.routes {
         println!("  {:<28} file={}", route.route, route.file);
         for action in &route.actions {
-            println!("    {}", action.name);
+            if let Some(returns) = &action.returns {
+                println!("    {} -> {}", action.name, returns);
+            } else {
+                println!("    {}", action.name);
+            }
             if action.inputs.is_empty() {
                 println!("      inputs: none");
                 continue;
@@ -4900,6 +4920,9 @@ fn print_actions_schema_text(report: &ActionReport) {
     for route in &report.routes {
         println!("// {}", route.route);
         for action in &route.actions {
+            if let Some(returns) = &action.returns {
+                println!("// returns {returns}");
+            }
             println!("type {}Input {{", action.name);
             if action.inputs.is_empty() {
                 println!("  // no inputs");
@@ -7878,10 +7901,10 @@ route POST "/api/posts/:slug"
         fs::write(
             root.join("routes/api/posts.ax"),
             r#"
-route GET "/api/posts"
+route GET "/api/posts" -> Post[]
   return ok
 
-route POST "/api/posts"
+route POST "/api/posts" -> Post
   input:
     title: string
     featured?: bool = false
@@ -7896,8 +7919,10 @@ route POST "/api/posts"
         assert_eq!(report.routes.len(), 2);
         assert_eq!(report.routes[0].method, "GET");
         assert_eq!(report.routes[0].route, "/api/posts");
+        assert_eq!(report.routes[0].returns.as_deref(), Some("Post[]"));
         assert!(report.routes[0].inputs.is_empty());
         assert_eq!(report.routes[1].method, "POST");
+        assert_eq!(report.routes[1].returns.as_deref(), Some("Post"));
         assert_eq!(
             report.routes[1].inputs,
             vec![
@@ -8021,7 +8046,7 @@ page state theme: String = "silver"
         fs::write(
             root.join("app/settings/actions.ax"),
             r#"
-action SetTheme
+action SetTheme -> ThemePatch
   input:
     theme: string = "silver"
     newsletter?: bool = false
@@ -8042,6 +8067,10 @@ action ClearTheme
         assert_eq!(report.routes[0].file, "app/settings/actions.ax");
         assert_eq!(report.routes[0].actions.len(), 2);
         assert_eq!(report.routes[0].actions[0].name, "SetTheme");
+        assert_eq!(
+            report.routes[0].actions[0].returns.as_deref(),
+            Some("ThemePatch")
+        );
         assert_eq!(
             report.routes[0].actions[0].inputs,
             vec![
@@ -8080,10 +8109,12 @@ action ClearTheme
                     actions: vec![
                         ActionItemReport {
                             name: "SetTheme".to_string(),
+                            returns: None,
                             inputs: Vec::new(),
                         },
                         ActionItemReport {
                             name: "ClearTheme".to_string(),
+                            returns: None,
                             inputs: Vec::new(),
                         },
                     ],
@@ -8093,6 +8124,7 @@ action ClearTheme
                     file: "app/feedback/actions.ax".to_string(),
                     actions: vec![ActionItemReport {
                         name: "SendFeedback".to_string(),
+                        returns: None,
                         inputs: Vec::new(),
                     }],
                 },
