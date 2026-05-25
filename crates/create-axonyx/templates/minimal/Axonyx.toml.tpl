@@ -12,6 +12,7 @@ generated_dir = "src/generated"
 routes_dir = "routes"
 jobs_dir = "jobs"
 stream_pages = false
+max_body_bytes = "1mb"
 
 [modules]
 enabled = []

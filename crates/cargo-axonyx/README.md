@@ -48,6 +48,14 @@ variable when `--port` is omitted:
 PORT=3000 cargo ax run start --host 0.0.0.0
 ```
 
+The server accepts request bodies up to `1mb` by default. Apps can change this
+in `Axonyx.toml`:
+
+```toml
+[server]
+max_body_bytes = "2mb"
+```
+
 Axonyx keeps the authoring model synchronous and structured; the runtime decides
 whether the request path uses the std transport, Tokio tasks, streaming, or a
 future worker layer behind the scenes.

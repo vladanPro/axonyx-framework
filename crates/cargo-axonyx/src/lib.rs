@@ -797,6 +797,7 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
         ));
     }
     checks.push(doctor_server_streaming_check(root));
+    checks.push(doctor_server_body_limit_check(root));
     checks.push(doctor_aegis_config_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
@@ -811,6 +812,25 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
     checks.push(doctor_ax_sources_check(root));
 
     checks
+}
+
+fn doctor_server_body_limit_check(root: &Path) -> DoctorCheck {
+    match configured_max_request_body_bytes(root) {
+        Ok(limit) => DoctorCheck {
+            code: "server-body-limit",
+            severity: DoctorSeverity::Ok,
+            message: format!("Request body limit is {}.", format_bytes(limit)),
+            hint: None,
+        },
+        Err(message) => DoctorCheck {
+            code: "server-body-limit",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some(
+                "Set [server].max_body_bytes to a positive number, or a string such as \"1mb\".",
+            ),
+        },
+    }
 }
 
 fn doctor_aegis_config_check(root: &Path) -> DoctorCheck {
@@ -2493,33 +2513,51 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
             }]);
         }
     };
-    let Some(stream_pages) = value
+    let mut diagnostics = Vec::new();
+    if let Some(stream_pages) = value
         .get("server")
         .and_then(toml::Value::as_table)
         .and_then(|server| server.get("stream_pages"))
-    else {
-        return Ok(Vec::new());
-    };
+    {
+        let valid = match stream_pages {
+            toml::Value::Boolean(_) => true,
+            toml::Value::String(value) => parse_boolish_strict(value).is_some(),
+            _ => false,
+        };
 
-    let valid = match stream_pages {
-        toml::Value::Boolean(_) => true,
-        toml::Value::String(value) => parse_boolish_strict(value).is_some(),
-        _ => false,
-    };
-
-    if valid {
-        return Ok(Vec::new());
+        if !valid {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&path),
+                line: line_for_config_key(&source, "stream_pages"),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-stream-pages",
+                message:
+                    "[server].stream_pages must be a boolean or one of true/false/1/0/yes/no/on/off."
+                        .to_string(),
+            });
+        }
     }
 
-    Ok(vec![CheckDiagnostic {
-        file: display_path(&path),
-        line: line_for_config_key(&source, "stream_pages"),
-        column: 1,
-        severity: "error",
-        code: "axonyx-config-stream-pages",
-        message: "[server].stream_pages must be a boolean or one of true/false/1/0/yes/no/on/off."
-            .to_string(),
-    }])
+    if let Some(max_body_bytes) = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("max_body_bytes"))
+    {
+        if parse_max_body_bytes_value(max_body_bytes).is_err() {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&path),
+                line: line_for_config_key(&source, "max_body_bytes"),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-max-body-bytes",
+                message: "[server].max_body_bytes must be a positive integer or a string such as \"512kb\", \"1mb\", or \"2gb\"."
+                    .to_string(),
+            });
+        }
+    }
+
+    Ok(diagnostics)
 }
 
 fn line_for_config_key(source: &str, key: &str) -> usize {
@@ -3503,6 +3541,7 @@ fn run_stream_server(args: DevArgs) -> Result<()> {
 fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Result<()> {
     let root = app_root()?;
     let backend_status = compile_backend_from_app_root(&root)?;
+    let max_body_bytes = configured_max_request_body_bytes(&root).map_err(anyhow::Error::msg)?;
     let env_port = std::env::var("PORT").ok();
     let port = resolve_server_port(mode, args.port, env_port.as_deref())?;
     let uses_env_port = mode == AxServerMode::Start
@@ -3532,6 +3571,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
     );
+    println!("Request body limit: {}", format_bytes(max_body_bytes));
     if mode == AxServerMode::Dev {
         println!("Live reload polling is enabled.");
     }
@@ -5154,7 +5194,9 @@ fn handle_connection(
         .set_read_timeout(Some(Duration::from_secs(2)))
         .context("failed to set read timeout")?;
 
-    let Some(request) = read_http_request(&mut stream)? else {
+    let max_body_bytes =
+        configured_max_request_body_bytes(&state.root).map_err(anyhow::Error::msg)?;
+    let Some(request) = read_http_request(&mut stream, max_body_bytes)? else {
         return Ok(());
     };
 
@@ -5168,10 +5210,15 @@ fn handle_http_request(
     mode: AxServerMode,
     request: AxHttpRequest,
 ) -> Result<AxHttpResponse> {
-    if request_body_exceeds_limit(&request) {
+    let max_body_bytes =
+        configured_max_request_body_bytes(&state.root).map_err(anyhow::Error::msg)?;
+    if request_body_exceeds_limit(&request, max_body_bytes) {
         return Ok(AxHttpResponse::text(
             413,
-            "Payload Too Large: Axonyx currently accepts request bodies up to 1 MiB.",
+            format!(
+                "Payload Too Large: Axonyx currently accepts request bodies up to {}.",
+                format_bytes(max_body_bytes)
+            ),
         )
         .with_no_store());
     }
@@ -5290,7 +5337,9 @@ async fn handle_tokio_connection(
     state: Arc<DevServerState>,
     mode: AxServerMode,
 ) -> Result<()> {
-    let Some(request) = read_http_request_async(&mut stream).await? else {
+    let max_body_bytes =
+        configured_max_request_body_bytes(&state.root).map_err(anyhow::Error::msg)?;
+    let Some(request) = read_http_request_async(&mut stream, max_body_bytes).await? else {
         return Ok(());
     };
     let response = handle_http_request(&state, mode, request)?;
@@ -5370,7 +5419,10 @@ fn sse_probe_response() -> AxHttpResponse {
     ])
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
+fn read_http_request(
+    stream: &mut TcpStream,
+    max_body_bytes: usize,
+) -> Result<Option<AxHttpRequest>> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
     let mut header_end = None;
@@ -5395,7 +5447,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
         if let Some(end) = header_end {
             let header_text = String::from_utf8_lossy(&buffer[..end]);
             let content_length = parse_content_length(&header_text);
-            if content_length > MAX_REQUEST_BODY_BYTES {
+            if content_length > max_body_bytes {
                 break;
             }
             let total = end + 4 + content_length;
@@ -5435,6 +5487,7 @@ fn read_http_request(stream: &mut TcpStream) -> Result<Option<AxHttpRequest>> {
 
 async fn read_http_request_async(
     stream: &mut tokio::net::TcpStream,
+    max_body_bytes: usize,
 ) -> Result<Option<AxHttpRequest>> {
     let read = tokio::time::timeout(Duration::from_secs(2), async {
         let mut buffer = Vec::new();
@@ -5462,7 +5515,7 @@ async fn read_http_request_async(
             if let Some(end) = header_end {
                 let header_text = String::from_utf8_lossy(&buffer[..end]);
                 let content_length = parse_content_length(&header_text);
-                if content_length > MAX_REQUEST_BODY_BYTES {
+                if content_length > max_body_bytes {
                     break;
                 }
                 let total = end + 4 + content_length;
@@ -5533,9 +5586,73 @@ fn request_content_length(request: &AxHttpRequest) -> Option<usize> {
         .and_then(|value| value.trim().parse::<usize>().ok())
 }
 
-fn request_body_exceeds_limit(request: &AxHttpRequest) -> bool {
-    request.body.len() > MAX_REQUEST_BODY_BYTES
-        || request_content_length(request).is_some_and(|length| length > MAX_REQUEST_BODY_BYTES)
+fn request_body_exceeds_limit(request: &AxHttpRequest, max_body_bytes: usize) -> bool {
+    request.body.len() > max_body_bytes
+        || request_content_length(request).is_some_and(|length| length > max_body_bytes)
+}
+
+fn configured_max_request_body_bytes(root: &Path) -> std::result::Result<usize, String> {
+    match axonyx_config_value(root, "server", "max_body_bytes") {
+        Some(value) => parse_max_body_bytes_value(&value),
+        None => Ok(MAX_REQUEST_BODY_BYTES),
+    }
+}
+
+fn parse_max_body_bytes_value(value: &toml::Value) -> std::result::Result<usize, String> {
+    match value {
+        toml::Value::Integer(number) if *number > 0 => Ok(*number as usize),
+        toml::Value::Integer(_) => Err("[server].max_body_bytes must be positive.".to_string()),
+        toml::Value::String(value) => parse_byte_size(value),
+        _ => Err("[server].max_body_bytes must be an integer or size string.".to_string()),
+    }
+}
+
+fn parse_byte_size(value: &str) -> std::result::Result<usize, String> {
+    let trimmed = value.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err("empty byte size".to_string());
+    }
+
+    let digit_len = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_len == 0 {
+        return Err(format!("invalid byte size '{value}'"));
+    }
+
+    let number = trimmed[..digit_len]
+        .parse::<usize>()
+        .map_err(|_| format!("invalid byte size '{value}'"))?;
+    if number == 0 {
+        return Err("[server].max_body_bytes must be positive.".to_string());
+    }
+
+    let unit = trimmed[digit_len..].trim();
+    let multiplier = match unit {
+        "" | "b" => 1,
+        "kb" | "kib" => 1024,
+        "mb" | "mib" => 1024 * 1024,
+        "gb" | "gib" => 1024 * 1024 * 1024,
+        _ => return Err(format!("unsupported byte size unit '{unit}'")),
+    };
+
+    number
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("byte size '{value}' is too large"))
+}
+
+fn format_bytes(bytes: usize) -> String {
+    const GIB: usize = 1024 * 1024 * 1024;
+    const MIB: usize = 1024 * 1024;
+    const KIB: usize = 1024;
+
+    if bytes % GIB == 0 {
+        format!("{} GiB", bytes / GIB)
+    } else if bytes % MIB == 0 {
+        format!("{} MiB", bytes / MIB)
+    } else if bytes % KIB == 0 {
+        format!("{} KiB", bytes / KIB)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 fn handle_action_request(
@@ -7634,6 +7751,30 @@ page state enabled = signal(true)
     }
 
     #[test]
+    fn check_app_sources_reports_invalid_max_body_bytes_config() {
+        let root = make_temp_dir("invalid-max-body-bytes-config");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nmax_body_bytes = \"huge\"\n",
+        )
+        .expect("config should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-config-max-body-bytes"
+                && diagnostic.file.ends_with("Axonyx.toml")
+                && diagnostic.line == 5
+                && diagnostic.message.contains("max_body_bytes")
+        }));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn check_app_sources_reports_duplicate_backend_api_routes() {
         let root = make_temp_dir("duplicate-api-routes");
         fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
@@ -8845,8 +8986,34 @@ axonyx-runtime = "0.1.0"
             body: vec![0; MAX_REQUEST_BODY_BYTES + 1],
         };
 
-        assert!(request_body_exceeds_limit(&header_request));
-        assert!(request_body_exceeds_limit(&body_request));
+        assert!(request_body_exceeds_limit(
+            &header_request,
+            MAX_REQUEST_BODY_BYTES
+        ));
+        assert!(request_body_exceeds_limit(
+            &body_request,
+            MAX_REQUEST_BODY_BYTES
+        ));
+    }
+
+    #[test]
+    fn parses_configured_request_body_limits() {
+        assert_eq!(
+            parse_max_body_bytes_value(&toml::Value::Integer(2048))
+                .expect("integer limit should parse"),
+            2048
+        );
+        assert_eq!(
+            parse_max_body_bytes_value(&toml::Value::String("512kb".to_string()))
+                .expect("kb limit should parse"),
+            512 * 1024
+        );
+        assert_eq!(
+            parse_max_body_bytes_value(&toml::Value::String("2mb".to_string()))
+                .expect("mb limit should parse"),
+            2 * 1024 * 1024
+        );
+        assert!(parse_max_body_bytes_value(&toml::Value::String("nope".to_string())).is_err());
     }
 
     #[test]
