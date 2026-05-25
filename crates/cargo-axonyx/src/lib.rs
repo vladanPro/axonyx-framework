@@ -5208,8 +5208,10 @@ fn handle_connection(
         return Ok(());
     };
 
+    let suppress_body = suppress_response_body_for_method(&request.method);
+    let request = normalize_request_for_routing(request);
     let response = handle_http_request(state, mode, request)?;
-    write_ax_response(&mut stream, &response)?;
+    write_ax_response(&mut stream, &response, suppress_body)?;
     Ok(())
 }
 
@@ -5284,7 +5286,7 @@ fn handle_http_request(
     }
 
     if request.method != "GET" {
-        return Ok(AxHttpResponse::text(405, "Method Not Allowed").with_no_store());
+        return Ok(method_not_allowed_response("GET, HEAD"));
     }
 
     let Some(route) = resolve_route(&state.root, &request.target)? else {
@@ -5350,8 +5352,22 @@ async fn handle_tokio_connection(
     let Some(request) = read_http_request_async(&mut stream, max_body_bytes).await? else {
         return Ok(());
     };
+    let suppress_body = suppress_response_body_for_method(&request.method);
+    let request = normalize_request_for_routing(request);
     let response = handle_http_request(&state, mode, request)?;
-    write_ax_response_async(&mut stream, &response).await
+    write_ax_response_async(&mut stream, &response, suppress_body).await
+}
+
+fn suppress_response_body_for_method(method: &str) -> bool {
+    method.eq_ignore_ascii_case("HEAD")
+}
+
+fn normalize_request_for_routing(mut request: AxHttpRequest) -> AxHttpRequest {
+    if suppress_response_body_for_method(&request.method) {
+        request.method = "GET".to_string();
+    }
+
+    request
 }
 
 fn execute_backend_route_request(
@@ -5391,6 +5407,12 @@ fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
     }
     http.set_cookies.extend(response.set_cookies);
     http
+}
+
+fn method_not_allowed_response(allow: &str) -> AxHttpResponse {
+    AxHttpResponse::text(405, "Method Not Allowed")
+        .with_header("Allow", allow)
+        .with_no_store()
 }
 
 fn stream_probe_response() -> AxHttpResponse {
@@ -6875,36 +6897,25 @@ fn inject_dev_client(html: &str, request_path: &str) -> String {
     }
 }
 
-fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Result<()> {
-    let status = response.status_line();
-    let mut header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nConnection: close\r\n",
-        response.content_type
-    );
-    if response.body.is_streaming() {
-        header.push_str("Transfer-Encoding: chunked\r\n");
+fn write_ax_response(
+    stream: &mut TcpStream,
+    response: &AxHttpResponse,
+    suppress_body: bool,
+) -> Result<()> {
+    let header = if suppress_body {
+        render_response_header_with_body_policy(response, true)
     } else {
-        header.push_str(&format!("Content-Length: {}\r\n", response.body_len()));
-    }
-    if response.header_value("Cache-Control").is_none() {
-        header.push_str("Cache-Control: no-store\r\n");
-    }
-    for (name, value) in &response.headers {
-        header.push_str(name);
-        header.push_str(": ");
-        header.push_str(value);
-        header.push_str("\r\n");
-    }
-    for cookie in &response.set_cookies {
-        header.push_str("Set-Cookie: ");
-        header.push_str(cookie);
-        header.push_str("\r\n");
-    }
-    header.push_str("\r\n");
-
+        render_response_header(response)
+    };
     stream
         .write_all(header.as_bytes())
         .context("failed to write response headers")?;
+
+    if suppress_body {
+        stream.flush().context("failed to flush response")?;
+        return Ok(());
+    }
+
     if response.body.is_streaming() {
         write_chunked_body(stream, response)?;
     } else {
@@ -6921,13 +6932,27 @@ fn write_ax_response(stream: &mut TcpStream, response: &AxHttpResponse) -> Resul
 async fn write_ax_response_async(
     stream: &mut tokio::net::TcpStream,
     response: &AxHttpResponse,
+    suppress_body: bool,
 ) -> Result<()> {
-    let header = render_response_header(response);
+    let header = if suppress_body {
+        render_response_header_with_body_policy(response, true)
+    } else {
+        render_response_header(response)
+    };
 
     stream
         .write_all(header.as_bytes())
         .await
         .context("failed to write async response headers")?;
+
+    if suppress_body {
+        stream
+            .flush()
+            .await
+            .context("failed to flush async response")?;
+        return Ok(());
+    }
+
     if response.body.is_streaming() {
         write_chunked_body_async(stream, response).await?;
     } else {
@@ -6946,12 +6971,19 @@ async fn write_ax_response_async(
 }
 
 fn render_response_header(response: &AxHttpResponse) -> String {
+    render_response_header_with_body_policy(response, false)
+}
+
+fn render_response_header_with_body_policy(
+    response: &AxHttpResponse,
+    suppress_body: bool,
+) -> String {
     let status = response.status_line();
     let mut header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {}\r\nConnection: close\r\n",
         response.content_type
     );
-    if response.body.is_streaming() {
+    if response.body.is_streaming() && !suppress_body {
         header.push_str("Transfer-Encoding: chunked\r\n");
     } else {
         header.push_str(&format!("Content-Length: {}\r\n", response.body_len()));
@@ -7143,6 +7175,7 @@ fn content_type_for(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -9067,7 +9100,7 @@ axonyx-runtime = "0.1.0"
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("test client should connect");
-            write_ax_response(&mut stream, &response).expect("response should write");
+            write_ax_response(&mut stream, &response, false).expect("response should write");
         });
 
         let mut client = TcpStream::connect(address).expect("client should connect");
@@ -9080,6 +9113,70 @@ axonyx-runtime = "0.1.0"
         assert!(raw.contains("Transfer-Encoding: chunked\r\n"));
         assert!(!raw.contains("Content-Length:"));
         assert!(raw.ends_with("5\r\nHello\r\n7\r\n Axonyx\r\n0\r\n\r\n"));
+    }
+
+    #[test]
+    fn write_ax_response_can_suppress_body_for_head_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+        let response = AxHttpResponse::text(200, "Hello Axonyx");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test client should connect");
+            write_ax_response(&mut stream, &response, true).expect("response should write");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 200 OK"));
+        assert!(raw.contains("Content-Length: 12\r\n"));
+        assert!(!raw.ends_with("Hello Axonyx"));
+    }
+
+    #[test]
+    fn head_requests_route_as_get_without_response_body() {
+        let request = AxHttpRequest {
+            method: "HEAD".to_string(),
+            target: "/".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        assert!(suppress_response_body_for_method(&request.method));
+        assert_eq!(normalize_request_for_routing(request).method, "GET");
+    }
+
+    #[test]
+    fn page_method_not_allowed_reports_allow_header() {
+        let root = make_temp_dir("method-not-allowed");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let request = AxHttpRequest {
+            method: "PUT".to_string(),
+            target: "/".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+
+        assert_eq!(response.status, 405);
+        assert_eq!(response.header_value("Allow"), Some("GET, HEAD"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
