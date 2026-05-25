@@ -1213,8 +1213,8 @@ fn print_doctor_text(checks: &[DoctorCheck]) {
     }
 
     println!();
-    println!("Engine status:");
-    for line in doctor_engine_status_lines(checks) {
+    println!("Framework layers:");
+    for line in doctor_framework_layer_status_lines(checks) {
         println!("  {line}");
     }
 
@@ -1230,52 +1230,44 @@ fn print_doctor_text(checks: &[DoctorCheck]) {
     );
 }
 
-fn doctor_engine_status_lines(checks: &[DoctorCheck]) -> Vec<String> {
+fn doctor_framework_layer_status_lines(checks: &[DoctorCheck]) -> Vec<String> {
     vec![
-        doctor_engine_line(
-            "Router",
+        doctor_layer_line(
+            "Axonyx Pages",
             "ax-sources",
             checks,
-            "routes/pages/API diagnostics pass",
-            "route source diagnostics need attention",
-            "route source diagnostics could not be fully checked",
+            ".ax pages, layouts, route params, and API source diagnostics pass",
+            ".ax page/route source diagnostics need attention",
+            ".ax page/route source diagnostics could not be fully checked",
         ),
-        doctor_engine_line(
-            "Server",
+        doctor_layer_line(
+            "Axonyx Server",
             "server-body-limit",
             checks,
             "request limits, streaming config, and hosted start checks are visible",
             "server config needs attention",
             "server config could not be fully checked",
         ),
-        doctor_engine_line(
-            "State",
+        doctor_layer_line(
+            "Axonyx State",
             "state-manifest",
             checks,
             "state manifest can be built",
             "state manifest needs attention",
             "state manifest is not fully configured",
         ),
-        doctor_optional_engine_line(
-            "UI / Foundry",
+        doctor_optional_layer_line(
+            "Axonyx Foundry",
             "ui-package",
             checks,
-            "Foundry UI package resolves",
+            "Foundry UI/theme package resolves",
             "run `cargo ax add ui` when this app needs Foundry components",
         ),
-        doctor_engine_line(
-            "Aegis",
-            "aegis-config",
-            checks,
-            "fast route QA is configured",
-            "fast route QA config needs attention",
-            "fast route QA is optional until aegis.toml is added",
-        ),
-        doctor_melt_engine_line(checks),
+        doctor_melt_layer_line(checks),
     ]
 }
 
-fn doctor_engine_line(
+fn doctor_layer_line(
     name: &str,
     check_code: &str,
     checks: &[DoctorCheck],
@@ -1291,7 +1283,7 @@ fn doctor_engine_line(
     }
 }
 
-fn doctor_optional_engine_line(
+fn doctor_optional_layer_line(
     name: &str,
     check_code: &str,
     checks: &[DoctorCheck],
@@ -1307,7 +1299,7 @@ fn doctor_optional_engine_line(
     }
 }
 
-fn doctor_melt_engine_line(checks: &[DoctorCheck]) -> String {
+fn doctor_melt_layer_line(checks: &[DoctorCheck]) -> String {
     let required = [
         "axonyx-config",
         "cargo-manifest",
@@ -1319,7 +1311,7 @@ fn doctor_melt_engine_line(checks: &[DoctorCheck]) -> String {
         .iter()
         .any(|code| doctor_check_severity(checks, code) == Some(DoctorSeverity::Error))
     {
-        return "Melt: attention - project graph cannot be trusted until errors are fixed."
+        return "Axonyx Melt: attention - project graph cannot be trusted until errors are fixed."
             .to_string();
     }
 
@@ -1327,10 +1319,11 @@ fn doctor_melt_engine_line(checks: &[DoctorCheck]) -> String {
         .iter()
         .any(|code| doctor_check_severity(checks, code) == Some(DoctorSeverity::Warn))
     {
-        return "Melt: optional - project graph has warnings before a full build.".to_string();
+        return "Axonyx Melt: optional - project graph has warnings before a full build."
+            .to_string();
     }
 
-    "Melt: ready - config, Cargo manifest, runtime dependency, and source graph are visible."
+    "Axonyx Melt: ready - config, Cargo manifest, runtime dependency, and source graph are visible."
         .to_string()
 }
 
@@ -9085,7 +9078,7 @@ axonyx-ui = { path = "vendor/axonyx-ui" }
     }
 
     #[test]
-    fn doctor_engine_status_lines_show_composable_engines() {
+    fn doctor_framework_layer_status_lines_show_public_layers() {
         let checks = vec![
             DoctorCheck {
                 code: "axonyx-config",
@@ -9131,14 +9124,14 @@ axonyx-ui = { path = "vendor/axonyx-ui" }
             },
         ];
 
-        let lines = doctor_engine_status_lines(&checks).join("\n");
+        let lines = doctor_framework_layer_status_lines(&checks).join("\n");
 
-        assert!(lines.contains("Router: ready"));
-        assert!(lines.contains("Server: ready"));
-        assert!(lines.contains("State: ready"));
-        assert!(lines.contains("UI / Foundry: optional"));
-        assert!(lines.contains("Aegis: optional"));
-        assert!(lines.contains("Melt: ready"));
+        assert!(lines.contains("Axonyx Pages: ready"));
+        assert!(lines.contains("Axonyx Server: ready"));
+        assert!(lines.contains("Axonyx State: ready"));
+        assert!(lines.contains("Axonyx Foundry: optional"));
+        assert!(lines.contains("Axonyx Melt: ready"));
+        assert!(!lines.contains("Aegis:"));
     }
 
     #[test]
