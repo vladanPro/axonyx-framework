@@ -143,8 +143,9 @@ struct DevArgs {
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
 
-    #[arg(long, default_value_t = 3000)]
-    port: u16,
+    /// Port to bind. `run start` falls back to the PORT environment variable.
+    #[arg(long)]
+    port: Option<u16>,
 
     /// HTTP transport implementation. std is stable; tokio is the async preview path.
     #[arg(long, value_enum, default_value_t = ServerTransport::Std)]
@@ -3501,8 +3502,15 @@ fn run_stream_server(args: DevArgs) -> Result<()> {
 fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Result<()> {
     let root = app_root()?;
     let backend_status = compile_backend_from_app_root(&root)?;
+    let env_port = std::env::var("PORT").ok();
+    let port = resolve_server_port(mode, args.port, env_port.as_deref())?;
+    let uses_env_port = mode == AxServerMode::Start
+        && args.port.is_none()
+        && env_port
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
 
-    let server_config = AxServerConfig::new(args.host, args.port, mode);
+    let server_config = AxServerConfig::new(args.host, port, mode);
     let bind = server_config.bind_addr();
     let preview_store = preview_store_from_content(&root)?;
     let shared_state = Arc::new(DevServerState {
@@ -3517,6 +3525,9 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
         mode.label(),
         transport.label()
     );
+    if uses_env_port {
+        println!("Using PORT environment variable for hosted production start.");
+    }
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
     );
@@ -3544,6 +3555,27 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
             server.serve().map_err(|error| anyhow::anyhow!("{error}"))
         }
     }
+}
+
+fn resolve_server_port(
+    mode: AxServerMode,
+    cli_port: Option<u16>,
+    env_port: Option<&str>,
+) -> Result<u16> {
+    if let Some(port) = cli_port {
+        return Ok(port);
+    }
+
+    if mode == AxServerMode::Start {
+        if let Some(port) = env_port.filter(|value| !value.trim().is_empty()) {
+            return port
+                .trim()
+                .parse::<u16>()
+                .with_context(|| format!("invalid PORT environment value '{port}'"));
+        }
+    }
+
+    Ok(3000)
 }
 
 fn compile_backend_from_app_root(root: &Path) -> Result<BackendBuildStatus> {
@@ -8113,7 +8145,7 @@ page Home
             panic!("expected stream command");
         };
         assert_eq!(args.host, "0.0.0.0");
-        assert_eq!(args.port, 4100);
+        assert_eq!(args.port, Some(4100));
         assert_eq!(args.transport, ServerTransport::Std);
     }
 
@@ -8139,8 +8171,44 @@ page Home
             panic!("expected run dev command");
         };
         assert_eq!(args.host, "127.0.0.1");
-        assert_eq!(args.port, 4101);
+        assert_eq!(args.port, Some(4101));
         assert_eq!(args.transport, ServerTransport::Tokio);
+    }
+
+    #[test]
+    fn resolves_dev_port_without_env_fallback() {
+        assert_eq!(
+            resolve_server_port(AxServerMode::Dev, None, Some("4200"))
+                .expect("dev port should resolve"),
+            3000
+        );
+        assert_eq!(
+            resolve_server_port(AxServerMode::Dev, Some(4100), Some("4200"))
+                .expect("cli port should win"),
+            4100
+        );
+    }
+
+    #[test]
+    fn resolves_start_port_from_env_when_cli_port_is_missing() {
+        assert_eq!(
+            resolve_server_port(AxServerMode::Start, None, Some("4300"))
+                .expect("start port should resolve from env"),
+            4300
+        );
+        assert_eq!(
+            resolve_server_port(AxServerMode::Start, Some(4100), Some("4300"))
+                .expect("cli port should win"),
+            4100
+        );
+    }
+
+    #[test]
+    fn reports_invalid_start_port_env() {
+        let error = resolve_server_port(AxServerMode::Start, None, Some("not-a-port"))
+            .expect_err("invalid PORT should fail");
+
+        assert!(error.to_string().contains("invalid PORT"));
     }
 
     #[test]

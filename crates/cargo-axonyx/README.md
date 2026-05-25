@@ -41,6 +41,13 @@ cargo ax run dev --transport tokio
 cargo ax run start --host 0.0.0.0 --port 3000 --transport tokio
 ```
 
+For hosted starts, `cargo ax run start` reads the platform `PORT` environment
+variable when `--port` is omitted:
+
+```bash
+PORT=3000 cargo ax run start --host 0.0.0.0
+```
+
 Axonyx keeps the authoring model synchronous and structured; the runtime decides
 whether the request path uses the std transport, Tokio tasks, streaming, or a
 future worker layer behind the scenes.
