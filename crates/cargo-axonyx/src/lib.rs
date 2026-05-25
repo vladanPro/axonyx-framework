@@ -1212,7 +1212,14 @@ fn print_doctor_text(checks: &[DoctorCheck]) {
         }
     }
 
+    println!();
+    println!("Engine status:");
+    for line in doctor_engine_status_lines(checks) {
+        println!("  {line}");
+    }
+
     let summary = doctor_summary(checks);
+    println!();
     println!(
         "Summary: {} ok, {} warning{}, {} error{}",
         summary.ok,
@@ -1221,6 +1228,117 @@ fn print_doctor_text(checks: &[DoctorCheck]) {
         summary.error,
         if summary.error == 1 { "" } else { "s" }
     );
+}
+
+fn doctor_engine_status_lines(checks: &[DoctorCheck]) -> Vec<String> {
+    vec![
+        doctor_engine_line(
+            "Router",
+            "ax-sources",
+            checks,
+            "routes/pages/API diagnostics pass",
+            "route source diagnostics need attention",
+            "route source diagnostics could not be fully checked",
+        ),
+        doctor_engine_line(
+            "Server",
+            "server-body-limit",
+            checks,
+            "request limits, streaming config, and hosted start checks are visible",
+            "server config needs attention",
+            "server config could not be fully checked",
+        ),
+        doctor_engine_line(
+            "State",
+            "state-manifest",
+            checks,
+            "state manifest can be built",
+            "state manifest needs attention",
+            "state manifest is not fully configured",
+        ),
+        doctor_optional_engine_line(
+            "UI / Foundry",
+            "ui-package",
+            checks,
+            "Foundry UI package resolves",
+            "run `cargo ax add ui` when this app needs Foundry components",
+        ),
+        doctor_engine_line(
+            "Aegis",
+            "aegis-config",
+            checks,
+            "fast route QA is configured",
+            "fast route QA config needs attention",
+            "fast route QA is optional until aegis.toml is added",
+        ),
+        doctor_melt_engine_line(checks),
+    ]
+}
+
+fn doctor_engine_line(
+    name: &str,
+    check_code: &str,
+    checks: &[DoctorCheck],
+    ok: &str,
+    error: &str,
+    warn: &str,
+) -> String {
+    match doctor_check_severity(checks, check_code) {
+        Some(DoctorSeverity::Ok) => format!("{name}: ready - {ok}."),
+        Some(DoctorSeverity::Warn) => format!("{name}: optional - {warn}."),
+        Some(DoctorSeverity::Error) => format!("{name}: attention - {error}."),
+        None => format!("{name}: optional - not enabled for this app yet."),
+    }
+}
+
+fn doctor_optional_engine_line(
+    name: &str,
+    check_code: &str,
+    checks: &[DoctorCheck],
+    ok: &str,
+    optional: &str,
+) -> String {
+    match doctor_check_severity(checks, check_code) {
+        Some(DoctorSeverity::Ok) => format!("{name}: ready - {ok}."),
+        Some(DoctorSeverity::Error) => {
+            format!("{name}: attention - package setup needs attention.")
+        }
+        _ => format!("{name}: optional - {optional}."),
+    }
+}
+
+fn doctor_melt_engine_line(checks: &[DoctorCheck]) -> String {
+    let required = [
+        "axonyx-config",
+        "cargo-manifest",
+        "runtime-dependency",
+        "ax-sources",
+    ];
+
+    if required
+        .iter()
+        .any(|code| doctor_check_severity(checks, code) == Some(DoctorSeverity::Error))
+    {
+        return "Melt: attention - project graph cannot be trusted until errors are fixed."
+            .to_string();
+    }
+
+    if required
+        .iter()
+        .any(|code| doctor_check_severity(checks, code) == Some(DoctorSeverity::Warn))
+    {
+        return "Melt: optional - project graph has warnings before a full build.".to_string();
+    }
+
+    "Melt: ready - config, Cargo manifest, runtime dependency, and source graph are visible."
+        .to_string()
+}
+
+fn doctor_check_severity(checks: &[DoctorCheck], code: &str) -> Option<DoctorSeverity> {
+    checks
+        .iter()
+        .find(|check| check.code == code)
+        .map(|check| check.severity)
 }
 
 fn doctor_should_fail(checks: &[DoctorCheck], deny_warnings: bool) -> bool {
@@ -8964,6 +9082,63 @@ axonyx-ui = { path = "vendor/axonyx-ui" }
         assert_eq!(summary.error, 0);
         assert!(!doctor_should_fail(&checks, false));
         assert!(doctor_should_fail(&checks, true));
+    }
+
+    #[test]
+    fn doctor_engine_status_lines_show_composable_engines() {
+        let checks = vec![
+            DoctorCheck {
+                code: "axonyx-config",
+                severity: DoctorSeverity::Ok,
+                message: "ok".to_string(),
+                hint: None,
+            },
+            DoctorCheck {
+                code: "cargo-manifest",
+                severity: DoctorSeverity::Ok,
+                message: "ok".to_string(),
+                hint: None,
+            },
+            DoctorCheck {
+                code: "runtime-dependency",
+                severity: DoctorSeverity::Ok,
+                message: "ok".to_string(),
+                hint: None,
+            },
+            DoctorCheck {
+                code: "ax-sources",
+                severity: DoctorSeverity::Ok,
+                message: "ok".to_string(),
+                hint: None,
+            },
+            DoctorCheck {
+                code: "server-body-limit",
+                severity: DoctorSeverity::Ok,
+                message: "ok".to_string(),
+                hint: None,
+            },
+            DoctorCheck {
+                code: "state-manifest",
+                severity: DoctorSeverity::Ok,
+                message: "ok".to_string(),
+                hint: None,
+            },
+            DoctorCheck {
+                code: "aegis-config",
+                severity: DoctorSeverity::Warn,
+                message: "optional".to_string(),
+                hint: None,
+            },
+        ];
+
+        let lines = doctor_engine_status_lines(&checks).join("\n");
+
+        assert!(lines.contains("Router: ready"));
+        assert!(lines.contains("Server: ready"));
+        assert!(lines.contains("State: ready"));
+        assert!(lines.contains("UI / Foundry: optional"));
+        assert!(lines.contains("Aegis: optional"));
+        assert!(lines.contains("Melt: ready"));
     }
 
     #[test]
