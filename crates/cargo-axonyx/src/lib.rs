@@ -469,6 +469,7 @@ struct RoutesReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ApiReport {
     routes: Vec<ApiRouteReport>,
+    schemas: Vec<ApiSchemaReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -479,6 +480,19 @@ struct ApiRouteReport {
     file: String,
     params: Vec<String>,
     inputs: Vec<ActionInputReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApiSchemaReport {
+    name: String,
+    fields: Vec<ApiSchemaFieldReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApiSchemaFieldReport {
+    name: String,
+    ty: String,
+    optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1657,7 +1671,10 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
         })
         .collect();
 
-    Ok(ApiReport { routes })
+    Ok(ApiReport {
+        routes,
+        schemas: collect_project_type_schemas(root)?,
+    })
 }
 
 fn collect_action_report(root: &Path) -> Result<ActionReport> {
@@ -3235,12 +3252,19 @@ fn check_backend_return_contracts(
 }
 
 fn collect_project_type_names(root: &Path) -> Result<std::collections::BTreeSet<String>> {
+    Ok(collect_project_type_schemas(root)?
+        .into_iter()
+        .map(|schema| schema.name)
+        .collect())
+}
+
+fn collect_project_type_schemas(root: &Path) -> Result<Vec<ApiSchemaReport>> {
     let mut files = Vec::new();
     collect_ax_files(&root.join("app"), &mut files)?;
     collect_ax_files(&root.join("routes"), &mut files)?;
     collect_ax_files(&root.join("jobs"), &mut files)?;
 
-    let mut names = std::collections::BTreeSet::new();
+    let mut schemas = std::collections::BTreeMap::new();
     for file in files {
         let source = fs::read_to_string(&file)
             .with_context(|| format!("failed to read .ax file '{}'", file.display()))?;
@@ -3249,11 +3273,39 @@ fn collect_project_type_names(root: &Path) -> Result<std::collections::BTreeSet<
         };
 
         for ty in document.types {
-            names.insert(ty.name);
+            schemas
+                .entry(ty.name.clone())
+                .or_insert_with(|| ApiSchemaReport {
+                    name: ty.name,
+                    fields: ty
+                        .fields
+                        .into_iter()
+                        .map(|field| {
+                            let (ty, optional) = normalize_api_schema_field_type(&field.ty);
+                            ApiSchemaFieldReport {
+                                name: field.name,
+                                ty,
+                                optional,
+                            }
+                        })
+                        .collect(),
+                });
         }
     }
 
-    Ok(names)
+    Ok(schemas.into_values().collect())
+}
+
+fn normalize_api_schema_field_type(ty: &str) -> (String, bool) {
+    let ty = ty.trim();
+    if let Some(inner) = ty
+        .strip_prefix("Optional<")
+        .and_then(|remaining| remaining.strip_suffix('>'))
+    {
+        return (inner.trim().to_string(), true);
+    }
+
+    (ty.to_string(), false)
 }
 
 fn is_supported_backend_return_contract(ty: &str) -> bool {
@@ -5081,14 +5133,22 @@ fn api_report_openapi_value(report: &ApiReport) -> serde_json::Value {
         }
     }
 
-    serde_json::json!({
+    let mut document = serde_json::json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Axonyx API",
             "version": "0.1.0"
         },
         "paths": paths
-    })
+    });
+
+    if !report.schemas.is_empty() {
+        document["components"] = serde_json::json!({
+            "schemas": openapi_components_schemas(&report.schemas)
+        });
+    }
+
+    document
 }
 
 fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
@@ -5183,6 +5243,41 @@ fn openapi_input_object_schema(inputs: &[ActionInputReport]) -> serde_json::Valu
     }
 
     serde_json::Value::Object(schema)
+}
+
+fn openapi_components_schemas(schemas: &[ApiSchemaReport]) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for schema in schemas {
+        out.insert(schema.name.clone(), openapi_component_schema(schema));
+    }
+    serde_json::Value::Object(out)
+}
+
+fn openapi_component_schema(schema: &ApiSchemaReport) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+
+    for field in &schema.fields {
+        properties.insert(field.name.clone(), openapi_schema_for_ax_type(&field.ty));
+        if !field.optional {
+            required.push(serde_json::Value::String(field.name.clone()));
+        }
+    }
+
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "type".to_string(),
+        serde_json::Value::String("object".to_string()),
+    );
+    object.insert(
+        "properties".to_string(),
+        serde_json::Value::Object(properties),
+    );
+    if !required.is_empty() {
+        object.insert("required".to_string(), serde_json::Value::Array(required));
+    }
+
+    serde_json::Value::Object(object)
 }
 
 fn openapi_schema_for_ax_type(ty: &str) -> serde_json::Value {
@@ -8310,6 +8405,7 @@ route POST "/api/posts" -> Post
         let report = collect_api_report(&root).expect("api report should collect");
 
         assert_eq!(report.routes.len(), 2);
+        assert!(report.schemas.is_empty());
         assert_eq!(report.routes[0].method, "GET");
         assert_eq!(report.routes[0].route, "/api/posts");
         assert_eq!(report.routes[0].returns.as_deref(), Some("Post[]"));
@@ -8362,6 +8458,21 @@ route POST "/api/posts" -> Post
                     },
                 ],
             }],
+            schemas: vec![ApiSchemaReport {
+                name: "Post".to_string(),
+                fields: vec![
+                    ApiSchemaFieldReport {
+                        name: "title".to_string(),
+                        ty: "String".to_string(),
+                        optional: false,
+                    },
+                    ApiSchemaFieldReport {
+                        name: "summary".to_string(),
+                        ty: "String".to_string(),
+                        optional: true,
+                    },
+                ],
+            }],
         };
 
         let value = api_report_openapi_value(&report);
@@ -8382,6 +8493,65 @@ route POST "/api/posts" -> Post
             operation["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
             "#/components/schemas/Post"
         );
+        assert_eq!(
+            value["components"]["schemas"]["Post"]["properties"]["title"]["type"],
+            "string"
+        );
+        assert_eq!(
+            value["components"]["schemas"]["Post"]["required"][0],
+            "title"
+        );
+        assert!(value["components"]["schemas"]["Post"]["required"]
+            .as_array()
+            .expect("required should be array")
+            .iter()
+            .all(|field| field != "summary"));
+    }
+
+    #[test]
+    fn api_report_collects_type_schemas_for_openapi_components() {
+        let root = make_temp_dir("api-report-type-schemas");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api routes dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+type Post {
+  title: String
+  summary: Optional<String>
+}
+
+<Copy>Home</Copy>
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts" -> Post[]
+  return json(posts)
+"#,
+        )
+        .expect("route source should write");
+
+        let report = collect_api_report(&root).expect("api report should collect");
+        let value = api_report_openapi_value(&report);
+
+        assert_eq!(report.schemas.len(), 1);
+        assert_eq!(report.schemas[0].name, "Post");
+        assert_eq!(
+            value["components"]["schemas"]["Post"]["properties"]["summary"]["type"],
+            "string"
+        );
+        assert!(value["components"]["schemas"]["Post"]["required"]
+            .as_array()
+            .expect("required should be array")
+            .iter()
+            .all(|field| field != "summary"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
