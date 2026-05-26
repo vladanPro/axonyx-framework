@@ -42,7 +42,7 @@ const DOCS_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.10";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.11";
 const AXONYX_UI_VERSION: &str = "0.0.38";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
@@ -9831,7 +9831,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.10"
+axonyx-runtime = "0.1.11"
 
 [dependencies.axonyx-ui]
 path = "vendor/axonyx-ui"
@@ -9913,7 +9913,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.10"
+axonyx-runtime = "0.1.11"
 "#,
         )
         .expect("cargo manifest should write");
@@ -10012,7 +10012,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.10"
+axonyx-runtime = "0.1.11"
 "#,
         )
         .expect("cargo manifest should write");
@@ -10134,7 +10134,7 @@ serde_json = "1"
         );
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
-        assert!(updated.contains("axonyx-runtime = \"0.1.10\""));
+        assert!(updated.contains("axonyx-runtime = \"0.1.11\""));
         assert!(updated.contains("version = \"0.0.38\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
@@ -10283,7 +10283,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.10"
+axonyx-runtime = "0.1.11"
 "#,
         )
         .expect("cargo manifest should write");
