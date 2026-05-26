@@ -3069,6 +3069,7 @@ fn check_backend_requirements(
     };
 
     let mut diagnostics = check_backend_route_inputs(path, source, document, &plan);
+    diagnostics.extend(check_backend_return_contracts(path, source, &plan));
 
     if !backend_plan_uses_signed_session(&plan)
         || auth_secret_configured(root, "AX_SECRET_SESSION_KEY")
@@ -3150,6 +3151,97 @@ fn check_backend_route_inputs(
     }
 
     diagnostics
+}
+
+fn check_backend_return_contracts(
+    path: &Path,
+    source: &str,
+    plan: &AxBackendPlan,
+) -> Vec<CheckDiagnostic> {
+    let mut diagnostics = Vec::new();
+
+    for handler in &plan.handlers {
+        let returns = match &handler.kind {
+            AxHandlerKind::Route { returns, .. }
+            | AxHandlerKind::Loader { returns }
+            | AxHandlerKind::Action { returns, .. } => returns,
+            AxHandlerKind::Job => continue,
+        };
+
+        let Some(returns) = returns else {
+            continue;
+        };
+
+        if is_supported_backend_return_contract(returns) {
+            continue;
+        }
+
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_source_pattern(source, &format!("-> {returns}")),
+            column: 1,
+            severity: "error",
+            code: "axonyx-return-contract-type",
+            message: format!(
+                "backend return contract `{returns}` is invalid. Use a named type such as Post, an array such as Post[], or a generic such as List<Post>."
+            ),
+        });
+    }
+
+    diagnostics
+}
+
+fn is_supported_backend_return_contract(ty: &str) -> bool {
+    let ty = ty.trim();
+    if ty.is_empty() || ty.contains(char::is_whitespace) {
+        return false;
+    }
+
+    if let Some(inner) = ty.strip_suffix("[]") {
+        return is_supported_backend_return_contract(inner);
+    }
+
+    for wrapper in ["List", "Optional"] {
+        let prefix = format!("{wrapper}<");
+        if let Some(inner) = ty
+            .strip_prefix(&prefix)
+            .and_then(|remaining| remaining.strip_suffix('>'))
+        {
+            return !inner.is_empty()
+                && !inner.contains(',')
+                && is_supported_backend_return_contract(inner);
+        }
+    }
+
+    matches!(
+        ty,
+        "String"
+            | "Bool"
+            | "Boolean"
+            | "Number"
+            | "Json"
+            | "Null"
+            | "string"
+            | "bool"
+            | "boolean"
+            | "i64"
+            | "u64"
+            | "f64"
+            | "int"
+            | "integer"
+            | "float"
+            | "number"
+    ) || is_ax_type_identifier(ty)
+}
+
+fn is_ax_type_identifier(ty: &str) -> bool {
+    let mut chars = ty.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
 }
 
 fn is_supported_route_input_type(ty: &str) -> bool {
@@ -11184,6 +11276,48 @@ type Post {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 2);
         assert_eq!(diagnostics[0].code, "axonyx-backend-parse");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_backend_return_contracts() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/posts.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+loader PostsList -> List<Post>
+  return posts
+
+route GET "/api/posts" -> Post[]
+  return json(posts)
+
+action CreatePost -> Post
+  input:
+    title: string
+
+  return json(post)
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_reports_invalid_backend_return_contract() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/posts.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+route GET "/api/posts" -> List<>
+  return json(posts)
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-return-contract-type");
+        assert_eq!(diagnostics[0].line, 2);
+        assert!(diagnostics[0].message.contains("List<>"));
     }
 
     #[test]
