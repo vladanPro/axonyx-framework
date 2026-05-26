@@ -4654,13 +4654,19 @@ fn copy_package_assets_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
         return Ok(());
     };
 
+    let target = output_dir.join("_ax").join("pkg").join("axonyx-ui");
+
     let css_root = package_css_root(&package_root);
-    if !css_root.exists() {
-        return Ok(());
+    if css_root.exists() {
+        copy_dir_all_filtered(&css_root, &target, |_| false)?;
     }
 
-    let target = output_dir.join("_ax").join("pkg").join("axonyx-ui");
-    copy_dir_all_filtered(&css_root, &target, |_| false)
+    let js_root = package_js_root(&package_root);
+    if js_root.exists() {
+        copy_dir_all_filtered(&js_root, &target.join("js"), |_| false)?;
+    }
+
+    Ok(())
 }
 
 fn write_content_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize> {
@@ -6982,8 +6988,8 @@ fn resolve_package_asset_root(root: &Path, package_name: &str) -> Option<PathBuf
             return Some(app_vendor);
         }
 
-        return cargo_package_root(root, package_name)
-            .or_else(|| axonyx_ui_workspace_package_root(root));
+        return axonyx_ui_workspace_package_root(root)
+            .or_else(|| cargo_package_root(root, package_name));
     }
 
     cargo_package_root(root, package_name)
@@ -7035,6 +7041,8 @@ fn package_asset_path(package_root: &Path, relative: &str) -> Option<PathBuf> {
     let relative_path = safe_relative_path(relative)?;
     let css_root = package_css_root(package_root);
     let css_entry = package_css_entry(package_root);
+    let js_root = package_js_root(package_root);
+    let js_entry = package_js_entry(package_root);
 
     if relative_path.components().count() == 1
         && css_entry
@@ -7042,6 +7050,21 @@ fn package_asset_path(package_root: &Path, relative: &str) -> Option<PathBuf> {
             .is_some_and(|file_name| file_name == relative_path.as_os_str())
     {
         return Some(css_entry);
+    }
+
+    if relative_path.components().count() == 2
+        && relative_path.starts_with("js")
+        && js_entry.file_name().is_some_and(|file_name| {
+            relative_path
+                .file_name()
+                .is_some_and(|relative_file| file_name == relative_file)
+        })
+    {
+        return Some(js_entry);
+    }
+
+    if let Ok(js_relative) = relative_path.strip_prefix("js") {
+        return Some(js_root.join(js_relative));
     }
 
     Some(css_root.join(relative_path))
@@ -7057,6 +7080,18 @@ fn package_css_entry(package_root: &Path) -> PathBuf {
     package_metadata_export(package_root, "css_entry")
         .map(|path| package_root.join(path))
         .unwrap_or_else(|| package_root.join("src").join("css").join("index.css"))
+}
+
+fn package_js_root(package_root: &Path) -> PathBuf {
+    package_metadata_export(package_root, "js_root")
+        .map(|path| package_root.join(path))
+        .unwrap_or_else(|| package_root.join("src").join("js"))
+}
+
+fn package_js_entry(package_root: &Path) -> PathBuf {
+    package_metadata_export(package_root, "js_entry")
+        .map(|path| package_root.join(path))
+        .unwrap_or_else(|| package_root.join("src").join("js").join("index.js"))
 }
 
 fn package_metadata_export(package_root: &Path, key: &str) -> Option<String> {
@@ -8154,6 +8189,7 @@ mod tests {
     fn write_test_axonyx_ui_package(root: &Path, card_title: &str, css: &str) {
         fs::create_dir_all(root.join("src/foundry")).expect("ui foundry dir should exist");
         fs::create_dir_all(root.join("src/css")).expect("ui css dir should exist");
+        fs::create_dir_all(root.join("src/js")).expect("ui js dir should exist");
         fs::write(
             root.join("Cargo.toml"),
             r#"
@@ -8179,6 +8215,8 @@ namespace = "@axonyx/ui"
 ax_root = "src"
 css_root = "src/css"
 css_entry = "src/css/index.css"
+js_root = "src/js"
+js_entry = "src/js/index.js"
 "#,
         )
         .expect("ui package metadata should write");
@@ -8193,6 +8231,11 @@ page SectionCard
         )
         .expect("ui component should write");
         fs::write(root.join("src/css/index.css"), css).expect("ui css should write");
+        fs::write(
+            root.join("src/js/index.js"),
+            "window.__axonyxUiRuntime = true;",
+        )
+        .expect("ui js should write");
     }
 
     #[test]
@@ -9084,6 +9127,41 @@ axonyx-ui = {{ path = "{ui_path}" }}
 
         assert_eq!(asset.content_type, "text/css; charset=utf-8");
         assert_eq!(asset.body, b"body { color: silver; }");
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn loads_package_js_asset_from_cargo_dependency() {
+        let workspace = make_temp_dir("package-js-asset-cargo");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(&root).expect("app dir should exist");
+        write_test_axonyx_ui_package(&ui_root, "Cargo UI", "body { color: silver; }");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("app cargo manifest should write");
+
+        let asset = load_package_asset(&root, "/_ax/pkg/axonyx-ui/js/index.js")
+            .expect("package asset lookup should work")
+            .expect("package asset should exist");
+
+        assert_eq!(asset.content_type, "application/javascript; charset=utf-8");
+        assert_eq!(asset.body, b"window.__axonyxUiRuntime = true;");
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
