@@ -3068,8 +3068,14 @@ fn check_backend_requirements(
         }
     };
 
+    let type_names = root.and_then(|root| collect_project_type_names(root).ok());
     let mut diagnostics = check_backend_route_inputs(path, source, document, &plan);
-    diagnostics.extend(check_backend_return_contracts(path, source, &plan));
+    diagnostics.extend(check_backend_return_contracts(
+        path,
+        source,
+        &plan,
+        type_names.as_ref(),
+    ));
 
     if !backend_plan_uses_signed_session(&plan)
         || auth_secret_configured(root, "AX_SECRET_SESSION_KEY")
@@ -3157,6 +3163,7 @@ fn check_backend_return_contracts(
     path: &Path,
     source: &str,
     plan: &AxBackendPlan,
+    type_names: Option<&std::collections::BTreeSet<String>>,
 ) -> Vec<CheckDiagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -3172,23 +3179,65 @@ fn check_backend_return_contracts(
             continue;
         };
 
-        if is_supported_backend_return_contract(returns) {
+        if !is_supported_backend_return_contract(returns) {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_source_pattern(source, &format!("-> {returns}")),
+                column: 1,
+                severity: "error",
+                code: "axonyx-return-contract-type",
+                message: format!(
+                    "backend return contract `{returns}` is invalid. Use a named type such as Post, an array such as Post[], or a generic such as List<Post>."
+                ),
+            });
             continue;
         }
 
-        diagnostics.push(CheckDiagnostic {
-            file: display_path(path),
-            line: line_for_source_pattern(source, &format!("-> {returns}")),
-            column: 1,
-            severity: "error",
-            code: "axonyx-return-contract-type",
-            message: format!(
-                "backend return contract `{returns}` is invalid. Use a named type such as Post, an array such as Post[], or a generic such as List<Post>."
-            ),
-        });
+        let Some(type_names) = type_names else {
+            continue;
+        };
+
+        for named_type in backend_return_contract_named_types(returns) {
+            if type_names.contains(named_type) {
+                continue;
+            }
+
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_source_pattern(source, &format!("-> {returns}")),
+                column: 1,
+                severity: "error",
+                code: "axonyx-return-contract-unknown-type",
+                message: format!(
+                    "backend return contract `{returns}` references unknown type `{named_type}`. Add `type {named_type} {{ ... }}` to a parsed .ax file or use a built-in return type."
+                ),
+            });
+        }
     }
 
     diagnostics
+}
+
+fn collect_project_type_names(root: &Path) -> Result<std::collections::BTreeSet<String>> {
+    let mut files = Vec::new();
+    collect_ax_files(&root.join("app"), &mut files)?;
+    collect_ax_files(&root.join("routes"), &mut files)?;
+    collect_ax_files(&root.join("jobs"), &mut files)?;
+
+    let mut names = std::collections::BTreeSet::new();
+    for file in files {
+        let source = fs::read_to_string(&file)
+            .with_context(|| format!("failed to read .ax file '{}'", file.display()))?;
+        let Ok(document) = parse_ax_v2(&source) else {
+            continue;
+        };
+
+        for ty in document.types {
+            names.insert(ty.name);
+        }
+    }
+
+    Ok(names)
 }
 
 fn is_supported_backend_return_contract(ty: &str) -> bool {
@@ -3232,6 +3281,52 @@ fn is_supported_backend_return_contract(ty: &str) -> bool {
             | "float"
             | "number"
     ) || is_ax_type_identifier(ty)
+}
+
+fn backend_return_contract_named_types(ty: &str) -> Vec<&str> {
+    let ty = ty.trim();
+
+    if let Some(inner) = ty.strip_suffix("[]") {
+        return backend_return_contract_named_types(inner);
+    }
+
+    for wrapper in ["List", "Optional"] {
+        let prefix = format!("{wrapper}<");
+        if let Some(inner) = ty
+            .strip_prefix(&prefix)
+            .and_then(|remaining| remaining.strip_suffix('>'))
+        {
+            return backend_return_contract_named_types(inner);
+        }
+    }
+
+    if is_builtin_backend_return_type(ty) {
+        Vec::new()
+    } else {
+        vec![ty]
+    }
+}
+
+fn is_builtin_backend_return_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "String"
+            | "Bool"
+            | "Boolean"
+            | "Number"
+            | "Json"
+            | "Null"
+            | "string"
+            | "bool"
+            | "boolean"
+            | "i64"
+            | "u64"
+            | "f64"
+            | "int"
+            | "integer"
+            | "float"
+            | "number"
+    )
 }
 
 fn is_ax_type_identifier(ty: &str) -> bool {
@@ -11318,6 +11413,70 @@ route GET "/api/posts" -> List<>
         assert_eq!(diagnostics[0].code, "axonyx-return-contract-type");
         assert_eq!(diagnostics[0].line, 2);
         assert!(diagnostics[0].message.contains("List<>"));
+    }
+
+    #[test]
+    fn check_app_sources_accepts_known_backend_return_contract_type() {
+        let root = make_temp_dir("known-return-contract-type");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+type Post {
+  title: String
+}
+
+<Copy>Home</Copy>
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts" -> Post[]
+  return json(posts)
+"#,
+        )
+        .expect("route should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_unknown_backend_return_contract_type() {
+        let root = make_temp_dir("unknown-return-contract-type");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts" -> Post[]
+  return json(posts)
+"#,
+        )
+        .expect("route should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-return-contract-unknown-type");
+        assert_eq!(diagnostics[0].line, 2);
+        assert!(diagnostics[0].message.contains("Post"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
