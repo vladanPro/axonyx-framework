@@ -5023,7 +5023,7 @@ fn print_api_schema_text(report: &ApiReport) {
     for route in &report.routes {
         println!("// {} {}", route.method, route.route);
         if let Some(returns) = &route.returns {
-            println!("// returns {returns}");
+            println!("// response: {}", ax_return_schema_type(returns));
         }
         println!("type {}Request {{", api_route_type_name(route));
         if route.inputs.is_empty() {
@@ -5108,7 +5108,7 @@ fn print_actions_schema_text(report: &ActionReport) {
         println!("// {}", route.route);
         for action in &route.actions {
             if let Some(returns) = &action.returns {
-                println!("// returns {returns}");
+                println!("// response: {}", ax_return_schema_type(returns));
             }
             println!("type {}Input {{", action.name);
             if action.inputs.is_empty() {
@@ -5141,6 +5141,21 @@ fn ax_schema_type(input_ty: &str) -> &'static str {
         "bool" | "boolean" => "Bool",
         "i64" | "u64" | "int" | "integer" | "number" => "Number",
         _ => "String",
+    }
+}
+
+fn ax_return_schema_type(return_ty: &str) -> String {
+    let return_ty = return_ty.trim();
+
+    if let Some(inner) = return_ty.strip_suffix("[]") {
+        return format!("List<{}>", ax_return_schema_type(inner));
+    }
+
+    match return_ty.to_ascii_lowercase().as_str() {
+        "string" | "str" => "String".to_string(),
+        "bool" | "boolean" => "Bool".to_string(),
+        "i64" | "u64" | "int" | "integer" | "number" | "f64" | "float" => "Number".to_string(),
+        _ => return_ty.to_string(),
     }
 }
 
@@ -8338,6 +8353,15 @@ action ClearTheme
         assert_eq!(ax_schema_type("bool"), "Bool");
         assert_eq!(ax_schema_type("i64"), "Number");
         assert_eq!(ax_schema_type("unknown"), "String");
+    }
+
+    #[test]
+    fn response_schema_normalizes_return_contract_types() {
+        assert_eq!(ax_return_schema_type("Post"), "Post");
+        assert_eq!(ax_return_schema_type("Post[]"), "List<Post>");
+        assert_eq!(ax_return_schema_type("string"), "String");
+        assert_eq!(ax_return_schema_type("f64"), "Number");
+        assert_eq!(ax_return_schema_type("Optional<Post>"), "Optional<Post>");
     }
 
     #[test]
