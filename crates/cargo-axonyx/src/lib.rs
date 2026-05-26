@@ -88,6 +88,10 @@ struct ApiArgs {
     /// Render API contracts as an OpenAPI-compatible JSON document.
     #[arg(long)]
     openapi: bool,
+
+    /// Write the rendered API output to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -1635,16 +1639,21 @@ fn api_command(args: ApiArgs) -> Result<()> {
     }
 
     if args.openapi {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&api_report_openapi_value(&report))?
-        );
+        let output = serde_json::to_string_pretty(&api_report_openapi_value(&report))?;
+        write_or_print_api_output(args.out.as_deref(), &output)?;
         return Ok(());
     }
 
     if args.schema {
+        if args.out.is_some() {
+            bail!("--out is currently supported only with --openapi");
+        }
         print_api_schema_text(&report);
         return Ok(());
+    }
+
+    if args.out.is_some() {
+        bail!("--out is currently supported only with --openapi");
     }
 
     match args.format {
@@ -1654,6 +1663,23 @@ fn api_command(args: ApiArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn write_or_print_api_output(out: Option<&Path>, output: &str) -> Result<()> {
+    let Some(out) = out else {
+        println!("{output}");
+        return Ok(());
+    };
+
+    if let Some(parent) = out.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create output directory '{}'", parent.display()))?;
+    }
+
+    fs::write(out, format!("{output}\n"))
+        .with_context(|| format!("failed to write API output '{}'", out.display()))?;
+    println!("Wrote API contract to {}", display_path(out));
     Ok(())
 }
 
@@ -8555,6 +8581,20 @@ route GET "/api/posts" -> Post[]
     }
 
     #[test]
+    fn api_output_writer_creates_parent_directories() {
+        let root = make_temp_dir("api-output-writer");
+        let out = root.join("public/contracts/openapi.json");
+
+        write_or_print_api_output(Some(&out), r#"{"openapi":"3.1.0"}"#)
+            .expect("api output should write");
+
+        let written = fs::read_to_string(&out).expect("openapi output should exist");
+        assert_eq!(written, "{\"openapi\":\"3.1.0\"}\n");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn routes_report_includes_server_streaming_mode() {
         let root = make_temp_dir("route-report-stream-mode");
         fs::write(
@@ -9567,6 +9607,24 @@ page Home
         };
         assert!(args.check);
         assert_eq!(args.format, CheckFormat::Text);
+    }
+
+    #[test]
+    fn parses_api_openapi_out_command() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "api",
+            "--openapi",
+            "--out",
+            "public/openapi.json",
+        ])
+        .expect("api openapi out command should parse");
+
+        let Commands::Api(args) = cli.command else {
+            panic!("expected api command");
+        };
+        assert!(args.openapi);
+        assert_eq!(args.out.as_deref(), Some(Path::new("public/openapi.json")));
     }
 
     #[test]
