@@ -84,6 +84,10 @@ struct ApiArgs {
     /// Render API request contracts as .ax type declarations.
     #[arg(long)]
     schema: bool,
+
+    /// Render API contracts as an OpenAPI-compatible JSON document.
+    #[arg(long)]
+    openapi: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1611,6 +1615,18 @@ fn routes_report(root: &Path) -> Result<RoutesReport> {
 fn api_command(args: ApiArgs) -> Result<()> {
     let root = app_root()?;
     let report = collect_api_report(&root)?;
+
+    if args.schema && args.openapi {
+        bail!("choose either --schema or --openapi, not both");
+    }
+
+    if args.openapi {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&api_report_openapi_value(&report))?
+        );
+        return Ok(());
+    }
 
     if args.schema {
         print_api_schema_text(&report);
@@ -5049,6 +5065,181 @@ fn print_api_schema_text(report: &ApiReport) {
     }
 }
 
+fn api_report_openapi_value(report: &ApiReport) -> serde_json::Value {
+    let mut paths = serde_json::Map::new();
+
+    for route in &report.routes {
+        let path = openapi_path(&route.route);
+        let method = route.method.to_ascii_lowercase();
+        let operation = openapi_operation_for_route(route);
+
+        let path_item = paths
+            .entry(path)
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(methods) = path_item {
+            methods.insert(method, operation);
+        }
+    }
+
+    serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Axonyx API",
+            "version": "0.1.0"
+        },
+        "paths": paths
+    })
+}
+
+fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
+    let mut operation = serde_json::Map::new();
+    operation.insert(
+        "operationId".to_string(),
+        serde_json::Value::String(api_route_type_name(route)),
+    );
+
+    let parameters = openapi_parameters_for_route(route);
+    if !parameters.is_empty() {
+        operation.insert(
+            "parameters".to_string(),
+            serde_json::Value::Array(parameters),
+        );
+    }
+
+    if !route.inputs.is_empty() {
+        operation.insert(
+            "requestBody".to_string(),
+            serde_json::json!({
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": openapi_input_object_schema(&route.inputs)
+                    }
+                }
+            }),
+        );
+    }
+
+    let response_schema = route
+        .returns
+        .as_deref()
+        .map(openapi_schema_for_ax_type)
+        .unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+
+    operation.insert(
+        "responses".to_string(),
+        serde_json::json!({
+            "200": {
+                "description": "OK",
+                "content": {
+                    "application/json": {
+                        "schema": response_schema
+                    }
+                }
+            }
+        }),
+    );
+
+    serde_json::Value::Object(operation)
+}
+
+fn openapi_parameters_for_route(route: &ApiRouteReport) -> Vec<serde_json::Value> {
+    route
+        .params
+        .iter()
+        .map(|param| {
+            serde_json::json!({
+                "name": param,
+                "in": "path",
+                "required": true,
+                "schema": { "type": "string" }
+            })
+        })
+        .collect()
+}
+
+fn openapi_input_object_schema(inputs: &[ActionInputReport]) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+
+    for input in inputs {
+        properties.insert(input.name.clone(), openapi_schema_for_ax_type(&input.ty));
+        if !input.optional && input.default.is_none() {
+            required.push(serde_json::Value::String(input.name.clone()));
+        }
+    }
+
+    let mut schema = serde_json::Map::new();
+    schema.insert(
+        "type".to_string(),
+        serde_json::Value::String("object".to_string()),
+    );
+    schema.insert(
+        "properties".to_string(),
+        serde_json::Value::Object(properties),
+    );
+    if !required.is_empty() {
+        schema.insert("required".to_string(), serde_json::Value::Array(required));
+    }
+
+    serde_json::Value::Object(schema)
+}
+
+fn openapi_schema_for_ax_type(ty: &str) -> serde_json::Value {
+    let ty = ty.trim();
+
+    if let Some(inner) = ty.strip_suffix("[]") {
+        return serde_json::json!({
+            "type": "array",
+            "items": openapi_schema_for_ax_type(inner)
+        });
+    }
+
+    if let Some(inner) = ty
+        .strip_prefix("List<")
+        .and_then(|remaining| remaining.strip_suffix('>'))
+    {
+        return serde_json::json!({
+            "type": "array",
+            "items": openapi_schema_for_ax_type(inner)
+        });
+    }
+
+    if let Some(inner) = ty
+        .strip_prefix("Optional<")
+        .and_then(|remaining| remaining.strip_suffix('>'))
+    {
+        let mut schema = openapi_schema_for_ax_type(inner);
+        if let serde_json::Value::Object(object) = &mut schema {
+            object.insert("nullable".to_string(), serde_json::Value::Bool(true));
+        }
+        return schema;
+    }
+
+    match ty.to_ascii_lowercase().as_str() {
+        "string" | "str" => serde_json::json!({ "type": "string" }),
+        "bool" | "boolean" => serde_json::json!({ "type": "boolean" }),
+        "i64" | "u64" | "int" | "integer" => serde_json::json!({ "type": "integer" }),
+        "f64" | "float" | "number" => serde_json::json!({ "type": "number" }),
+        "json" => serde_json::json!({}),
+        "null" => serde_json::json!({ "type": "null" }),
+        _ => serde_json::json!({ "$ref": format!("#/components/schemas/{ty}") }),
+    }
+}
+
+fn openapi_path(route: &str) -> String {
+    route
+        .split('/')
+        .map(|segment| {
+            segment
+                .strip_prefix(':')
+                .map(|param| format!("{{{param}}}"))
+                .unwrap_or_else(|| segment.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn api_route_type_name(route: &ApiRouteReport) -> String {
     format!(
         "{}{}",
@@ -8145,6 +8336,52 @@ route POST "/api/posts" -> Post
         assert_eq!(api_route_type_name(&report.routes[1]), "PostApiPosts");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn api_report_can_render_openapi_document() {
+        let report = ApiReport {
+            routes: vec![ApiRouteReport {
+                method: "POST".to_string(),
+                route: "/api/posts/:slug".to_string(),
+                returns: Some("Post[]".to_string()),
+                file: "routes/api/posts.ax".to_string(),
+                params: vec!["slug".to_string()],
+                inputs: vec![
+                    ActionInputReport {
+                        name: "title".to_string(),
+                        ty: "string".to_string(),
+                        optional: false,
+                        default: None,
+                    },
+                    ActionInputReport {
+                        name: "featured".to_string(),
+                        ty: "bool".to_string(),
+                        optional: true,
+                        default: Some("false".to_string()),
+                    },
+                ],
+            }],
+        };
+
+        let value = api_report_openapi_value(&report);
+
+        assert_eq!(value["openapi"], "3.1.0");
+        let operation = &value["paths"]["/api/posts/{slug}"]["post"];
+        assert_eq!(operation["operationId"], "PostApiPostsSlug");
+        assert_eq!(operation["parameters"][0]["name"], "slug");
+        assert_eq!(
+            operation["requestBody"]["content"]["application/json"]["schema"]["required"][0],
+            "title"
+        );
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["type"],
+            "array"
+        );
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
+            "#/components/schemas/Post"
+        );
     }
 
     #[test]
