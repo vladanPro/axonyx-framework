@@ -43,7 +43,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.11";
-const AXONYX_UI_VERSION: &str = "0.0.38";
+const AXONYX_UI_VERSION: &str = "0.0.39";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
@@ -9989,7 +9989,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.38\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.39\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -10386,7 +10386,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains("axonyx-runtime = \"0.1.11\""));
-        assert!(updated.contains("version = \"0.0.38\""));
+        assert!(updated.contains("version = \"0.0.39\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
