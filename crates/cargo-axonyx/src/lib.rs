@@ -1141,6 +1141,28 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
         },
     });
 
+    checks.push(match layout_source.as_deref() {
+        Some(source) if source.contains("/_ax/pkg/axonyx-ui/js/index.js") => DoctorCheck {
+            code: "ui-script",
+            severity: DoctorSeverity::Ok,
+            message: "Canonical Axonyx UI behavior script found.".to_string(),
+            hint: None,
+        },
+        Some(_) => DoctorCheck {
+            code: "ui-script",
+            severity: DoctorSeverity::Warn,
+            message: "Axonyx UI behavior script is missing from app/layout.ax.".to_string(),
+            hint: Some("Run `cargo ax add ui` or add /_ax/pkg/axonyx-ui/js/index.js to <Head>."),
+        },
+        None => DoctorCheck {
+            code: "ui-script",
+            severity: DoctorSeverity::Warn,
+            message: "Could not inspect UI behavior script because app/layout.ax is missing."
+                .to_string(),
+            hint: None,
+        },
+    });
+
     checks.push(
         match load_package_asset(root, "/_ax/pkg/axonyx-ui/index.css") {
             Ok(Some(_)) => DoctorCheck {
@@ -1161,6 +1183,31 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
                 code: "ui-package-css",
                 severity: DoctorSeverity::Warn,
                 message: format!("Axonyx UI package CSS check failed: {error}"),
+                hint: Some("Check the package asset path and Axonyx UI package metadata."),
+            },
+        },
+    );
+
+    checks.push(
+        match load_package_asset(root, "/_ax/pkg/axonyx-ui/js/index.js") {
+            Ok(Some(_)) => DoctorCheck {
+                code: "ui-package-js",
+                severity: DoctorSeverity::Ok,
+                message: "Axonyx UI package JavaScript can be served.".to_string(),
+                hint: None,
+            },
+            Ok(None) => DoctorCheck {
+                code: "ui-package-js",
+                severity: DoctorSeverity::Warn,
+                message: "Axonyx UI package JavaScript could not be found.".to_string(),
+                hint: Some(
+                    "Run `cargo ax add ui` or check that axonyx-ui exposes src/js/index.js.",
+                ),
+            },
+            Err(error) => DoctorCheck {
+                code: "ui-package-js",
+                severity: DoctorSeverity::Warn,
+                message: format!("Axonyx UI package JavaScript check failed: {error}"),
                 hint: Some("Check the package asset path and Axonyx UI package metadata."),
             },
         },
@@ -5827,7 +5874,7 @@ fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     enable_module(&axonyx_toml.to_path_buf(), "ui")?;
 
     println!("Ensured Cargo dependency: axonyx-ui = \"{AXONYX_UI_VERSION}\".");
-    println!("Updated app/layout.ax with silver theme and stylesheet link when needed.");
+    println!("Updated app/layout.ax with silver theme, stylesheet link, and Foundry behavior runtime when needed.");
     println!("You can now import components such as:");
     println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard.ax\"");
     Ok(())
@@ -6003,6 +6050,8 @@ fn ensure_ui_layout_setup_jsx(source: &str) -> String {
     const STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
     const LEGACY_STYLESHEET_HREF: &str = "/css/axonyx-ui/index.css";
     const STYLESHEET_TAG: &str = r#"<Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />"#;
+    const SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
+    const SCRIPT_TAG: &str = r#"<Script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true" />"#;
 
     let mut updated = source.to_string();
 
@@ -6013,6 +6062,10 @@ fn ensure_ui_layout_setup_jsx(source: &str) -> String {
 
         if !updated.contains(STYLESHEET_HREF) && !updated.contains(LEGACY_STYLESHEET_HREF) {
             updated = updated.replacen("</Head>", &format!("  {STYLESHEET_TAG}\n</Head>"), 1);
+        }
+
+        if !updated.contains(SCRIPT_HREF) {
+            updated = updated.replacen("</Head>", &format!("  {SCRIPT_TAG}\n</Head>"), 1);
         }
 
         return updated;
@@ -6029,6 +6082,7 @@ fn ensure_ui_layout_setup_jsx(source: &str) -> String {
         "<Head>".to_string(),
         format!("  {THEME_TAG}"),
         format!("  {STYLESHEET_TAG}"),
+        format!("  {SCRIPT_TAG}"),
         "</Head>".to_string(),
     ];
 
@@ -6051,8 +6105,11 @@ fn ensure_ui_layout_setup_v1(source: &str) -> String {
     let has_stylesheet = lines.iter().any(|line| {
         line.contains("/_ax/pkg/axonyx-ui/index.css") || line.contains("/css/axonyx-ui/index.css")
     });
+    let has_script = lines
+        .iter()
+        .any(|line| line.contains("/_ax/pkg/axonyx-ui/js/index.js"));
 
-    if has_theme && has_stylesheet {
+    if has_theme && has_stylesheet && has_script {
         return source.to_string();
     }
 
@@ -6078,6 +6135,9 @@ fn ensure_ui_layout_setup_v1(source: &str) -> String {
     if !has_stylesheet {
         to_insert
             .push("  link rel: \"stylesheet\", href: \"/_ax/pkg/axonyx-ui/index.css\"".to_string());
+    }
+    if !has_script {
+        to_insert.push("  script src: \"/_ax/pkg/axonyx-ui/js/index.js\", defer: true".to_string());
     }
 
     lines.splice(insert_at..insert_at, to_insert);
@@ -9879,6 +9939,7 @@ axonyx-runtime = "0.1.0"
             fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read back");
         assert!(layout.contains("theme \"silver\""));
         assert!(layout.contains("/_ax/pkg/axonyx-ui/index.css"));
+        assert!(layout.contains("/_ax/pkg/axonyx-ui/js/index.js"));
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
@@ -9922,6 +9983,7 @@ path = "vendor/axonyx-ui"
 page RootLayout
 <Head>
   <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
+  <Script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true" />
 </Head>
 <Slot />
 "#,
@@ -9939,6 +10001,7 @@ page RootLayout
             .iter()
             .all(|check| check.severity == DoctorSeverity::Ok));
         assert!(checks.iter().any(|check| check.code == "ui-package-css"));
+        assert!(checks.iter().any(|check| check.code == "ui-package-js"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -10434,6 +10497,7 @@ axonyx-runtime = "0.1.0"
         assert!(
             updated.contains(r#"<Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />"#)
         );
+        assert!(updated.contains(r#"<Script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true" />"#));
         assert!(updated.contains("<Title>Demo</Title>"));
     }
 
