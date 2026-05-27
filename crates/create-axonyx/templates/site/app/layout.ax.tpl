@@ -1,3 +1,4 @@
+use "@axonyx/ui"
 import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
 import { HeroCard } from "@axonyx/ui/foundry/HeroCard.ax"
 import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
@@ -12,7 +13,6 @@ page RootLayout
     content="{{APP_NAME}} ships presentation-first pages in Axonyx with minimal browser-side JavaScript."
   />
   <Link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
 </Head>
 
 <SiteShell max="xl">

@@ -1,3 +1,4 @@
+use "@axonyx/ui"
 import { HeroCard } from "@axonyx/ui/foundry/HeroCard.ax"
 import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
 
@@ -11,7 +12,6 @@ page DocsLayout
     content="{{APP_NAME}} is an Axonyx-powered documentation site."
   />
   <Link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
 </Head>
 
 <SiteShell max="xl">

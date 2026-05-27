@@ -10,9 +10,9 @@ use clap::{Parser, ValueEnum};
 
 const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runtime";
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
-const DEFAULT_RUNTIME_VERSION: &str = "0.1.10";
+const DEFAULT_RUNTIME_VERSION: &str = "0.1.11";
 const DEFAULT_UI_PACKAGE: &str = "axonyx-ui";
-const DEFAULT_UI_VERSION: &str = "0.0.34";
+const DEFAULT_UI_VERSION: &str = "0.0.39";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonyx")]
@@ -682,12 +682,12 @@ mod tests {
             fs::read_to_string(target_dir.join("app/layout.ax")).expect("layout should read");
         assert!(layout.contains("@axonyx/ui/foundry/SiteShell.ax"));
         assert!(layout.contains("<Theme>silver</Theme>"));
-        assert!(layout.contains("/_ax/pkg/axonyx-ui/index.css"));
+        assert!(layout.contains("use \"@axonyx/ui\""));
 
         let cargo_toml =
             fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-runtime = \"0.1.10\""));
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.34\""));
+        assert!(cargo_toml.contains("axonyx-runtime = \"0.1.11\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.39\""));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
         assert!(page.contains("@axonyx/ui/foundry/SectionCard.ax"));

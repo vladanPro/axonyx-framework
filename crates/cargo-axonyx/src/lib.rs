@@ -44,6 +44,7 @@ const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/referen
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.11";
 const AXONYX_UI_VERSION: &str = "0.0.39";
+const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
@@ -1123,7 +1124,17 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
     );
 
     let layout_source = fs::read_to_string(root.join("app/layout.ax")).ok();
+    let layout_uses_axonyx_ui = layout_source
+        .as_deref()
+        .is_some_and(|source| source_uses_package(source, "@axonyx/ui"));
     checks.push(match layout_source.as_deref() {
+        Some(_) if layout_uses_axonyx_ui => DoctorCheck {
+            code: "ui-stylesheet",
+            severity: DoctorSeverity::Ok,
+            message: "Axonyx UI package use directive found; stylesheet will be injected."
+                .to_string(),
+            hint: None,
+        },
         Some(source) if source.contains(AXONYX_UI_STYLESHEET_HREF) => DoctorCheck {
             code: "ui-stylesheet",
             severity: DoctorSeverity::Ok,
@@ -1152,6 +1163,13 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
     });
 
     checks.push(match layout_source.as_deref() {
+        Some(_) if layout_uses_axonyx_ui => DoctorCheck {
+            code: "ui-script",
+            severity: DoctorSeverity::Ok,
+            message: "Axonyx UI package use directive found; behavior runtime will be injected."
+                .to_string(),
+            hint: None,
+        },
         Some(source) if source.contains(AXONYX_UI_SCRIPT_HREF) => DoctorCheck {
             code: "ui-script",
             severity: DoctorSeverity::Ok,
@@ -5921,7 +5939,7 @@ fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     enable_module(&axonyx_toml.to_path_buf(), "ui")?;
 
     println!("Ensured Cargo dependency: axonyx-ui = \"{AXONYX_UI_VERSION}\".");
-    println!("Updated app/layout.ax with silver theme, stylesheet link, and Foundry behavior runtime when needed.");
+    println!("Updated app/layout.ax with silver theme and Axonyx UI package use when possible.");
     println!("You can now import components such as:");
     println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard.ax\"");
     Ok(())
@@ -6095,24 +6113,12 @@ fn ensure_ui_layout_setup(root: &Path) -> Result<bool> {
 
 fn ensure_ui_layout_setup_jsx(source: &str) -> String {
     const THEME_TAG: &str = "<Theme>silver</Theme>";
-    const LEGACY_STYLESHEET_HREF: &str = "/css/axonyx-ui/index.css";
-    const STYLESHEET_TAG: &str = r#"<Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />"#;
-    const SCRIPT_TAG: &str = r#"<Script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true" />"#;
 
-    let mut updated = source.to_string();
+    let mut updated = ensure_package_use_directive(source, AXONYX_UI_USE_DIRECTIVE);
 
     if updated.contains("<Head>") {
         if !updated.contains(THEME_TAG) {
             updated = updated.replacen("<Head>", &format!("<Head>\n  {THEME_TAG}"), 1);
-        }
-
-        if !updated.contains(AXONYX_UI_STYLESHEET_HREF) && !updated.contains(LEGACY_STYLESHEET_HREF)
-        {
-            updated = updated.replacen("</Head>", &format!("  {STYLESHEET_TAG}\n</Head>"), 1);
-        }
-
-        if !updated.contains(AXONYX_UI_SCRIPT_HREF) {
-            updated = updated.replacen("</Head>", &format!("  {SCRIPT_TAG}\n</Head>"), 1);
         }
 
         return updated;
@@ -6128,12 +6134,30 @@ fn ensure_ui_layout_setup_jsx(source: &str) -> String {
         String::new(),
         "<Head>".to_string(),
         format!("  {THEME_TAG}"),
-        format!("  {STYLESHEET_TAG}"),
-        format!("  {SCRIPT_TAG}"),
         "</Head>".to_string(),
     ];
 
     lines.splice(page_index + 1..page_index + 1, head_block.drain(..));
+    lines.join("\n")
+}
+
+fn ensure_package_use_directive(source: &str, directive: &str) -> String {
+    if source.lines().any(|line| line.trim() == directive) {
+        return source.to_string();
+    }
+
+    let mut lines = source.lines().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let insert_at = lines
+        .iter()
+        .position(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("use ")
+                || trimmed.starts_with("import ")
+                || trimmed.starts_with("page ")
+        })
+        .unwrap_or(0);
+
+    lines.insert(insert_at, directive.to_string());
     lines.join("\n")
 }
 
@@ -10482,7 +10506,10 @@ page RootLayout
         assert!(
             updated.contains(r#"<Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />"#)
         );
-        assert!(updated.contains(r#"<Script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true" />"#));
+        assert!(updated.contains(AXONYX_UI_USE_DIRECTIVE));
+        assert!(
+            !updated.contains(r#"<Script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true" />"#)
+        );
 
         assert!(!ensure_ui_layout_setup(&app_root).expect("layout should already be current"));
 
@@ -10702,10 +10729,9 @@ axonyx-runtime = "0.1.0"
         let updated = ensure_ui_layout_setup_jsx(source);
 
         assert!(updated.contains("<Theme>silver</Theme>"));
-        assert!(
-            updated.contains(r#"<Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />"#)
-        );
-        assert!(updated.contains(r#"<Script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true" />"#));
+        assert!(updated.contains(AXONYX_UI_USE_DIRECTIVE));
+        assert!(!updated.contains(AXONYX_UI_STYLESHEET_HREF));
+        assert!(!updated.contains(AXONYX_UI_SCRIPT_HREF));
         assert!(updated.contains("<Title>Demo</Title>"));
     }
 
