@@ -4025,6 +4025,7 @@ fn line_from_ax_parse_v2_error(error: &AxParseV2Error) -> Option<usize> {
     match error {
         AxParseV2Error::EmptyDocument | AxParseV2Error::MissingPage => Some(1),
         AxParseV2Error::InvalidImport { line }
+        | AxParseV2Error::InvalidUse { line }
         | AxParseV2Error::MissingImportFrom { line }
         | AxParseV2Error::EmptyImportList { line }
         | AxParseV2Error::InvalidPage { line }
@@ -7440,7 +7441,43 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
         )
     })?;
 
+    let html = apply_package_use_assets(&state.root, html, &layout_refs, &page_source);
     Ok(apply_theme_config(&state.root, html))
+}
+
+fn apply_package_use_assets(
+    root: &Path,
+    html: String,
+    layout_sources: &[&str],
+    page_source: &str,
+) -> String {
+    let uses_axonyx_ui = layout_sources
+        .iter()
+        .any(|source| source_uses_package(source, "@axonyx/ui"))
+        || source_uses_package(page_source, "@axonyx/ui");
+
+    if !uses_axonyx_ui {
+        return html;
+    }
+
+    let package_available = resolve_package_asset_root(root, "axonyx-ui").is_some()
+        || load_package_asset(root, AXONYX_UI_STYLESHEET_HREF)
+            .ok()
+            .flatten()
+            .is_some();
+    if !package_available {
+        return html;
+    }
+
+    let html = ensure_head_stylesheet(&html, AXONYX_UI_STYLESHEET_HREF);
+    ensure_head_script(&html, AXONYX_UI_SCRIPT_HREF)
+}
+
+fn source_uses_package(source: &str, package: &str) -> bool {
+    source.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == format!("use \"{package}\"") || trimmed == format!("use '{package}'")
+    })
 }
 
 fn render_route_response(
@@ -7620,6 +7657,23 @@ fn ensure_head_stylesheet(html: &str, stylesheet: &str) -> String {
     let tag = format!(
         "<link rel=\"stylesheet\" href=\"{}\">",
         html_escape(stylesheet)
+    );
+
+    if html.contains("</head>") {
+        return html.replacen("</head>", &format!("{tag}</head>"), 1);
+    }
+
+    html.to_string()
+}
+
+fn ensure_head_script(html: &str, script: &str) -> String {
+    if html.contains(script) {
+        return html.to_string();
+    }
+
+    let tag = format!(
+        "<script src=\"{}\" defer=\"true\"></script>",
+        html_escape(script)
     );
 
     if html.contains("</head>") {
@@ -11841,6 +11895,46 @@ page Home
         assert!(html.contains("No package override needed"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn use_axonyx_ui_injects_package_css_and_js() {
+        let root = make_temp_dir("use-axonyx-ui-assets");
+        let ui_root = root.join("vendor/axonyx-ui");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        write_test_axonyx_ui_package(&ui_root, "Use UI", "body { color: silver; }");
+        fs::write(root.join("app/layout.ax"), "page RootLayout\n<Slot />\n")
+            .expect("layout should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+use "@axonyx/ui"
+
+page Home
+
+<Card title="Use directive">
+  <Copy>Package assets should be automatic.</Copy>
+</Card>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let html = render_route_html(&state, &route).expect("route should render");
+
+        assert!(html.contains(r#"<link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css">"#));
+        assert!(
+            html.contains(r#"<script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true"></script>"#)
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
