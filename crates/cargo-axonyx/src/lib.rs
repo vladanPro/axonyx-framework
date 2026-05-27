@@ -9538,8 +9538,8 @@ page Docs
     }
 
     #[test]
-    fn build_static_site_copies_package_css_assets() {
-        let root = make_temp_dir("static-build-package-css");
+    fn build_static_site_copies_package_assets_and_use_injects_them() {
+        let root = make_temp_dir("static-build-package-assets");
         let ui_root = root.join("vendor/axonyx-ui");
 
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -9547,10 +9547,9 @@ page Docs
         fs::write(
             root.join("app/page.ax"),
             r#"
+use "@axonyx/ui"
+
 page Home
-<Head>
-  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
-</Head>
 <Container>
   <Copy>Static package CSS</Copy>
 </Container>
@@ -9566,6 +9565,17 @@ page Home
             fs::read_to_string(root.join("dist/_ax/pkg/axonyx-ui/index.css"))
                 .expect("package css should copy"),
             "body { color: gold; }"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("dist/_ax/pkg/axonyx-ui/js/index.js"))
+                .expect("package js should copy"),
+            "window.__axonyxUiRuntime = true;"
+        );
+        let html = fs::read_to_string(root.join("dist/index.html"))
+            .expect("static home page should write");
+        assert!(html.contains(r#"<link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css">"#));
+        assert!(
+            html.contains(r#"<script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true"></script>"#)
         );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
