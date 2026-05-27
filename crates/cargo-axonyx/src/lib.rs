@@ -799,6 +799,13 @@ fn upgrade_command() -> Result<()> {
         changes.push(format!("axonyx-ui = \"{AXONYX_UI_VERSION}\""));
     }
 
+    if ui_enabled || cargo_manifest_has_dependency_file(&cargo_toml, "axonyx-ui")? {
+        let layout_changed = ensure_ui_layout_setup(&root)?;
+        if layout_changed {
+            changes.push("app/layout.ax UI stylesheet/runtime setup".to_string());
+        }
+    }
+
     if changes.is_empty() {
         println!("Axonyx packages are already current or use path/git dependencies.");
     } else {
@@ -5909,7 +5916,7 @@ fn scaffold_docs_module(root: &Path) -> Result<()> {
 
 fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     ensure_ui_cargo_dependency(root)?;
-    ensure_ui_layout_setup(root)?;
+    let _ = ensure_ui_layout_setup(root)?;
     enable_module(&axonyx_toml.to_path_buf(), "ui")?;
 
     println!("Ensured Cargo dependency: axonyx-ui = \"{AXONYX_UI_VERSION}\".");
@@ -6062,10 +6069,10 @@ fn copy_dir_all_filtered(
     Ok(())
 }
 
-fn ensure_ui_layout_setup(root: &Path) -> Result<()> {
+fn ensure_ui_layout_setup(root: &Path) -> Result<bool> {
     let layout_path = root.join("app").join("layout.ax");
     if !layout_path.exists() {
-        return Ok(());
+        return Ok(false);
     }
 
     let source = fs::read_to_string(&layout_path)
@@ -6079,9 +6086,10 @@ fn ensure_ui_layout_setup(root: &Path) -> Result<()> {
     if updated != source {
         fs::write(&layout_path, updated)
             .with_context(|| format!("failed to write '{}'", layout_path.display()))?;
+        return Ok(true);
     }
 
-    Ok(())
+    Ok(false)
 }
 
 fn ensure_ui_layout_setup_jsx(source: &str) -> String {
@@ -10379,6 +10387,40 @@ serde_json = "1"
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains("axonyx-runtime = \"0.1.11\""));
         assert!(updated.contains("version = \"0.0.38\""));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn upgrade_can_repair_ui_layout_runtime_setup() {
+        let workspace = make_temp_dir("upgrade-ui-layout");
+        let app_root = workspace.join("demo-app");
+        fs::create_dir_all(app_root.join("app")).expect("app dir should exist");
+
+        fs::write(
+            app_root.join("app/layout.ax"),
+            r#"
+page RootLayout
+<Head>
+  <Title>Demo</Title>
+  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
+</Head>
+<Slot />
+"#,
+        )
+        .expect("layout should write");
+
+        assert!(ensure_ui_layout_setup(&app_root).expect("layout should upgrade"));
+
+        let updated =
+            fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read");
+        assert!(updated.contains(r#"<Title>Demo</Title>"#));
+        assert!(
+            updated.contains(r#"<Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />"#)
+        );
+        assert!(updated.contains(r#"<Script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true" />"#));
+
+        assert!(!ensure_ui_layout_setup(&app_root).expect("layout should already be current"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
