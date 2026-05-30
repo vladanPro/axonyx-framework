@@ -68,6 +68,7 @@ enum Commands {
     Content(ContentArgs),
     Dev(DevArgs),
     Doctor(DoctorArgs),
+    Graph(GraphArgs),
     Melt(MeltArgs),
     Routes(RoutesArgs),
     Run(RunArgs),
@@ -174,6 +175,13 @@ struct DoctorArgs {
     /// Exit with a non-zero status when warnings are present.
     #[arg(long)]
     deny_warnings: bool,
+}
+
+#[derive(Debug, Parser)]
+struct GraphArgs {
+    /// Output format for the application graph.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
 }
 
 #[derive(Debug, Parser)]
@@ -654,6 +662,7 @@ fn run() -> Result<()> {
         Commands::Content(args) => content_command(args),
         Commands::Dev(args) => run_dev_server(args),
         Commands::Doctor(args) => doctor_command(args),
+        Commands::Graph(args) => graph_command(args),
         Commands::Melt(args) => melt_command(args),
         Commands::Routes(args) => routes_command(args),
         Commands::Run(args) => run_command(args),
@@ -1574,6 +1583,24 @@ fn routes_command(args: RoutesArgs) -> Result<()> {
         CheckFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+    }
+
+    Ok(())
+}
+
+fn graph_command(args: GraphArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_melt_report(&root)?;
+
+    match args.format {
+        CheckFormat::Text => print_graph_text(&report),
+        CheckFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+    }
+
+    if !report.diagnostics.is_empty() {
+        std::process::exit(1);
     }
 
     Ok(())
@@ -5131,6 +5158,86 @@ fn print_melt_text(report: &MeltReport) {
     }
 }
 
+fn print_graph_text(report: &MeltReport) {
+    println!("Axonyx App Graph");
+    println!("  app={} root={}", report.app.name, report.app.root);
+    println!(
+        "  pages={} api={} actions={} state_signals={} diagnostics={}",
+        report.summary.page_routes,
+        report.summary.api_routes,
+        report.summary.actions,
+        report.summary.state_signals,
+        report.summary.diagnostics
+    );
+
+    println!();
+    println!("Production server:");
+    println!("  transport std=stable tokio=preview");
+    println!(
+        "  stream_pages={} max_body_bytes={}",
+        if report.routes.stream_pages {
+            "true"
+        } else {
+            "false"
+        },
+        format_max_body_bytes_for_root(Path::new(&report.app.root))
+    );
+    println!("  hosted_start=PORT-aware via `cargo ax run start`");
+
+    println!();
+    println!("Route/state graph:");
+    let page_routes = report
+        .routes
+        .routes
+        .iter()
+        .filter(|route| route.kind == "page")
+        .collect::<Vec<_>>();
+    if page_routes.is_empty() {
+        println!("  No page routes found.");
+    }
+    for route in page_routes {
+        let signals = state_signal_labels_for_route(&report.state, &route.route);
+        let mut details = vec![format!("file={}", route.file)];
+        if route.loader.is_some() {
+            details.push("loader".to_string());
+        }
+        if route.actions.is_some() {
+            details.push("actions".to_string());
+        }
+        if !route.params.is_empty() {
+            details.push(format!("params={}", route.params.join(",")));
+        }
+        if signals.is_empty() {
+            details.push("state=none".to_string());
+        } else {
+            details.push(format!("state={}", signals.join(",")));
+        }
+        println!("  {:<28} {}", route.route, details.join(" "));
+    }
+
+    if !report.actions.routes.is_empty() {
+        println!();
+        println!("Action patch surface:");
+        for route in &report.actions.routes {
+            let action_names = route
+                .actions
+                .iter()
+                .map(|action| action.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("  {:<28} actions={}", route.route, action_names);
+        }
+    }
+
+    if !report.diagnostics.is_empty() {
+        println!();
+        println!("Diagnostics:");
+        for diagnostic in &report.diagnostics {
+            println!("  {}", format_check_diagnostic(diagnostic));
+        }
+    }
+}
+
 fn print_routes_text(report: &RoutesReport) {
     if report.routes.is_empty() {
         println!("No routes found in app/**/page.ax or routes/**/*.ax.");
@@ -5821,6 +5928,42 @@ fn format_state_value(value: &AxStateValue) -> String {
             }
         }
     }
+}
+
+fn state_signal_labels_for_route(report: &StateReport, route: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    for file in &report.files {
+        for signal in &file.signals {
+            if state_signal_is_visible_to_route(signal, route) {
+                labels.push(format!("{}:{}", signal.owner, signal.name));
+            }
+        }
+    }
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+fn state_signal_is_visible_to_route(signal: &StateReportSignal, route: &str) -> bool {
+    if signal.owner == "app" {
+        return true;
+    }
+
+    if signal.owner == format!("page:{route}") || signal.owner == format!("layout:{route}") {
+        return true;
+    }
+
+    let Some(layout_route) = signal.owner.strip_prefix("layout:") else {
+        return false;
+    };
+
+    layout_route != "/" && route.starts_with(&format!("{layout_route}/"))
+}
+
+fn format_max_body_bytes_for_root(root: &Path) -> String {
+    configured_max_request_body_bytes(root)
+        .map(format_bytes)
+        .unwrap_or_else(|error| format!("invalid ({error})"))
 }
 
 fn collect_backend_sources(root: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
@@ -8909,6 +9052,47 @@ page state theme: String = "silver"
     }
 
     #[test]
+    fn state_graph_maps_app_layout_and_page_signals_to_routes() {
+        let report = StateReport {
+            files: vec![StateReportFile {
+                file: "app/page.ax".to_string(),
+                signals: vec![
+                    StateReportSignal {
+                        name: "language".to_string(),
+                        key: "app:language:1".to_string(),
+                        scope: "app".to_string(),
+                        owner: "app".to_string(),
+                        ty: "String".to_string(),
+                        initial: AxStateValue::String("sr".to_string()),
+                    },
+                    StateReportSignal {
+                        name: "sidebarOpen".to_string(),
+                        key: "layout:docs:sidebarOpen:1".to_string(),
+                        scope: "layout:docs".to_string(),
+                        owner: "layout:/docs".to_string(),
+                        ty: "Bool".to_string(),
+                        initial: AxStateValue::Bool(false),
+                    },
+                    StateReportSignal {
+                        name: "filter".to_string(),
+                        key: "page:docs.getting-started:filter:1".to_string(),
+                        scope: "page:docs.getting-started".to_string(),
+                        owner: "page:/docs/getting-started".to_string(),
+                        ty: "String".to_string(),
+                        initial: AxStateValue::String(String::new()),
+                    },
+                ],
+            }],
+        };
+
+        let labels = state_signal_labels_for_route(&report, "/docs/getting-started");
+
+        assert!(labels.contains(&"app:language".to_string()));
+        assert!(labels.contains(&"layout:/docs:sidebarOpen".to_string()));
+        assert!(labels.contains(&"page:/docs/getting-started:filter".to_string()));
+    }
+
+    #[test]
     fn action_report_collects_route_local_inputs() {
         let root = make_temp_dir("action-report");
         fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
@@ -9879,6 +10063,17 @@ page Home
         };
         assert!(args.check);
         assert_eq!(args.format, CheckFormat::Text);
+    }
+
+    #[test]
+    fn parses_graph_json_command() {
+        let cli = Cli::try_parse_from(["cargo-ax", "graph", "--format", "json"])
+            .expect("graph command should parse");
+
+        let Commands::Graph(args) = cli.command else {
+            panic!("expected graph command");
+        };
+        assert_eq!(args.format, CheckFormat::Json);
     }
 
     #[test]
