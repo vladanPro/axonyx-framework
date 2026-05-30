@@ -22,15 +22,24 @@ should be authored in JSX-like `.ax`.
 
 ## Build And Run
 
+Start the local server first:
+
+```bash
+cargo ax run dev
+```
+
+Then, in a second terminal, run the validation loop before sharing or deploying:
+
 ```bash
 cargo ax check
 cargo ax actions
 cargo ax doctor
 cargo ax build --clean
-cargo ax run dev
 ```
 
-This validates `.ax` sources, regenerates `src/generated/backend.rs`, writes static HTML into `dist/`, and starts the route-aware dev server at `http://127.0.0.1:3000`.
+The dev server runs at `http://127.0.0.1:3000`. The validation loop checks `.ax`
+sources, regenerates `src/generated/backend.rs`, and writes static HTML into
+`dist/`.
 
 `cargo ax actions` prints the route-local action contracts from `app/**/actions.ax`.
 In this template it shows the `CreatePost` inputs, including the optional
@@ -44,7 +53,7 @@ Keep `cargo ax run dev` running, then in a second terminal run:
 
 ```bash
 cargo install axonyx-aegis --force
-aegis fast --config aegis.toml
+cargo ax test
 ```
 
 Static build output:
