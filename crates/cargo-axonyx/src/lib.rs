@@ -172,6 +172,10 @@ struct DoctorArgs {
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
 
+    /// Include platform-specific deployment checks.
+    #[arg(long, value_enum)]
+    deploy: Option<DeployTarget>,
+
     /// Exit with a non-zero status when warnings are present.
     #[arg(long)]
     deny_warnings: bool,
@@ -308,6 +312,11 @@ enum ModuleKind {
     Cms,
     Docs,
     Ui,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DeployTarget {
+    Render,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -831,7 +840,7 @@ fn upgrade_command() -> Result<()> {
 
 fn doctor_command(args: DoctorArgs) -> Result<()> {
     let root = app_root()?;
-    let checks = doctor_checks(&root);
+    let checks = doctor_checks(&root, args.deploy);
 
     match args.format {
         CheckFormat::Text => print_doctor_text(&checks),
@@ -847,7 +856,7 @@ fn doctor_command(args: DoctorArgs) -> Result<()> {
     Ok(())
 }
 
-fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
+fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
 
     checks.push(doctor_file_check(
@@ -917,6 +926,9 @@ fn doctor_checks(root: &Path) -> Vec<DoctorCheck> {
     checks.push(doctor_state_manifest_check(root));
     checks.push(doctor_ax_sources_check(root));
     checks.push(doctor_melt_graph_check(root));
+    if let Some(target) = deploy {
+        checks.extend(doctor_deploy_checks(root, target));
+    }
 
     checks
 }
@@ -1035,6 +1047,82 @@ fn doctor_melt_graph_check(root: &Path) -> DoctorCheck {
             hint: Some("Run `cargo ax melt` to inspect the project graph failure."),
         },
     }
+}
+
+fn doctor_deploy_checks(root: &Path, target: DeployTarget) -> Vec<DoctorCheck> {
+    match target {
+        DeployTarget::Render => doctor_render_deploy_checks(root),
+    }
+}
+
+fn doctor_render_deploy_checks(root: &Path) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+
+    checks.push(DoctorCheck {
+        code: "deploy-render-service",
+        severity: DoctorSeverity::Ok,
+        message: "Render target expects a Web Service with Cargo build/start commands."
+            .to_string(),
+        hint: Some(
+            "Build command: cargo ax build --clean; start command: cargo ax run start --host 0.0.0.0 --port $PORT",
+        ),
+    });
+
+    checks.push(DoctorCheck {
+        code: "deploy-render-port",
+        severity: DoctorSeverity::Ok,
+        message:
+            "`cargo ax run start` is PORT-aware when --port is omitted or passed from the platform."
+                .to_string(),
+        hint: Some("Render start command should pass --port $PORT for explicit hosted binding."),
+    });
+
+    checks.push(match configured_max_request_body_bytes(root) {
+        Ok(limit) => DoctorCheck {
+            code: "deploy-render-body-limit",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "Render deploy request body limit resolves to {}.",
+                format_bytes(limit)
+            ),
+            hint: Some("Tune [server].max_body_bytes before enabling large uploads."),
+        },
+        Err(message) => DoctorCheck {
+            code: "deploy-render-body-limit",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Set [server].max_body_bytes to a positive number before deploying."),
+        },
+    });
+
+    checks.push(match collect_melt_report(root) {
+        Ok(report) if report.diagnostics.is_empty() => DoctorCheck {
+            code: "deploy-render-melt",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "Render deploy graph is clean: {} page route(s), {} API route(s), {} action(s).",
+                report.summary.page_routes, report.summary.api_routes, report.summary.actions
+            ),
+            hint: Some("Run `cargo ax graph` to inspect the server/state route map."),
+        },
+        Ok(report) => DoctorCheck {
+            code: "deploy-render-melt",
+            severity: DoctorSeverity::Error,
+            message: format!(
+                "Render deploy graph has {} diagnostic(s).",
+                report.summary.diagnostics
+            ),
+            hint: Some("Run `cargo ax check` before deploying."),
+        },
+        Err(_) => DoctorCheck {
+            code: "deploy-render-melt",
+            severity: DoctorSeverity::Error,
+            message: "Render deploy graph could not be collected.".to_string(),
+            hint: Some("Run `cargo ax melt` for the full graph error."),
+        },
+    });
+
+    checks
 }
 
 fn doctor_file_check(
@@ -10077,6 +10165,17 @@ page Home
     }
 
     #[test]
+    fn parses_doctor_render_deploy_command() {
+        let cli = Cli::try_parse_from(["cargo-ax", "doctor", "--deploy", "render"])
+            .expect("doctor render deploy command should parse");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert_eq!(args.deploy, Some(DeployTarget::Render));
+    }
+
+    #[test]
     fn parses_api_openapi_out_command() {
         let cli = Cli::try_parse_from([
             "cargo-ax",
@@ -10324,7 +10423,7 @@ page RootLayout
         )
         .expect("aegis config should write");
 
-        let checks = doctor_checks(&app_root);
+        let checks = doctor_checks(&app_root, None);
 
         assert!(checks
             .iter()
@@ -10387,7 +10486,7 @@ page Home
         )
         .expect("page should write");
 
-        let checks = doctor_checks(&app_root);
+        let checks = doctor_checks(&app_root, None);
         let ui_script = checks
             .iter()
             .find(|check| check.code == "ui-script")
@@ -10404,7 +10503,7 @@ page Home
         let root = make_temp_dir("doctor-aegis-config");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
 
-        let checks = doctor_checks(&root);
+        let checks = doctor_checks(&root, None);
         let missing = checks
             .iter()
             .find(|check| check.code == "aegis-config")
@@ -10418,7 +10517,7 @@ page Home
         )
         .expect("aegis config should write");
 
-        let checks = doctor_checks(&root);
+        let checks = doctor_checks(&root, None);
         let configured = checks
             .iter()
             .find(|check| check.code == "aegis-config")
@@ -10452,7 +10551,7 @@ axonyx-runtime = "0.1.12"
         )
         .expect("cargo manifest should write");
 
-        let checks = doctor_checks(&root);
+        let checks = doctor_checks(&root, None);
         let streaming = checks
             .iter()
             .find(|check| check.code == "server-stream-pages")
@@ -10480,7 +10579,7 @@ state theme = "silver"
         )
         .expect("page should write");
 
-        let checks = doctor_checks(&root);
+        let checks = doctor_checks(&root, None);
         let state = checks
             .iter()
             .find(|check| check.code == "state-manifest")
@@ -10508,7 +10607,7 @@ state theme = Runtime.Env.public.THEME
         )
         .expect("page should write");
 
-        let checks = doctor_checks(&root);
+        let checks = doctor_checks(&root, None);
         let state = checks
             .iter()
             .find(|check| check.code == "state-manifest")
@@ -10562,7 +10661,7 @@ page RootLayout
         )
         .expect("layout should write");
 
-        let checks = doctor_checks(&app_root);
+        let checks = doctor_checks(&app_root, None);
         let ui_dependency = checks
             .iter()
             .find(|check| check.code == "ui-cargo-dependency")
@@ -10613,7 +10712,7 @@ page RootLayout
         )
         .expect("layout should write");
 
-        let checks = doctor_checks(&app_root);
+        let checks = doctor_checks(&app_root, None);
         let runtime_version = checks
             .iter()
             .find(|check| check.code == "runtime-version")
@@ -10862,7 +10961,7 @@ axonyx-runtime = "0.1.12"
         fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
             .expect("page should write");
 
-        let checks = doctor_checks(&root);
+        let checks = doctor_checks(&root, None);
         let melt = checks
             .iter()
             .find(|check| check.code == "melt-graph")
@@ -10870,6 +10969,43 @@ axonyx-runtime = "0.1.12"
 
         assert_eq!(melt.severity, DoctorSeverity::Ok);
         assert!(melt.message.contains("1 page route"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_render_deploy_checks_report_production_start_contract() {
+        let root = make_temp_dir("doctor-render-deploy");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.12"
+"#,
+        )
+        .expect("cargo manifest should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+
+        let checks = doctor_checks(&root, Some(DeployTarget::Render));
+
+        assert!(checks.iter().any(|check| {
+            check.code == "deploy-render-service" && check.severity == DoctorSeverity::Ok
+        }));
+        assert!(checks.iter().any(|check| {
+            check.code == "deploy-render-port" && check.severity == DoctorSeverity::Ok
+        }));
+        assert!(checks.iter().any(|check| {
+            check.code == "deploy-render-melt" && check.message.contains("1 page route")
+        }));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -10897,7 +11033,7 @@ axonyx-runtime = "0.1.0"
         fs::write(root.join("app/page.ax"), "page Home\n<Copy></Card>\n")
             .expect("page should write");
 
-        let checks = doctor_checks(&root);
+        let checks = doctor_checks(&root, None);
         let ax_sources = checks
             .iter()
             .find(|check| check.code == "ax-sources")
