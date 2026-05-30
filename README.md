@@ -35,8 +35,8 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.1.9"
-axonyx-ui = "0.0.38"
+axonyx-runtime = "0.1.12"
+axonyx-ui = "0.0.39"
 ```
 
 ## Quick Start
@@ -414,7 +414,7 @@ Today, `cargo ax add ui` and the `site` / `docs` templates use the published `ax
 
 Generated apps can target:
 
-- the published crates.io package, `axonyx-runtime = "0.1.9"`
+- the published crates.io package, `axonyx-runtime = "0.1.12"`
 - a local Cargo `path` dependency into a checked-out runtime workspace
 - the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
 

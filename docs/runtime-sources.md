@@ -13,7 +13,7 @@ cargo run -p create-axonyx -- my-app --yes
 This points the generated app at:
 
 ```toml
-axonyx-runtime = "0.1.9"
+axonyx-runtime = "0.1.12"
 ```
 
 ## 2. `path`
@@ -66,7 +66,7 @@ so apps can customize or dogfood UI components without changing the public impor
 The default generated UI setup is now:
 
 ```toml
-axonyx-ui = "0.0.33"
+axonyx-ui = "0.0.39"
 ```
 
 That gives the app a normal Cargo dependency while Axonyx resolves `.ax`
