@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use axonyx_core::ax_ast_prelude::{AxExpr, AxImport};
-use axonyx_core::ax_backend_ast_prelude::{AxBackendBlock, AxBackendDocument};
+use axonyx_core::ax_backend_ast_prelude::{
+    AxBackendBlock, AxBackendDocument, AxBackendStmt, AxHookPhase,
+};
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
     lower_backend_document, AxBackendPlan, AxHandlerKind, AxReturnPlan, AxRustExpr, AxStepPlan,
@@ -482,6 +484,7 @@ struct RouteManifestItem {
     actions: Option<String>,
     params: Vec<String>,
     inputs: Vec<ActionInputReport>,
+    hooks: Vec<RouteHookReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -504,6 +507,13 @@ struct ApiRouteReport {
     file: String,
     params: Vec<String>,
     inputs: Vec<ActionInputReport>,
+    hooks: Vec<RouteHookReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RouteHookReport {
+    phase: &'static str,
+    value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1920,6 +1930,7 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
             file: route.file,
             params: route.params,
             inputs: route.inputs,
+            hooks: route.hooks,
         })
         .collect();
 
@@ -3695,6 +3706,7 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
         AxStepPlan::Header { name, value } | AxStepPlan::Cookie { name, value } => {
             expr_uses_input_scope(name) || expr_uses_input_scope(value)
         }
+        AxStepPlan::Hook { value, .. } => expr_uses_input_scope(value),
         AxStepPlan::ClearCookie { name } => expr_uses_input_scope(name),
         AxStepPlan::Revalidate { target } => expr_uses_input_scope(target),
         AxStepPlan::Insert { fields, .. } => fields
@@ -3744,6 +3756,7 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             | AxStepPlan::Patch { value: expr, .. }
             | AxStepPlan::Header { value: expr, .. }
             | AxStepPlan::Cookie { value: expr, .. }
+            | AxStepPlan::Hook { value: expr, .. }
             | AxStepPlan::ClearCookie { name: expr }
             | AxStepPlan::Revalidate { target: expr } => expr.code.contains("Auth.signedSession"),
             AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => fields
@@ -4224,6 +4237,7 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidAssignment { line }
         | AxBackendParseError::InvalidHeader { line }
         | AxBackendParseError::InvalidCookie { line }
+        | AxBackendParseError::InvalidHook { line }
         | AxBackendParseError::InvalidRequirement { line }
         | AxBackendParseError::InvalidReturn { line }
         | AxBackendParseError::InvalidSend { line }
@@ -5116,6 +5130,7 @@ fn app_route_manifest_item(
             .then(|| display_relative_path(root, &actions_path)),
         params,
         inputs: Vec::new(),
+        hooks: Vec::new(),
     })
 }
 
@@ -5142,6 +5157,7 @@ fn collect_backend_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>>
                 continue;
             };
 
+            let hooks = route_hooks_from_body(&route.body);
             routes.push(RouteManifestItem {
                 kind: "api",
                 route: route.path.clone(),
@@ -5162,11 +5178,30 @@ fn collect_backend_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>>
                         default: field.default.as_ref().map(format_ax_expr),
                     })
                     .collect(),
+                hooks,
             });
         }
     }
 
     Ok(routes)
+}
+
+fn route_hooks_from_body(body: &[AxBackendStmt]) -> Vec<RouteHookReport> {
+    body.iter()
+        .filter_map(|stmt| {
+            let AxBackendStmt::Hook(hook) = stmt else {
+                return None;
+            };
+            let phase = match hook.phase {
+                AxHookPhase::Before => "before",
+                AxHookPhase::After => "after",
+            };
+            Some(RouteHookReport {
+                phase,
+                value: format_ax_expr(&hook.value),
+            })
+        })
+        .collect()
 }
 
 fn route_pattern_from_segments(segments: &[&str]) -> String {
@@ -5369,9 +5404,24 @@ fn print_routes_text(report: &RoutesReport) {
                     .join(",")
             ));
         }
+        if !route.hooks.is_empty() {
+            details.push(format!(
+                "hooks={}",
+                route
+                    .hooks
+                    .iter()
+                    .map(route_hook_label)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
 
         println!("  {:<28} {}", route.route, details.join(" "));
     }
+}
+
+fn route_hook_label(hook: &RouteHookReport) -> String {
+    format!("{}:{}", hook.phase, hook.value)
 }
 
 fn route_input_label(input: &ActionInputReport) -> String {
@@ -5407,6 +5457,17 @@ fn print_api_text(report: &ApiReport) {
                     .inputs
                     .iter()
                     .map(route_input_label)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        if !route.hooks.is_empty() {
+            details.push(format!(
+                "hooks={}",
+                route
+                    .hooks
+                    .iter()
+                    .map(route_hook_label)
                     .collect::<Vec<_>>()
                     .join(",")
             ));
@@ -8821,6 +8882,8 @@ page SectionCard
             root.join("routes/api/posts.ax"),
             r#"
 route GET "/api/posts"
+  before Security.headers
+  after Cache.noStore
   return ok
 
 route POST "/api/posts/:slug"
@@ -8840,6 +8903,19 @@ route POST "/api/posts/:slug"
         assert_eq!(routes[0].method.as_deref(), Some("GET"));
         assert_eq!(routes[0].route, "/api/posts");
         assert_eq!(routes[0].file, "routes/api/posts.ax");
+        assert_eq!(
+            routes[0].hooks,
+            vec![
+                RouteHookReport {
+                    phase: "before",
+                    value: "Security.headers".to_string(),
+                },
+                RouteHookReport {
+                    phase: "after",
+                    value: "Cache.noStore".to_string(),
+                },
+            ]
+        );
 
         assert_eq!(routes[1].kind, "api");
         assert_eq!(routes[1].method.as_deref(), Some("POST"));
@@ -8941,6 +9017,7 @@ route POST "/api/posts" -> Post
                         default: Some("false".to_string()),
                     },
                 ],
+                hooks: Vec::new(),
             }],
             schemas: vec![ApiSchemaReport {
                 name: "Post".to_string(),
