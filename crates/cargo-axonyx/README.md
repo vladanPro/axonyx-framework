@@ -20,7 +20,7 @@ cargo ax doctor
 cargo ax melt
 cargo ax build --clean
 cargo ax run dev
-cargo ax run dev --transport tokio
+cargo ax run dev --transport std
 cargo ax stream
 cargo ax test
 ```
@@ -34,12 +34,13 @@ cargo ax doctor
 cargo ax run dev
 ```
 
-The default dev/start server still uses the stable `std` transport. The Tokio
-transport is available as the async preview path:
+The default dev/start server uses the Tokio transport. The standard library
+transport remains available as a fallback:
 
 ```bash
-cargo ax run dev --transport tokio
-cargo ax run start --host 0.0.0.0 --port 3000 --transport tokio
+cargo ax run dev
+cargo ax run start --host 0.0.0.0 --port 3000
+cargo ax run dev --transport std
 ```
 
 For hosted starts, `cargo ax run start` reads the platform `PORT` environment

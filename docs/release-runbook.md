@@ -51,6 +51,8 @@ The local equivalent from the framework repo is:
 cargo fmt --all -- --check
 cargo test
 powershell -ExecutionPolicy Bypass -File scripts/smoke-core-loop.ps1 -Template site
+powershell -ExecutionPolicy Bypass -File scripts/smoke-production-server.ps1 -Template site
+powershell -ExecutionPolicy Bypass -File scripts/smoke-server-transports.ps1 -Template minimal
 ```
 
 ## Pre-Publish Checks
@@ -63,6 +65,8 @@ git submodule status
 cargo fmt --all -- --check
 cargo test
 powershell -ExecutionPolicy Bypass -File scripts/smoke-core-loop.ps1 -Template site
+powershell -ExecutionPolicy Bypass -File scripts/smoke-production-server.ps1 -Template site
+powershell -ExecutionPolicy Bypass -File scripts/smoke-server-transports.ps1 -Template minimal
 ```
 
 Then verify `axonyx-ui` from its repo:
@@ -142,8 +146,10 @@ create-axonyx registry-site --yes --template site --runtime-source registry
 cd registry-site
 cargo ax check
 cargo ax doctor --deny-warnings
+cargo ax doctor --deploy render
 cargo ax build --clean
 cargo ax run dev
+cargo ax run start --host 0.0.0.0 --port 3000
 ```
 
 Expected result:
@@ -151,6 +157,13 @@ Expected result:
 - app resolves `axonyx-runtime` from crates.io
 - UI imports resolve through the package model
 - package CSS is available through `/_ax/pkg/axonyx-ui/index.css`
+- health probe returns JSON from `GET /__axonyx/health`
+- Render deploy doctor reports `/__axonyx/health` as the health-check path
+- server request timeout resolves through `[server].request_timeout_seconds`
+- server shutdown grace resolves through `[server].shutdown_grace_seconds`
+- server max connections resolves through `[server].max_connections`
+- Tokio production server logs graceful shutdown support
+- Tokio production server logs the shutdown grace period
 - `dist/index.html` is generated
 
 ## Stop Conditions

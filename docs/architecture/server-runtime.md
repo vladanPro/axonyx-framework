@@ -55,13 +55,64 @@ GET /?__ax_stream=1
 This still streams the already-rendered HTML in coarse shell/body/end chunks.
 It is a transport milestone, not yet a full `<Await>` boundary implementation.
 
-Tokio/Hyper should replace the transport underneath, not the framework shape
-above it. The developer should still write:
+Request reads use a bounded timeout so slow or broken clients cannot hold a
+connection forever:
+
+```toml
+[server]
+request_timeout_seconds = 2
+shutdown_grace_seconds = 5
+max_connections = 1024
+```
+
+The same timeout is respected by the standard transport and the Tokio preview
+transport. `cargo ax doctor` reports the resolved value and flags invalid
+configuration before the server starts. The shutdown grace period controls how
+long the Tokio transport waits for active connection tasks after Ctrl+C or a
+hosted restart signal. The max connection limit rejects excess Tokio
+connections with `503 Service Unavailable` before they enter the route handler.
+
+Tokio is now the default transport underneath, without changing the framework
+shape above it. The developer still writes:
 
 ```text
 cargo ax run dev
 cargo ax run start --host 0.0.0.0 --port 3000
+cargo ax run dev --transport std
 ```
+
+The legacy `--production-server` flag is still accepted for older deploy
+scripts, but it is no longer required because Tokio is the default. The
+standard library transport remains available with `--transport std` as a
+fallback. The Tokio transport installs a Ctrl+C shutdown listener so the accept
+loop can exit cleanly during local stops and hosted deploy restarts. After the
+listener stops accepting new connections, Axonyx waits a short grace period for
+active Tokio connection tasks to finish before returning from the server.
+
+Deployment checks should point at that same path:
+
+```text
+cargo ax doctor --deploy render
+```
+
+That deploy check reports the production start command and the recommended
+health-check path.
+
+For Render, the recommended start command is:
+
+```text
+cargo ax run start --host 0.0.0.0 --port $PORT
+```
+
+The production preview also exposes:
+
+```text
+GET /__axonyx/health
+```
+
+It returns a small no-store JSON response with `ok`, `service`, `mode`, and
+`version`, which gives hosted platforms and load balancers a stable readiness
+probe without touching app routes.
 
 and the app should still be authored through:
 
@@ -74,8 +125,8 @@ and the app should still be authored through:
 
 ## Next Server Milestones
 
-1. Add a `TokioAxServer` or `HyperAxServer` adapter once async streaming starts.
-2. Add native chunked UI streaming for route rendering.
+1. Add native chunked UI streaming for route rendering.
+2. Keep expanding the Tokio production adapter while preserving `--transport std`.
 3. Lower future `<Await>` or stream boundaries into `AxBody::Chunks`.
 4. Keep structured async in Axonyx authoring through loaders, actions, jobs, and
    future `<Await>` boundaries instead of exposing promise-style timing.
