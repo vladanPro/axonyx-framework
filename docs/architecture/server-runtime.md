@@ -55,6 +55,18 @@ GET /?__ax_stream=1
 This still streams the already-rendered HTML in coarse shell/body/end chunks.
 It is a transport milestone, not yet a full `<Await>` boundary implementation.
 
+Request reads use a bounded timeout so slow or broken clients cannot hold a
+connection forever:
+
+```toml
+[server]
+request_timeout_seconds = 2
+```
+
+The same timeout is respected by the standard transport and the Tokio preview
+transport. `cargo ax doctor` reports the resolved value and flags invalid
+configuration before the server starts.
+
 Tokio/Hyper should replace the transport underneath, not the framework shape
 above it. The developer should still write:
 

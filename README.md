@@ -82,6 +82,14 @@ cargo ax doctor --deploy render
 The Render check recommends the same `--production-server` start command so
 local smoke and hosted deploys exercise the same server path.
 
+Request reads default to a short production-safe timeout and can be tuned per
+app:
+
+```toml
+[server]
+request_timeout_seconds = 2
+```
+
 This is intentionally a runtime choice, not an authoring burden: `.ax` pages,
 loaders, actions, and state patches keep the same shape while Axonyx chooses the
 transport layer underneath.

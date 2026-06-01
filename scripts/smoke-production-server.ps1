@@ -192,6 +192,10 @@ try {
     throw "Expected server log to use tokio transport"
   }
 
+  if ($serverLog -notmatch "Request read timeout: 2 seconds") {
+    throw "Expected server log to report request read timeout"
+  }
+
   Write-Host "Axonyx production server smoke passed."
   Write-Host "  url: $url"
 } finally {

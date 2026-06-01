@@ -155,6 +155,7 @@ Expected result:
 - app resolves `axonyx-runtime` from crates.io
 - UI imports resolve through the package model
 - package CSS is available through `/_ax/pkg/axonyx-ui/index.css`
+- server request timeout resolves through `[server].request_timeout_seconds`
 - `dist/index.html` is generated
 
 ## Stop Conditions
