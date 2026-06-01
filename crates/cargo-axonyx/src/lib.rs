@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+#[cfg(test)]
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -31,7 +32,8 @@ use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
 use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
 use axonyx_runtime::server_prelude::{
-    AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode, AxSseEvent,
+    axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
+    AxSseEvent,
 };
 use axonyx_runtime::{
     execute_preview_action_sources, execute_preview_route_request_sources,
@@ -40,6 +42,7 @@ use axonyx_runtime::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
+#[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const DOCS_LAYOUT_AX: &str = include_str!("../templates/docs/app/docs/layout.ax.tpl");
@@ -454,8 +457,19 @@ struct StdNetAxServer {
 struct TokioAxServer {
     config: AxServerConfig,
     state: Arc<DevServerState>,
+    max_body_bytes: usize,
+    request_timeout: Duration,
     shutdown_grace: Duration,
     max_connections: usize,
+}
+
+#[derive(Clone)]
+struct AxumServerState {
+    dev: Arc<DevServerState>,
+    mode: AxServerMode,
+    max_body_bytes: usize,
+    request_timeout: Duration,
+    tracker: TokioConnectionTracker,
 }
 
 impl AxServer for StdNetAxServer {
@@ -504,11 +518,21 @@ impl AxServer for TokioAxServer {
             .context("failed to build Tokio runtime")?;
         let config = self.config.clone();
         let state = Arc::clone(&self.state);
+        let max_body_bytes = self.max_body_bytes;
+        let request_timeout = self.request_timeout;
         let shutdown_grace = self.shutdown_grace;
         let max_connections = self.max_connections;
 
         runtime.block_on(async move {
-            serve_tokio(config, state, shutdown_grace, max_connections).await
+            serve_axum_tokio(
+                config,
+                state,
+                max_body_bytes,
+                request_timeout,
+                shutdown_grace,
+                max_connections,
+            )
+            .await
         })?;
         Ok(())
     }
@@ -4701,6 +4725,8 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
             let server = TokioAxServer {
                 config: server_config,
                 state: shared_state,
+                max_body_bytes,
+                request_timeout,
                 shutdown_grace,
                 max_connections,
             };
@@ -6961,22 +6987,138 @@ fn health_response(mode: AxServerMode) -> Result<AxHttpResponse> {
     .with_no_store())
 }
 
-async fn serve_tokio(
+async fn serve_axum_tokio(
     config: AxServerConfig,
     state: Arc<DevServerState>,
+    max_body_bytes: usize,
+    request_timeout: Duration,
     shutdown_grace: Duration,
     max_connections: usize,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    serve_tokio_until(
-        config,
-        state,
-        shutdown_grace,
-        max_connections,
-        tokio_shutdown_signal(),
-    )
-    .await
+    let bind = config.bind_addr();
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .with_context(|| format!("failed to bind Axonyx Axum/Tokio server at {bind}"))?;
+    let tracker = TokioConnectionTracker::new(shutdown_grace, max_connections);
+    let mode = config.mode;
+    let router_state = AxumServerState {
+        dev: state,
+        mode,
+        max_body_bytes,
+        request_timeout,
+        tracker: tracker.clone(),
+    };
+    let router = axum::Router::new()
+        .fallback(axum::routing::any(axum_tokio_handler))
+        .with_state(router_state);
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(tokio_shutdown_signal())
+        .await?;
+
+    println!(
+        "Axonyx {} Axum/Tokio server stopped accepting requests.",
+        mode.label()
+    );
+    wait_for_tokio_connections(&tracker).await;
+    Ok(())
 }
 
+async fn axum_tokio_handler(
+    axum::extract::State(state): axum::extract::State<AxumServerState>,
+    request: axum::http::Request<axum::body::Body>,
+) -> axum::response::Response {
+    let Some(_request_guard) = state.tracker.try_track() else {
+        return axonyx_response_to_axum(
+            AxHttpResponse::text(
+                503,
+                format!(
+                    "Service Unavailable: Axonyx is already handling {} active request{}.",
+                    state.tracker.max_connections,
+                    if state.tracker.max_connections == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+            )
+            .with_header("Retry-After", "1")
+            .with_no_store(),
+        );
+    };
+
+    match axum_request_to_dev_request(request, state.max_body_bytes, state.request_timeout).await {
+        Ok(request) => {
+            let suppress_body = suppress_response_body_for_method(&request.method);
+            let request = normalize_request_for_routing(request);
+            let response = match handle_http_request(&state.dev, state.mode, request) {
+                Ok(response) => response,
+                Err(error) => AxHttpResponse::text(500, format!("Axonyx server error: {error:#}"))
+                    .with_no_store(),
+            };
+            let mut response = axonyx_response_to_axum(response);
+            if suppress_body {
+                *response.body_mut() = axum::body::Body::empty();
+            }
+            response
+        }
+        Err(error) => axonyx_response_to_axum(error),
+    }
+}
+
+async fn axum_request_to_dev_request(
+    request: axum::http::Request<axum::body::Body>,
+    max_body_bytes: usize,
+    request_timeout: Duration,
+) -> std::result::Result<AxHttpRequest, AxHttpResponse> {
+    let (parts, body) = request.into_parts();
+    let method = parts.method.as_str().to_string();
+    let target = parts
+        .uri
+        .path_and_query()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let mut headers = std::collections::BTreeMap::new();
+    for (name, value) in parts.headers.iter() {
+        if let Ok(value) = value.to_str() {
+            headers.insert(name.as_str().to_ascii_lowercase(), value.to_string());
+        }
+    }
+    if headers
+        .get("content-length")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .is_some_and(|length| length > max_body_bytes)
+    {
+        return Err(
+            AxHttpResponse::text(413, "Payload Too Large").with_header("Connection", "close")
+        );
+    }
+
+    let body =
+        match tokio::time::timeout(request_timeout, axum::body::to_bytes(body, max_body_bytes))
+            .await
+        {
+            Ok(Ok(body)) => body.to_vec(),
+            Ok(Err(_)) => {
+                return Err(AxHttpResponse::text(413, "Payload Too Large")
+                    .with_header("Connection", "close"));
+            }
+            Err(_) => {
+                return Err(
+                    AxHttpResponse::text(408, "Request Timeout").with_header("Connection", "close")
+                );
+            }
+        };
+
+    Ok(AxHttpRequest {
+        method,
+        target,
+        headers,
+        body,
+    })
+}
+
+#[cfg(test)]
 async fn serve_tokio_until<S>(
     config: AxServerConfig,
     state: Arc<DevServerState>,
@@ -7024,6 +7166,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 async fn reject_tokio_connection(mut stream: tokio::net::TcpStream, max_connections: usize) {
     let response = AxHttpResponse::text(
         503,
@@ -7082,6 +7225,7 @@ async fn tokio_shutdown_signal() {
     }
 }
 
+#[cfg(test)]
 async fn handle_tokio_connection(
     mut stream: tokio::net::TcpStream,
     state: Arc<DevServerState>,
@@ -7259,6 +7403,7 @@ fn read_http_request(
     }))
 }
 
+#[cfg(test)]
 async fn read_http_request_async(
     stream: &mut tokio::net::TcpStream,
     max_body_bytes: usize,
@@ -7308,6 +7453,7 @@ async fn read_http_request_async(
     read
 }
 
+#[cfg(test)]
 fn parse_http_request_buffer(buffer: &[u8]) -> Result<Option<AxHttpRequest>> {
     let Some(header_end) = find_header_end(buffer) else {
         return Ok(None);
@@ -8809,6 +8955,7 @@ fn write_ax_response(
     Ok(())
 }
 
+#[cfg(test)]
 async fn write_ax_response_async(
     stream: &mut tokio::net::TcpStream,
     response: &AxHttpResponse,
@@ -8902,6 +9049,7 @@ fn write_chunked_body(stream: &mut TcpStream, response: &AxHttpResponse) -> Resu
     Ok(())
 }
 
+#[cfg(test)]
 async fn write_chunked_body_async(
     stream: &mut tokio::net::TcpStream,
     response: &AxHttpResponse,

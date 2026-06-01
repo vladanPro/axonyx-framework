@@ -24,11 +24,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 clap = { version = "4.5.48", features = ["derive"] }
 toml = "0.8.23"
+axum = "0.8.9"
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
 syn = { version = "2.0.117", features = ["full"] }
 axonyx-core = { version = "0.1.14", path = "vendor/axonyx-runtime/crates/axonyx-core" }
-axonyx-runtime = { version = "0.1.14", path = "vendor/axonyx-runtime/crates/axonyx-runtime" }
+axonyx-runtime = { version = "0.1.14", path = "vendor/axonyx-runtime/crates/axonyx-runtime", features = ["axum"] }
 
 [profile.release]
 lto = "fat"
