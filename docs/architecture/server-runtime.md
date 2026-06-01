@@ -61,11 +61,14 @@ connection forever:
 ```toml
 [server]
 request_timeout_seconds = 2
+shutdown_grace_seconds = 5
 ```
 
 The same timeout is respected by the standard transport and the Tokio preview
 transport. `cargo ax doctor` reports the resolved value and flags invalid
-configuration before the server starts.
+configuration before the server starts. The shutdown grace period controls how
+long the Tokio transport waits for active connection tasks after Ctrl+C or a
+hosted restart signal.
 
 Tokio/Hyper should replace the transport underneath, not the framework shape
 above it. The developer should still write:

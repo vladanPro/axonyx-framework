@@ -435,6 +435,7 @@ struct StdNetAxServer {
 struct TokioAxServer {
     config: AxServerConfig,
     state: Arc<DevServerState>,
+    shutdown_grace: Duration,
 }
 
 impl AxServer for StdNetAxServer {
@@ -483,8 +484,9 @@ impl AxServer for TokioAxServer {
             .context("failed to build Tokio runtime")?;
         let config = self.config.clone();
         let state = Arc::clone(&self.state);
+        let shutdown_grace = self.shutdown_grace;
 
-        runtime.block_on(async move { serve_tokio(config, state).await })?;
+        runtime.block_on(async move { serve_tokio(config, state, shutdown_grace).await })?;
         Ok(())
     }
 }
@@ -980,6 +982,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_streaming_check(root));
     checks.push(doctor_server_body_limit_check(root));
     checks.push(doctor_server_request_timeout_check(root));
+    checks.push(doctor_server_shutdown_grace_check(root));
     checks.push(doctor_aegis_config_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
@@ -1038,6 +1041,27 @@ fn doctor_server_request_timeout_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message,
             hint: Some("Set [server].request_timeout_seconds to a positive integer."),
+        },
+    }
+}
+
+fn doctor_server_shutdown_grace_check(root: &Path) -> DoctorCheck {
+    match configured_shutdown_grace_duration(root) {
+        Ok(grace) => DoctorCheck {
+            code: "server-shutdown-grace",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "Shutdown grace period resolves to {} second{}.",
+                grace.as_secs(),
+                if grace.as_secs() == 1 { "" } else { "s" }
+            ),
+            hint: Some("Tune [server].shutdown_grace_seconds for hosted deploy restarts."),
+        },
+        Err(message) => DoctorCheck {
+            code: "server-shutdown-grace",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Set [server].shutdown_grace_seconds to a positive integer."),
         },
     }
 }
@@ -3304,6 +3328,23 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     }
 
+    if let Some(shutdown_grace) = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("shutdown_grace_seconds"))
+    {
+        if parse_shutdown_grace_seconds_value(shutdown_grace).is_err() {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&path),
+                line: line_for_config_key(&source, "shutdown_grace_seconds"),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-shutdown-grace",
+                message: "[server].shutdown_grace_seconds must be a positive integer.".to_string(),
+            });
+        }
+    }
+
     Ok(diagnostics)
 }
 
@@ -4520,6 +4561,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let backend_status = compile_backend_from_app_root(&root)?;
     let max_body_bytes = configured_max_request_body_bytes(&root).map_err(anyhow::Error::msg)?;
     let request_timeout = configured_request_timeout_duration(&root).map_err(anyhow::Error::msg)?;
+    let shutdown_grace = configured_shutdown_grace_duration(&root).map_err(anyhow::Error::msg)?;
     let env_port = std::env::var("PORT").ok();
     let port = resolve_server_port(mode, args.port, env_port.as_deref())?;
     let uses_env_port = mode == AxServerMode::Start
@@ -4554,7 +4596,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
         println!("Tokio graceful shutdown is enabled for Ctrl+C.");
         println!(
             "Shutdown grace period: {} seconds.",
-            DEFAULT_SHUTDOWN_GRACE_SECONDS
+            shutdown_grace.as_secs()
         );
     }
     println!(
@@ -4590,6 +4632,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
             let server = TokioAxServer {
                 config: server_config,
                 state: shared_state,
+                shutdown_grace,
             };
             server.serve().map_err(|error| anyhow::anyhow!("{error}"))
         }
@@ -6830,13 +6873,15 @@ fn handle_http_request(
 async fn serve_tokio(
     config: AxServerConfig,
     state: Arc<DevServerState>,
+    shutdown_grace: Duration,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    serve_tokio_until(config, state, tokio_shutdown_signal()).await
+    serve_tokio_until(config, state, shutdown_grace, tokio_shutdown_signal()).await
 }
 
 async fn serve_tokio_until<S>(
     config: AxServerConfig,
     state: Arc<DevServerState>,
+    shutdown_grace: Duration,
     shutdown: S,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -6846,7 +6891,7 @@ where
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("failed to bind Axonyx Tokio server at {bind}"))?;
-    let tracker = TokioConnectionTracker::new(Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS));
+    let tracker = TokioConnectionTracker::new(shutdown_grace);
     tokio::pin!(shutdown);
 
     loop {
@@ -7216,6 +7261,13 @@ fn configured_request_timeout_duration(root: &Path) -> std::result::Result<Durat
     }
 }
 
+fn configured_shutdown_grace_duration(root: &Path) -> std::result::Result<Duration, String> {
+    match axonyx_config_value(root, "server", "shutdown_grace_seconds") {
+        Some(value) => parse_shutdown_grace_seconds_value(&value),
+        None => Ok(Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS)),
+    }
+}
+
 fn parse_request_timeout_seconds_value(
     value: &toml::Value,
 ) -> std::result::Result<Duration, String> {
@@ -7225,6 +7277,18 @@ fn parse_request_timeout_seconds_value(
             Err("[server].request_timeout_seconds must be positive.".to_string())
         }
         _ => Err("[server].request_timeout_seconds must be an integer.".to_string()),
+    }
+}
+
+fn parse_shutdown_grace_seconds_value(
+    value: &toml::Value,
+) -> std::result::Result<Duration, String> {
+    match value {
+        toml::Value::Integer(number) if *number > 0 => Ok(Duration::from_secs(*number as u64)),
+        toml::Value::Integer(_) => {
+            Err("[server].shutdown_grace_seconds must be positive.".to_string())
+        }
+        _ => Err("[server].shutdown_grace_seconds must be an integer.".to_string()),
     }
 }
 
@@ -9802,6 +9866,30 @@ page state enabled = signal(true)
     }
 
     #[test]
+    fn check_app_sources_reports_invalid_shutdown_grace_config() {
+        let root = make_temp_dir("invalid-shutdown-grace-config");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nshutdown_grace_seconds = -1\n",
+        )
+        .expect("config should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-config-shutdown-grace"
+                && diagnostic.file.ends_with("Axonyx.toml")
+                && diagnostic.line == 5
+                && diagnostic.message.contains("shutdown_grace_seconds")
+        }));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn check_app_sources_reports_duplicate_backend_api_routes() {
         let root = make_temp_dir("duplicate-api-routes");
         fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
@@ -10994,6 +11082,43 @@ axonyx-runtime = "0.1.14"
     }
 
     #[test]
+    fn doctor_reports_shutdown_grace_config() {
+        let root = make_temp_dir("doctor-shutdown-grace");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nshutdown_grace_seconds = 9\n",
+        )
+        .expect("config should write");
+
+        let checks = doctor_checks(&root, None);
+        let grace = checks
+            .iter()
+            .find(|check| check.code == "server-shutdown-grace")
+            .expect("server shutdown grace check should exist");
+
+        assert_eq!(grace.severity, DoctorSeverity::Ok);
+        assert!(grace.message.contains("9 second"));
+
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nshutdown_grace_seconds = \"later\"\n",
+        )
+        .expect("config should write");
+
+        let checks = doctor_checks(&root, None);
+        let grace = checks
+            .iter()
+            .find(|check| check.code == "server-shutdown-grace")
+            .expect("server shutdown grace check should exist");
+
+        assert_eq!(grace.severity, DoctorSeverity::Error);
+        assert!(grace.message.contains("shutdown_grace_seconds"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn doctor_reports_state_manifest_status() {
         let root = make_temp_dir("doctor-state-manifest");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -11583,6 +11708,19 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn parses_configured_shutdown_grace_periods() {
+        assert_eq!(
+            parse_shutdown_grace_seconds_value(&toml::Value::Integer(11))
+                .expect("shutdown grace should parse"),
+            Duration::from_secs(11)
+        );
+        assert!(parse_shutdown_grace_seconds_value(&toml::Value::Integer(0)).is_err());
+        assert!(
+            parse_shutdown_grace_seconds_value(&toml::Value::String("11".to_string())).is_err()
+        );
+    }
+
+    #[test]
     fn tokio_server_can_shutdown_without_request() {
         let root = make_temp_dir("tokio-server-shutdown");
         let state = Arc::new(DevServerState {
@@ -11597,7 +11735,12 @@ axonyx-runtime = "0.1.0"
             .expect("tokio runtime should build");
 
         runtime
-            .block_on(serve_tokio_until(config, state, async {}))
+            .block_on(serve_tokio_until(
+                config,
+                state,
+                Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS),
+                async {},
+            ))
             .expect("tokio server should shut down cleanly");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");

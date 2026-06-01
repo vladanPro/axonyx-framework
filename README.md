@@ -90,6 +90,7 @@ app:
 ```toml
 [server]
 request_timeout_seconds = 2
+shutdown_grace_seconds = 5
 ```
 
 This is intentionally a runtime choice, not an authoring burden: `.ax` pages,

@@ -156,6 +156,7 @@ Expected result:
 - UI imports resolve through the package model
 - package CSS is available through `/_ax/pkg/axonyx-ui/index.css`
 - server request timeout resolves through `[server].request_timeout_seconds`
+- server shutdown grace resolves through `[server].shutdown_grace_seconds`
 - production-server preview logs Tokio graceful shutdown support
 - production-server preview logs the shutdown grace period
 - `dist/index.html` is generated
