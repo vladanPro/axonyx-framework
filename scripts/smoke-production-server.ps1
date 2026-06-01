@@ -219,6 +219,77 @@ function Invoke-OversizedHeaderSmoke {
   }
 }
 
+function Invoke-ChunkedPostSmoke {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $HostName,
+
+    [Parameter(Mandatory = $true)]
+    [int] $Port
+  )
+
+  $client = New-Object System.Net.Sockets.TcpClient
+  $client.ReceiveTimeout = 5000
+  $client.Connect($HostName, $Port)
+  try {
+    $stream = $client.GetStream()
+    $writer = New-Object System.IO.StreamWriter($stream, [System.Text.Encoding]::ASCII)
+    $writer.NewLine = "`r`n"
+    $writer.WriteLine("POST /api/posts HTTP/1.1")
+    $writer.WriteLine("Host: $HostName")
+    $writer.WriteLine("Content-Type: application/x-www-form-urlencoded")
+    $writer.WriteLine("Transfer-Encoding: chunked")
+    $writer.WriteLine("Connection: close")
+    $writer.WriteLine("")
+    $writer.WriteLine("12")
+    $writer.WriteLine("title=Chunked+Post")
+    $writer.WriteLine("e")
+    $writer.WriteLine("&featured=true")
+    $writer.WriteLine("0")
+    $writer.WriteLine("")
+    $writer.Flush()
+
+    $reader = New-Object System.IO.StreamReader($stream)
+    $raw = $reader.ReadToEnd()
+    if ($raw -notmatch "^HTTP/1\.1 200\b") {
+      throw "Expected chunked POST smoke to receive HTTP 200, got:`n$raw"
+    }
+    if ($raw -notmatch "Chunked Post") {
+      throw "Expected chunked POST smoke response to include created post title"
+    }
+  } finally {
+    $client.Dispose()
+  }
+}
+
+function Invoke-MalformedRequestSmoke {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $HostName,
+
+    [Parameter(Mandatory = $true)]
+    [int] $Port
+  )
+
+  $client = New-Object System.Net.Sockets.TcpClient
+  $client.ReceiveTimeout = 5000
+  $client.Connect($HostName, $Port)
+  try {
+    $stream = $client.GetStream()
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes("NOT HTTP`r`n`r`n")
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+
+    $reader = New-Object System.IO.StreamReader($stream)
+    $raw = $reader.ReadToEnd()
+    if ($raw -notmatch "^HTTP/1\.1 400\b") {
+      throw "Expected malformed request smoke to receive HTTP 400, got:`n$raw"
+    }
+  } finally {
+    $client.Dispose()
+  }
+}
+
 Write-Host "Axonyx production server smoke"
 Write-Host "  template: $Template"
 Write-Host "  port:     $Port"
@@ -285,6 +356,10 @@ try {
   Invoke-TemplateRouteChecks -BaseUrl $baseUrl -Template $Template
   Invoke-SmokeRequest -Url "$baseUrl/__axonyx/health" -ExpectedStatus 200 -Expect '"ok":true|"ok": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
   Invoke-OversizedHeaderSmoke -HostName "127.0.0.1" -Port $Port
+  if ($Template -ne "docs") {
+    Invoke-ChunkedPostSmoke -HostName "127.0.0.1" -Port $Port
+  }
+  Invoke-MalformedRequestSmoke -HostName "127.0.0.1" -Port $Port
   Invoke-SmokeRequest -Url "$baseUrl/favicon.svg" -ExpectedStatus 200 -ExpectHeader "Content-Type" -ExpectHeaderValue "image/svg\+xml" | Out-Null
   if ($Template -ne "minimal") {
     Invoke-SmokeRequest -Url "$baseUrl/_ax/pkg/axonyx-ui/index.css" -ExpectedStatus 200 -Expect "@import|--ax-" -ExpectHeader "Content-Type" -ExpectHeaderValue "text/css" | Out-Null
