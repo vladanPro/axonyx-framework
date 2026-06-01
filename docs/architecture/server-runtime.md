@@ -72,22 +72,22 @@ long the Tokio transport waits for active connection tasks after Ctrl+C or a
 hosted restart signal. The max connection limit rejects excess Tokio
 connections with `503 Service Unavailable` before they enter the route handler.
 
-Tokio/Hyper should replace the transport underneath, not the framework shape
-above it. The developer should still write:
+Tokio is now the default transport underneath, without changing the framework
+shape above it. The developer still writes:
 
 ```text
 cargo ax run dev
 cargo ax run start --host 0.0.0.0 --port 3000
-cargo ax run start --production-server --host 0.0.0.0 --port 3000
+cargo ax run dev --transport std
 ```
 
-`--production-server` is the user-facing preview flag for the future production
-server path. It currently selects the Tokio transport underneath while
-preserving the same route, loader, action, page, and state model. The Tokio
-transport also installs a Ctrl+C shutdown listener so the accept loop can exit
-cleanly during local stops and hosted deploy restarts. After the listener stops
-accepting new connections, Axonyx waits a short grace period for active Tokio
-connection tasks to finish before returning from the server.
+The legacy `--production-server` flag is still accepted for older deploy
+scripts, but it is no longer required because Tokio is the default. The
+standard library transport remains available with `--transport std` as a
+fallback. The Tokio transport installs a Ctrl+C shutdown listener so the accept
+loop can exit cleanly during local stops and hosted deploy restarts. After the
+listener stops accepting new connections, Axonyx waits a short grace period for
+active Tokio connection tasks to finish before returning from the server.
 
 Deployment checks should point at that same path:
 
@@ -101,7 +101,7 @@ health-check path.
 For Render, the recommended start command is:
 
 ```text
-cargo ax run start --production-server --host 0.0.0.0 --port $PORT
+cargo ax run start --host 0.0.0.0 --port $PORT
 ```
 
 The production preview also exposes:
@@ -126,7 +126,7 @@ and the app should still be authored through:
 ## Next Server Milestones
 
 1. Add native chunked UI streaming for route rendering.
-2. Keep expanding the production adapter behind `--production-server`.
+2. Keep expanding the Tokio production adapter while preserving `--transport std`.
 3. Lower future `<Await>` or stream boundaries into `AxBody::Chunks`.
 4. Keep structured async in Axonyx authoring through loaders, actions, jobs, and
    future `<Await>` boundaries instead of exposing promise-style timing.

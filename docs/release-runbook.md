@@ -52,6 +52,7 @@ cargo fmt --all -- --check
 cargo test
 powershell -ExecutionPolicy Bypass -File scripts/smoke-core-loop.ps1 -Template site
 powershell -ExecutionPolicy Bypass -File scripts/smoke-production-server.ps1 -Template site
+powershell -ExecutionPolicy Bypass -File scripts/smoke-server-transports.ps1 -Template minimal
 ```
 
 ## Pre-Publish Checks
@@ -65,6 +66,7 @@ cargo fmt --all -- --check
 cargo test
 powershell -ExecutionPolicy Bypass -File scripts/smoke-core-loop.ps1 -Template site
 powershell -ExecutionPolicy Bypass -File scripts/smoke-production-server.ps1 -Template site
+powershell -ExecutionPolicy Bypass -File scripts/smoke-server-transports.ps1 -Template minimal
 ```
 
 Then verify `axonyx-ui` from its repo:
@@ -147,7 +149,7 @@ cargo ax doctor --deny-warnings
 cargo ax doctor --deploy render
 cargo ax build --clean
 cargo ax run dev
-cargo ax run start --production-server --host 0.0.0.0 --port 3000
+cargo ax run start --host 0.0.0.0 --port 3000
 ```
 
 Expected result:
@@ -160,8 +162,8 @@ Expected result:
 - server request timeout resolves through `[server].request_timeout_seconds`
 - server shutdown grace resolves through `[server].shutdown_grace_seconds`
 - server max connections resolves through `[server].max_connections`
-- production-server preview logs Tokio graceful shutdown support
-- production-server preview logs the shutdown grace period
+- Tokio production server logs graceful shutdown support
+- Tokio production server logs the shutdown grace period
 - `dist/index.html` is generated
 
 ## Stop Conditions

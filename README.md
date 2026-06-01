@@ -56,24 +56,24 @@ cd my-site
 cargo ax run dev
 ```
 
-The stable server path uses the standard library transport. The async preview
-path is available with Tokio:
+The default dev/start server uses the Tokio transport. The older standard
+library transport remains available as a fallback while the production path
+matures:
 
 ```bash
-cargo ax run dev --transport tokio
+cargo ax run dev --transport std
 ```
 
-For the production-server preview path, use the clearer flag:
+For hosted starts, use the normal start command:
 
 ```bash
-cargo ax run start --production-server --host 0.0.0.0 --port 3000
+cargo ax run start --host 0.0.0.0 --port 3000
 ```
 
-Today this selects the Tokio transport while keeping the public authoring model
-unchanged. The lower-level `--transport tokio` flag remains available for
-transport testing. The Tokio path also installs a Ctrl+C shutdown listener and
-a short connection drain window so hosted starts and local previews can stop
-cleanly.
+The legacy `--production-server` flag still selects Tokio for older deploy
+scripts, but it is no longer required. The Tokio path installs a Ctrl+C
+shutdown listener and a short connection drain window so hosted starts and
+local previews can stop cleanly.
 
 For Render-style deployment checks:
 
@@ -81,9 +81,9 @@ For Render-style deployment checks:
 cargo ax doctor --deploy render
 ```
 
-The Render check recommends the same `--production-server` start command so
-local smoke and hosted deploys exercise the same server path. It also reports
-the recommended health-check path: `/__axonyx/health`.
+The Render check recommends the same Tokio-backed start command so local smoke
+and hosted deploys exercise the same server path. It also reports the
+recommended health-check path: `/__axonyx/health`.
 
 Production preview exposes a stable health probe for hosted platforms and load
 balancers:
@@ -106,10 +106,10 @@ This is intentionally a runtime choice, not an authoring burden: `.ax` pages,
 loaders, actions, and state patches keep the same shape while Axonyx chooses the
 transport layer underneath.
 
-The Tokio preview path also exposes the first SSE probe:
+The Tokio server path also exposes the first SSE probe:
 
 ```bash
-cargo ax run dev --transport tokio
+cargo ax run dev
 # open /__axonyx/events
 ```
 

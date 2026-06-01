@@ -170,11 +170,11 @@ struct DevArgs {
     #[arg(long)]
     port: Option<u16>,
 
-    /// HTTP transport implementation. std is stable; tokio is the async preview path.
-    #[arg(long, value_enum, default_value_t = ServerTransport::Std)]
+    /// HTTP transport implementation. Tokio is the default; std is kept as a fallback.
+    #[arg(long, value_enum, default_value_t = ServerTransport::Tokio)]
     transport: ServerTransport,
 
-    /// Use the production-server preview path. This currently selects the Tokio transport.
+    /// Use the production-server path. Kept for deploy scripts; Tokio is now the default transport.
     #[arg(long)]
     production_server: bool,
 }
@@ -1219,7 +1219,7 @@ fn doctor_render_deploy_checks(root: &Path) -> Vec<DoctorCheck> {
         message: "Render target expects a Web Service with Cargo build/start commands."
             .to_string(),
         hint: Some(
-            "Build command: cargo ax build --clean; start command: cargo ax run start --production-server --host 0.0.0.0 --port $PORT",
+            "Build command: cargo ax build --clean; start command: cargo ax run start --host 0.0.0.0 --port $PORT",
         ),
     });
 
@@ -1235,8 +1235,10 @@ fn doctor_render_deploy_checks(root: &Path) -> Vec<DoctorCheck> {
     checks.push(DoctorCheck {
         code: "deploy-render-production-server",
         severity: DoctorSeverity::Ok,
-        message: "Render deploy should use the production-server preview path.".to_string(),
-        hint: Some("Use `cargo ax run start --production-server --host 0.0.0.0 --port $PORT`."),
+        message: "Render deploy uses the Tokio production path by default.".to_string(),
+        hint: Some(
+            "Use `cargo ax run start --host 0.0.0.0 --port $PORT`. Add `--transport std` only as a fallback.",
+        ),
     });
 
     checks.push(DoctorCheck {
@@ -5531,7 +5533,7 @@ fn print_graph_text(report: &MeltReport) {
 
     println!();
     println!("Production server:");
-    println!("  transport std=stable tokio=preview");
+    println!("  transport tokio=default std=fallback");
     println!(
         "  stream_pages={} max_body_bytes={}",
         if report.routes.stream_pages {
@@ -10749,7 +10751,7 @@ page Home
         };
         assert_eq!(args.host, "0.0.0.0");
         assert_eq!(args.port, Some(4100));
-        assert_eq!(args.transport, ServerTransport::Std);
+        assert_eq!(args.transport, ServerTransport::Tokio);
     }
 
     #[test]
@@ -10852,8 +10854,35 @@ page Home
         };
 
         assert!(args.production_server);
-        assert_eq!(args.transport, ServerTransport::Std);
+        assert_eq!(args.transport, ServerTransport::Tokio);
         assert_eq!(args.effective_transport(), ServerTransport::Tokio);
+    }
+
+    #[test]
+    fn parses_std_transport_fallback_for_run_dev() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "run",
+            "dev",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "4103",
+            "--transport",
+            "std",
+        ])
+        .expect("std fallback transport should parse");
+
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        let RunCommands::Dev(args) = args.command else {
+            panic!("expected run dev command");
+        };
+        assert_eq!(args.host, "127.0.0.1");
+        assert_eq!(args.port, Some(4103));
+        assert_eq!(args.transport, ServerTransport::Std);
+        assert_eq!(args.effective_transport(), ServerTransport::Std);
     }
 
     #[test]
@@ -11750,7 +11779,7 @@ axonyx-runtime = "0.1.14"
                 && check.severity == DoctorSeverity::Ok
                 && check
                     .hint
-                    .is_some_and(|hint| hint.contains("--production-server"))
+                    .is_some_and(|hint| hint.contains("cargo ax run start --host"))
         }));
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-port" && check.severity == DoctorSeverity::Ok
@@ -11758,7 +11787,7 @@ axonyx-runtime = "0.1.14"
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-production-server"
                 && check.severity == DoctorSeverity::Ok
-                && check.message.contains("production-server")
+                && check.message.contains("Tokio")
         }));
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-health"
