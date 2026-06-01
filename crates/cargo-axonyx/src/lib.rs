@@ -1,6 +1,5 @@
 use std::ffi::OsString;
 use std::fs;
-#[cfg(test)]
 use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
@@ -6995,6 +6994,30 @@ async fn serve_axum_tokio(
     shutdown_grace: Duration,
     max_connections: usize,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_axum_tokio_until(
+        config,
+        state,
+        max_body_bytes,
+        request_timeout,
+        shutdown_grace,
+        max_connections,
+        tokio_shutdown_signal(),
+    )
+    .await
+}
+
+async fn serve_axum_tokio_until<S>(
+    config: AxServerConfig,
+    state: Arc<DevServerState>,
+    max_body_bytes: usize,
+    request_timeout: Duration,
+    shutdown_grace: Duration,
+    max_connections: usize,
+    shutdown: S,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
     let bind = config.bind_addr();
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
@@ -7013,7 +7036,7 @@ async fn serve_axum_tokio(
         .with_state(router_state);
 
     axum::serve(listener, router)
-        .with_graceful_shutdown(tokio_shutdown_signal())
+        .with_graceful_shutdown(shutdown)
         .await?;
 
     println!(
@@ -12129,6 +12152,35 @@ axonyx-runtime = "0.1.0"
                 async {},
             ))
             .expect("tokio server should shut down cleanly");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn axum_tokio_server_can_shutdown_without_request() {
+        let root = make_temp_dir("axum-tokio-server-shutdown");
+        let state = Arc::new(DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        });
+        let config = AxServerConfig::new("127.0.0.1", 0, AxServerMode::Start);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("tokio runtime should build");
+
+        runtime
+            .block_on(serve_axum_tokio_until(
+                config,
+                state,
+                MAX_REQUEST_BODY_BYTES,
+                Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
+                Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS),
+                DEFAULT_MAX_CONNECTIONS,
+                async {},
+            ))
+            .expect("axum tokio server should shut down cleanly");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
