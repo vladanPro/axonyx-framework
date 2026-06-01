@@ -155,6 +155,7 @@ Expected result:
 - app resolves `axonyx-runtime` from crates.io
 - UI imports resolve through the package model
 - package CSS is available through `/_ax/pkg/axonyx-ui/index.css`
+- health probe returns JSON from `GET /__axonyx/health`
 - server request timeout resolves through `[server].request_timeout_seconds`
 - server shutdown grace resolves through `[server].shutdown_grace_seconds`
 - server max connections resolves through `[server].max_connections`

@@ -101,6 +101,16 @@ For Render, the recommended start command is:
 cargo ax run start --production-server --host 0.0.0.0 --port $PORT
 ```
 
+The production preview also exposes:
+
+```text
+GET /__axonyx/health
+```
+
+It returns a small no-store JSON response with `ok`, `service`, `mode`, and
+`version`, which gives hosted platforms and load balancers a stable readiness
+probe without touching app routes.
+
 and the app should still be authored through:
 
 - `app/**/page.ax`

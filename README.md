@@ -84,6 +84,13 @@ cargo ax doctor --deploy render
 The Render check recommends the same `--production-server` start command so
 local smoke and hosted deploys exercise the same server path.
 
+Production preview exposes a stable health probe for hosted platforms and load
+balancers:
+
+```text
+GET /__axonyx/health
+```
+
 Request reads default to a short production-safe timeout and can be tuned per
 app:
 

@@ -176,6 +176,7 @@ try {
   }
 
   Invoke-SmokeRequest -Url "$baseUrl/posts" -ExpectedStatus 200 -Expect "Posts" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/__axonyx/health" -ExpectedStatus 200 -Expect '"ok":true|"ok": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/favicon.svg" -ExpectedStatus 200 -ExpectHeader "Content-Type" -ExpectHeaderValue "image/svg\+xml" | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/_ax/pkg/axonyx-ui/index.css" -ExpectedStatus 200 -Expect "@import|--ax-" -ExpectHeader "Content-Type" -ExpectHeaderValue "text/css" | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/api/posts" -ExpectedStatus 200 -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null

@@ -6844,6 +6844,10 @@ fn handle_http_request(
         .with_no_store());
     }
 
+    if request.method == "GET" && is_health_target(&request.target) {
+        return Ok(health_response(mode)?);
+    }
+
     if mode == AxServerMode::Dev && request.method == "GET" && request.target == "/__axonyx/stream"
     {
         return Ok(stream_probe_response());
@@ -6929,6 +6933,23 @@ fn handle_http_request(
         )?,
     };
     Ok(response)
+}
+
+fn is_health_target(target: &str) -> bool {
+    target.split_once('?').map_or(target, |(path, _)| path) == "/__axonyx/health"
+}
+
+fn health_response(mode: AxServerMode) -> Result<AxHttpResponse> {
+    Ok(AxHttpResponse::json(
+        200,
+        &serde_json::json!({
+            "ok": true,
+            "service": "axonyx",
+            "mode": mode.label(),
+            "version": env!("CARGO_PKG_VERSION"),
+        }),
+    )?
+    .with_no_store())
 }
 
 async fn serve_tokio(
@@ -12046,6 +12067,38 @@ axonyx-runtime = "0.1.0"
 
         assert_eq!(response.status, 405);
         assert_eq!(response.header_value("Allow"), Some("GET, HEAD"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn health_endpoint_reports_ok_json() {
+        let root = make_temp_dir("health-endpoint");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        };
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/__axonyx/health?probe=1".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+        let status = response.status;
+        let content_type = response.content_type.clone();
+        let body = serde_json::from_slice::<serde_json::Value>(&response.body.into_bytes())
+            .expect("health response should be json");
+
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "application/json; charset=utf-8");
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["service"], "axonyx");
+        assert_eq!(body["mode"], "start");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
