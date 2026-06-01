@@ -62,13 +62,15 @@ connection forever:
 [server]
 request_timeout_seconds = 2
 shutdown_grace_seconds = 5
+max_connections = 1024
 ```
 
 The same timeout is respected by the standard transport and the Tokio preview
 transport. `cargo ax doctor` reports the resolved value and flags invalid
 configuration before the server starts. The shutdown grace period controls how
 long the Tokio transport waits for active connection tasks after Ctrl+C or a
-hosted restart signal.
+hosted restart signal. The max connection limit rejects excess Tokio
+connections with `503 Service Unavailable` before they enter the route handler.
 
 Tokio/Hyper should replace the transport underneath, not the framework shape
 above it. The developer should still write:

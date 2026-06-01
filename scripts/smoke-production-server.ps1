@@ -200,6 +200,10 @@ try {
     throw "Expected server log to report shutdown grace period"
   }
 
+  if ($serverLog -notmatch "Tokio max connections: 1024") {
+    throw "Expected server log to report Tokio max connections"
+  }
+
   if ($serverLog -notmatch "Request read timeout: 2 seconds") {
     throw "Expected server log to report request read timeout"
   }

@@ -56,6 +56,7 @@ const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 2;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
+const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -395,20 +396,38 @@ struct DevServerState {
 struct TokioConnectionTracker {
     active: Arc<AtomicUsize>,
     grace_period: Duration,
+    max_connections: usize,
 }
 
 impl TokioConnectionTracker {
-    fn new(grace_period: Duration) -> Self {
+    fn new(grace_period: Duration, max_connections: usize) -> Self {
         Self {
             active: Arc::new(AtomicUsize::new(0)),
             grace_period,
+            max_connections,
         }
     }
 
-    fn track(&self) -> TokioConnectionGuard {
-        self.active.fetch_add(1, Ordering::SeqCst);
-        TokioConnectionGuard {
-            active: Arc::clone(&self.active),
+    fn try_track(&self) -> Option<TokioConnectionGuard> {
+        let mut current = self.active.load(Ordering::SeqCst);
+        loop {
+            if current >= self.max_connections {
+                return None;
+            }
+
+            match self.active.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return Some(TokioConnectionGuard {
+                        active: Arc::clone(&self.active),
+                    });
+                }
+                Err(observed) => current = observed,
+            }
         }
     }
 
@@ -436,6 +455,7 @@ struct TokioAxServer {
     config: AxServerConfig,
     state: Arc<DevServerState>,
     shutdown_grace: Duration,
+    max_connections: usize,
 }
 
 impl AxServer for StdNetAxServer {
@@ -485,8 +505,11 @@ impl AxServer for TokioAxServer {
         let config = self.config.clone();
         let state = Arc::clone(&self.state);
         let shutdown_grace = self.shutdown_grace;
+        let max_connections = self.max_connections;
 
-        runtime.block_on(async move { serve_tokio(config, state, shutdown_grace).await })?;
+        runtime.block_on(async move {
+            serve_tokio(config, state, shutdown_grace, max_connections).await
+        })?;
         Ok(())
     }
 }
@@ -983,6 +1006,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_body_limit_check(root));
     checks.push(doctor_server_request_timeout_check(root));
     checks.push(doctor_server_shutdown_grace_check(root));
+    checks.push(doctor_server_max_connections_check(root));
     checks.push(doctor_aegis_config_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
@@ -1062,6 +1086,23 @@ fn doctor_server_shutdown_grace_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message,
             hint: Some("Set [server].shutdown_grace_seconds to a positive integer."),
+        },
+    }
+}
+
+fn doctor_server_max_connections_check(root: &Path) -> DoctorCheck {
+    match configured_max_connections(root) {
+        Ok(limit) => DoctorCheck {
+            code: "server-max-connections",
+            severity: DoctorSeverity::Ok,
+            message: format!("Tokio max connections resolves to {limit}."),
+            hint: Some("Tune [server].max_connections for hosted capacity and abuse protection."),
+        },
+        Err(message) => DoctorCheck {
+            code: "server-max-connections",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Set [server].max_connections to a positive integer."),
         },
     }
 }
@@ -3345,6 +3386,23 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     }
 
+    if let Some(max_connections) = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("max_connections"))
+    {
+        if parse_max_connections_value(max_connections).is_err() {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&path),
+                line: line_for_config_key(&source, "max_connections"),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-max-connections",
+                message: "[server].max_connections must be a positive integer.".to_string(),
+            });
+        }
+    }
+
     Ok(diagnostics)
 }
 
@@ -4562,6 +4620,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let max_body_bytes = configured_max_request_body_bytes(&root).map_err(anyhow::Error::msg)?;
     let request_timeout = configured_request_timeout_duration(&root).map_err(anyhow::Error::msg)?;
     let shutdown_grace = configured_shutdown_grace_duration(&root).map_err(anyhow::Error::msg)?;
+    let max_connections = configured_max_connections(&root).map_err(anyhow::Error::msg)?;
     let env_port = std::env::var("PORT").ok();
     let port = resolve_server_port(mode, args.port, env_port.as_deref())?;
     let uses_env_port = mode == AxServerMode::Start
@@ -4598,6 +4657,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
             "Shutdown grace period: {} seconds.",
             shutdown_grace.as_secs()
         );
+        println!("Tokio max connections: {max_connections}.");
     }
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
@@ -4633,6 +4693,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
                 config: server_config,
                 state: shared_state,
                 shutdown_grace,
+                max_connections,
             };
             server.serve().map_err(|error| anyhow::anyhow!("{error}"))
         }
@@ -6874,14 +6935,23 @@ async fn serve_tokio(
     config: AxServerConfig,
     state: Arc<DevServerState>,
     shutdown_grace: Duration,
+    max_connections: usize,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    serve_tokio_until(config, state, shutdown_grace, tokio_shutdown_signal()).await
+    serve_tokio_until(
+        config,
+        state,
+        shutdown_grace,
+        max_connections,
+        tokio_shutdown_signal(),
+    )
+    .await
 }
 
 async fn serve_tokio_until<S>(
     config: AxServerConfig,
     state: Arc<DevServerState>,
     shutdown_grace: Duration,
+    max_connections: usize,
     shutdown: S,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -6891,7 +6961,7 @@ where
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("failed to bind Axonyx Tokio server at {bind}"))?;
-    let tracker = TokioConnectionTracker::new(shutdown_grace);
+    let tracker = TokioConnectionTracker::new(shutdown_grace, max_connections);
     tokio::pin!(shutdown);
 
     loop {
@@ -6905,7 +6975,10 @@ where
                 let (stream, _) = accepted?;
                 let state = Arc::clone(&state);
                 let mode = config.mode;
-                let connection_guard = tracker.track();
+                let Some(connection_guard) = tracker.try_track() else {
+                    reject_tokio_connection(stream, max_connections).await;
+                    continue;
+                };
 
                 tokio::spawn(async move {
                     let _connection_guard = connection_guard;
@@ -6919,6 +6992,22 @@ where
 
     wait_for_tokio_connections(&tracker).await;
     Ok(())
+}
+
+async fn reject_tokio_connection(mut stream: tokio::net::TcpStream, max_connections: usize) {
+    let response = AxHttpResponse::text(
+        503,
+        format!(
+            "Service Unavailable: Axonyx is already handling {max_connections} active connection{}.",
+            if max_connections == 1 { "" } else { "s" }
+        ),
+    )
+    .with_header("Retry-After", "1")
+    .with_no_store();
+
+    if let Err(error) = write_ax_response_async(&mut stream, &response, false).await {
+        eprintln!("Axonyx Tokio connection rejection failed: {error:#}");
+    }
 }
 
 async fn wait_for_tokio_connections(tracker: &TokioConnectionTracker) {
@@ -7268,6 +7357,13 @@ fn configured_shutdown_grace_duration(root: &Path) -> std::result::Result<Durati
     }
 }
 
+fn configured_max_connections(root: &Path) -> std::result::Result<usize, String> {
+    match axonyx_config_value(root, "server", "max_connections") {
+        Some(value) => parse_max_connections_value(&value),
+        None => Ok(DEFAULT_MAX_CONNECTIONS),
+    }
+}
+
 fn parse_request_timeout_seconds_value(
     value: &toml::Value,
 ) -> std::result::Result<Duration, String> {
@@ -7289,6 +7385,14 @@ fn parse_shutdown_grace_seconds_value(
             Err("[server].shutdown_grace_seconds must be positive.".to_string())
         }
         _ => Err("[server].shutdown_grace_seconds must be an integer.".to_string()),
+    }
+}
+
+fn parse_max_connections_value(value: &toml::Value) -> std::result::Result<usize, String> {
+    match value {
+        toml::Value::Integer(number) if *number > 0 => Ok(*number as usize),
+        toml::Value::Integer(_) => Err("[server].max_connections must be positive.".to_string()),
+        _ => Err("[server].max_connections must be an integer.".to_string()),
     }
 }
 
@@ -9890,6 +9994,30 @@ page state enabled = signal(true)
     }
 
     #[test]
+    fn check_app_sources_reports_invalid_max_connections_config() {
+        let root = make_temp_dir("invalid-max-connections-config");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nmax_connections = 0\n",
+        )
+        .expect("config should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-config-max-connections"
+                && diagnostic.file.ends_with("Axonyx.toml")
+                && diagnostic.line == 5
+                && diagnostic.message.contains("max_connections")
+        }));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn check_app_sources_reports_duplicate_backend_api_routes() {
         let root = make_temp_dir("duplicate-api-routes");
         fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
@@ -11119,6 +11247,43 @@ axonyx-runtime = "0.1.14"
     }
 
     #[test]
+    fn doctor_reports_max_connections_config() {
+        let root = make_temp_dir("doctor-max-connections");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nmax_connections = 7\n",
+        )
+        .expect("config should write");
+
+        let checks = doctor_checks(&root, None);
+        let limit = checks
+            .iter()
+            .find(|check| check.code == "server-max-connections")
+            .expect("server max connections check should exist");
+
+        assert_eq!(limit.severity, DoctorSeverity::Ok);
+        assert!(limit.message.contains("7"));
+
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\nmax_connections = \"many\"\n",
+        )
+        .expect("config should write");
+
+        let checks = doctor_checks(&root, None);
+        let limit = checks
+            .iter()
+            .find(|check| check.code == "server-max-connections")
+            .expect("server max connections check should exist");
+
+        assert_eq!(limit.severity, DoctorSeverity::Error);
+        assert!(limit.message.contains("max_connections"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn doctor_reports_state_manifest_status() {
         let root = make_temp_dir("doctor-state-manifest");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -11721,6 +11886,17 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn parses_configured_max_connections() {
+        assert_eq!(
+            parse_max_connections_value(&toml::Value::Integer(128))
+                .expect("max connections should parse"),
+            128
+        );
+        assert!(parse_max_connections_value(&toml::Value::Integer(0)).is_err());
+        assert!(parse_max_connections_value(&toml::Value::String("128".to_string())).is_err());
+    }
+
+    #[test]
     fn tokio_server_can_shutdown_without_request() {
         let root = make_temp_dir("tokio-server-shutdown");
         let state = Arc::new(DevServerState {
@@ -11739,6 +11915,7 @@ axonyx-runtime = "0.1.0"
                 config,
                 state,
                 Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS),
+                DEFAULT_MAX_CONNECTIONS,
                 async {},
             ))
             .expect("tokio server should shut down cleanly");
@@ -11754,8 +11931,8 @@ axonyx-runtime = "0.1.0"
             .expect("tokio runtime should build");
 
         runtime.block_on(async {
-            let tracker = TokioConnectionTracker::new(Duration::from_millis(200));
-            let guard = tracker.track();
+            let tracker = TokioConnectionTracker::new(Duration::from_millis(200), 1);
+            let guard = tracker.try_track().expect("connection should fit");
 
             tokio::spawn(async move {
                 let _guard = guard;
@@ -11765,6 +11942,19 @@ axonyx-runtime = "0.1.0"
             wait_for_tokio_connections(&tracker).await;
             assert_eq!(tracker.active_count(), 0);
         });
+    }
+
+    #[test]
+    fn tokio_connection_tracker_rejects_over_limit() {
+        let tracker = TokioConnectionTracker::new(Duration::from_secs(1), 1);
+        let guard = tracker.try_track().expect("first connection should fit");
+
+        assert!(tracker.try_track().is_none());
+        assert_eq!(tracker.active_count(), 1);
+
+        drop(guard);
+        assert_eq!(tracker.active_count(), 0);
+        assert!(tracker.try_track().is_some());
     }
 
     #[test]
