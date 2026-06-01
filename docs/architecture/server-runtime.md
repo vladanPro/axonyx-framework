@@ -61,7 +61,12 @@ above it. The developer should still write:
 ```text
 cargo ax run dev
 cargo ax run start --host 0.0.0.0 --port 3000
+cargo ax run start --production-server --host 0.0.0.0 --port 3000
 ```
+
+`--production-server` is the user-facing preview flag for the future production
+server path. It currently selects the Tokio transport underneath while
+preserving the same route, loader, action, page, and state model.
 
 and the app should still be authored through:
 
@@ -74,8 +79,8 @@ and the app should still be authored through:
 
 ## Next Server Milestones
 
-1. Add a `TokioAxServer` or `HyperAxServer` adapter once async streaming starts.
-2. Add native chunked UI streaming for route rendering.
+1. Add native chunked UI streaming for route rendering.
+2. Keep expanding the production adapter behind `--production-server`.
 3. Lower future `<Await>` or stream boundaries into `AxBody::Chunks`.
 4. Keep structured async in Axonyx authoring through loaders, actions, jobs, and
    future `<Await>` boundaries instead of exposing promise-style timing.

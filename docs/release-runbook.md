@@ -51,6 +51,7 @@ The local equivalent from the framework repo is:
 cargo fmt --all -- --check
 cargo test
 powershell -ExecutionPolicy Bypass -File scripts/smoke-core-loop.ps1 -Template site
+powershell -ExecutionPolicy Bypass -File scripts/smoke-production-server.ps1 -Template site
 ```
 
 ## Pre-Publish Checks
@@ -63,6 +64,7 @@ git submodule status
 cargo fmt --all -- --check
 cargo test
 powershell -ExecutionPolicy Bypass -File scripts/smoke-core-loop.ps1 -Template site
+powershell -ExecutionPolicy Bypass -File scripts/smoke-production-server.ps1 -Template site
 ```
 
 Then verify `axonyx-ui` from its repo:
@@ -144,6 +146,7 @@ cargo ax check
 cargo ax doctor --deny-warnings
 cargo ax build --clean
 cargo ax run dev
+cargo ax run start --production-server --host 0.0.0.0 --port 3000
 ```
 
 Expected result:

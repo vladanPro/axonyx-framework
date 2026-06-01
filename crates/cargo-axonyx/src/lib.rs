@@ -166,6 +166,20 @@ struct DevArgs {
     /// HTTP transport implementation. std is stable; tokio is the async preview path.
     #[arg(long, value_enum, default_value_t = ServerTransport::Std)]
     transport: ServerTransport,
+
+    /// Use the production-server preview path. This currently selects the Tokio transport.
+    #[arg(long)]
+    production_server: bool,
+}
+
+impl DevArgs {
+    fn effective_transport(&self) -> ServerTransport {
+        if self.production_server {
+            ServerTransport::Tokio
+        } else {
+            self.transport
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -4423,6 +4437,8 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
 
+    let production_server = args.production_server;
+    let transport = args.effective_transport();
     let server_config = AxServerConfig::new(args.host, port, mode);
     let bind = server_config.bind_addr();
     let preview_store = preview_store_from_content(&root)?;
@@ -4430,7 +4446,6 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
         root,
         preview_store: Mutex::new(preview_store),
     });
-    let transport = args.transport;
 
     print_backend_build_status(&backend_status);
     println!(
@@ -4440,6 +4455,9 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     );
     if uses_env_port {
         println!("Using PORT environment variable for hosted production start.");
+    }
+    if production_server {
+        println!("Production server preview is enabled.");
     }
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
@@ -10340,6 +10358,32 @@ page Home
         assert_eq!(args.host, "127.0.0.1");
         assert_eq!(args.port, Some(4101));
         assert_eq!(args.transport, ServerTransport::Tokio);
+    }
+
+    #[test]
+    fn production_server_flag_selects_tokio_transport() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "run",
+            "start",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "4102",
+            "--production-server",
+        ])
+        .expect("production server flag should parse");
+
+        let Commands::Run(args) = cli.command else {
+            panic!("expected run command");
+        };
+        let RunCommands::Start(args) = args.command else {
+            panic!("expected run start command");
+        };
+
+        assert!(args.production_server);
+        assert_eq!(args.transport, ServerTransport::Std);
+        assert_eq!(args.effective_transport(), ServerTransport::Tokio);
     }
 
     #[test]
