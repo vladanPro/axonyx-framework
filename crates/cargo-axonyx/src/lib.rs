@@ -1239,6 +1239,13 @@ fn doctor_render_deploy_checks(root: &Path) -> Vec<DoctorCheck> {
         hint: Some("Use `cargo ax run start --production-server --host 0.0.0.0 --port $PORT`."),
     });
 
+    checks.push(DoctorCheck {
+        code: "deploy-render-health",
+        severity: DoctorSeverity::Ok,
+        message: "Render health checks can use the built-in Axonyx health probe.".to_string(),
+        hint: Some("Health check path: /__axonyx/health"),
+    });
+
     checks.push(match configured_max_request_body_bytes(root) {
         Ok(limit) => DoctorCheck {
             code: "deploy-render-body-limit",
@@ -11752,6 +11759,11 @@ axonyx-runtime = "0.1.14"
             check.code == "deploy-render-production-server"
                 && check.severity == DoctorSeverity::Ok
                 && check.message.contains("production-server")
+        }));
+        assert!(checks.iter().any(|check| {
+            check.code == "deploy-render-health"
+                && check.severity == DoctorSeverity::Ok
+                && check.hint == Some("Health check path: /__axonyx/health")
         }));
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-melt" && check.message.contains("1 page route")

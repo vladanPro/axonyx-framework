@@ -95,6 +95,9 @@ Deployment checks should point at that same path:
 cargo ax doctor --deploy render
 ```
 
+That deploy check reports the production start command and the recommended
+health-check path.
+
 For Render, the recommended start command is:
 
 ```text

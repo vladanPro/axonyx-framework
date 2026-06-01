@@ -82,7 +82,8 @@ cargo ax doctor --deploy render
 ```
 
 The Render check recommends the same `--production-server` start command so
-local smoke and hosted deploys exercise the same server path.
+local smoke and hosted deploys exercise the same server path. It also reports
+the recommended health-check path: `/__axonyx/health`.
 
 Production preview exposes a stable health probe for hosted platforms and load
 balancers:
