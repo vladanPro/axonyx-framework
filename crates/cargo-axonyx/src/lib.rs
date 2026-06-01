@@ -44,8 +44,8 @@ const DOCS_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.13";
-const AXONYX_UI_VERSION: &str = "0.0.39";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.14";
+const AXONYX_UI_VERSION: &str = "0.0.40";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -7411,8 +7411,8 @@ fn resolve_package_asset_root(root: &Path, package_name: &str) -> Option<PathBuf
             return Some(app_vendor);
         }
 
-        return axonyx_ui_workspace_package_root(root)
-            .or_else(|| cargo_package_root(root, package_name));
+        return cargo_package_root(root, package_name)
+            .or_else(|| axonyx_ui_workspace_package_root(root));
     }
 
     cargo_package_root(root, package_name)
@@ -9636,7 +9636,8 @@ route GET "/api/posts"
         let ui_root = workspace.join("axonyx-ui");
         let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
 
-        fs::create_dir_all(&root).expect("app dir should exist");
+        fs::create_dir_all(root.join("src")).expect("app src dir should exist");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("app target should write");
         write_test_axonyx_ui_package(&ui_root, "Cargo UI", "body { color: silver; }");
         fs::write(
             root.join("Cargo.toml"),
@@ -9665,13 +9666,58 @@ axonyx-ui = {{ path = "{ui_path}" }}
     }
 
     #[test]
+    fn cargo_dependency_asset_wins_over_framework_workspace_vendor() {
+        let workspace = make_temp_dir("package-asset-cargo-before-framework-vendor");
+        let root = workspace.join("axonyx-site");
+        let cargo_ui_root = workspace.join("axonyx-ui");
+        let framework_vendor_ui_root = workspace
+            .join("axonyx-framework")
+            .join("vendor")
+            .join("axonyx-ui");
+        let ui_path = cargo_ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(root.join("src")).expect("app src dir should exist");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("app target should write");
+        write_test_axonyx_ui_package(&cargo_ui_root, "Cargo UI", "body { color: cargo-silver; }");
+        write_test_axonyx_ui_package(
+            &framework_vendor_ui_root,
+            "Vendored UI",
+            "body { color: stale-vendor; }",
+        );
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("app cargo manifest should write");
+
+        let asset = load_package_asset(&root, "/_ax/pkg/axonyx-ui/index.css")
+            .expect("package asset lookup should work")
+            .expect("package asset should exist");
+
+        assert_eq!(asset.body, b"body { color: cargo-silver; }");
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn loads_package_js_asset_from_cargo_dependency() {
         let workspace = make_temp_dir("package-js-asset-cargo");
         let root = workspace.join("axonyx-site");
         let ui_root = workspace.join("axonyx-ui");
         let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
 
-        fs::create_dir_all(&root).expect("app dir should exist");
+        fs::create_dir_all(root.join("src")).expect("app src dir should exist");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("app target should write");
         write_test_axonyx_ui_package(&ui_root, "Cargo UI", "body { color: silver; }");
         fs::write(
             root.join("Cargo.toml"),
@@ -10448,7 +10494,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.39\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.40\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -10475,7 +10521,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.13"
+axonyx-runtime = "0.1.14"
 
 [dependencies.axonyx-ui]
 path = "vendor/axonyx-ui"
@@ -10533,7 +10579,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.13"
+axonyx-runtime = "0.1.14"
 
 [dependencies.axonyx-ui]
 path = "vendor/axonyx-ui"
@@ -10623,7 +10669,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.13"
+axonyx-runtime = "0.1.14"
 "#,
         )
         .expect("cargo manifest should write");
@@ -10722,7 +10768,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.13"
+axonyx-runtime = "0.1.14"
 "#,
         )
         .expect("cargo manifest should write");
@@ -10844,8 +10890,8 @@ serde_json = "1"
         );
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
-        assert!(updated.contains("axonyx-runtime = \"0.1.13\""));
-        assert!(updated.contains("version = \"0.0.39\""));
+        assert!(updated.contains("axonyx-runtime = \"0.1.14\""));
+        assert!(updated.contains("version = \"0.0.40\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -11030,7 +11076,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.13"
+axonyx-runtime = "0.1.14"
 "#,
         )
         .expect("cargo manifest should write");
@@ -11064,7 +11110,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.13"
+axonyx-runtime = "0.1.14"
 "#,
         )
         .expect("cargo manifest should write");
@@ -12208,6 +12254,8 @@ page Home
         let ui_root = workspace.join("axonyx-ui");
 
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("src")).expect("app src dir should exist");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("app target should write");
         fs::create_dir_all(ui_root.join("src/foundry")).expect("ui foundry dir should exist");
         fs::write(
             ui_root.join("src/foundry/SectionCard.ax"),
@@ -12390,6 +12438,8 @@ page Home
         let cargo_ui_path = cargo_ui_root.to_string_lossy().replace('\\', "\\\\");
 
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("src")).expect("app src dir should exist");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("app target should write");
         fs::create_dir_all(cargo_ui_root.join("src/foundry")).expect("cargo ui dir should exist");
         fs::create_dir_all(vendor_ui_root.join("src/foundry")).expect("vendor ui dir should exist");
         fs::write(

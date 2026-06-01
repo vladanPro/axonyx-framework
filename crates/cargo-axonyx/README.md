@@ -120,8 +120,8 @@ foundation for live state patch streams, CMS events, and build/runtime signals.
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.1.12"
-axonyx-ui = "0.0.39"
+axonyx-runtime = "0.1.14"
+axonyx-ui = "0.0.40"
 ```
 
 Local path and package override flows are still supported for framework development and UI dogfooding.
