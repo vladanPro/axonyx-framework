@@ -192,6 +192,10 @@ try {
     throw "Expected server log to use tokio transport"
   }
 
+  if ($serverLog -notmatch "Tokio graceful shutdown is enabled") {
+    throw "Expected server log to report Tokio graceful shutdown"
+  }
+
   if ($serverLog -notmatch "Request read timeout: 2 seconds") {
     throw "Expected server log to report request read timeout"
   }

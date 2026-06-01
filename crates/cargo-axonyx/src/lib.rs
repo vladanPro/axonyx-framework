@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -4509,6 +4510,9 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     if production_server {
         println!("Production server preview is enabled.");
     }
+    if transport == ServerTransport::Tokio {
+        println!("Tokio graceful shutdown is enabled for Ctrl+C.");
+    }
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
     );
@@ -6783,21 +6787,50 @@ async fn serve_tokio(
     config: AxServerConfig,
     state: Arc<DevServerState>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    serve_tokio_until(config, state, tokio_shutdown_signal()).await
+}
+
+async fn serve_tokio_until<S>(
+    config: AxServerConfig,
+    state: Arc<DevServerState>,
+    shutdown: S,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: Future<Output = ()>,
+{
     let bind = config.bind_addr();
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("failed to bind Axonyx Tokio server at {bind}"))?;
+    tokio::pin!(shutdown);
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        let state = Arc::clone(&state);
-        let mode = config.mode;
-
-        tokio::spawn(async move {
-            if let Err(error) = handle_tokio_connection(stream, state, mode).await {
-                eprintln!("Axonyx {} Tokio server error: {error:#}", mode.label());
+        tokio::select! {
+            _ = &mut shutdown => {
+                println!("Axonyx {} Tokio server shutdown signal received.", config.mode.label());
+                break;
             }
-        });
+
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let state = Arc::clone(&state);
+                let mode = config.mode;
+
+                tokio::spawn(async move {
+                    if let Err(error) = handle_tokio_connection(stream, state, mode).await {
+                        eprintln!("Axonyx {} Tokio server error: {error:#}", mode.label());
+                    }
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn tokio_shutdown_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        eprintln!("Axonyx shutdown signal listener failed: {error}");
     }
 }
 
@@ -11463,6 +11496,27 @@ axonyx-runtime = "0.1.0"
         assert!(
             parse_request_timeout_seconds_value(&toml::Value::String("7".to_string())).is_err()
         );
+    }
+
+    #[test]
+    fn tokio_server_can_shutdown_without_request() {
+        let root = make_temp_dir("tokio-server-shutdown");
+        let state = Arc::new(DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+        });
+        let config = AxServerConfig::new("127.0.0.1", 0, AxServerMode::Start);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("tokio runtime should build");
+
+        runtime
+            .block_on(serve_tokio_until(config, state, async {}))
+            .expect("tokio server should shut down cleanly");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]

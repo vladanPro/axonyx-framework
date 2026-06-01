@@ -78,7 +78,9 @@ cargo ax run start --production-server --host 0.0.0.0 --port 3000
 
 `--production-server` is the user-facing preview flag for the future production
 server path. It currently selects the Tokio transport underneath while
-preserving the same route, loader, action, page, and state model.
+preserving the same route, loader, action, page, and state model. The Tokio
+transport also installs a Ctrl+C shutdown listener so the accept loop can exit
+cleanly during local stops and hosted deploy restarts.
 
 Deployment checks should point at that same path:
 

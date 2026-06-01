@@ -71,7 +71,8 @@ cargo ax run start --production-server --host 0.0.0.0 --port 3000
 
 Today this selects the Tokio transport while keeping the public authoring model
 unchanged. The lower-level `--transport tokio` flag remains available for
-transport testing.
+transport testing. The Tokio path also installs a Ctrl+C shutdown listener so
+hosted starts and local previews can stop cleanly.
 
 For Render-style deployment checks:
 
