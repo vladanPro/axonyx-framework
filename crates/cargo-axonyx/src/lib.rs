@@ -6,7 +6,10 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -52,6 +55,7 @@ const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 2;
+const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -385,6 +389,42 @@ struct PrerenderRoute {
 struct DevServerState {
     root: PathBuf,
     preview_store: Mutex<AxPreviewStore>,
+}
+
+#[derive(Clone)]
+struct TokioConnectionTracker {
+    active: Arc<AtomicUsize>,
+    grace_period: Duration,
+}
+
+impl TokioConnectionTracker {
+    fn new(grace_period: Duration) -> Self {
+        Self {
+            active: Arc::new(AtomicUsize::new(0)),
+            grace_period,
+        }
+    }
+
+    fn track(&self) -> TokioConnectionGuard {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        TokioConnectionGuard {
+            active: Arc::clone(&self.active),
+        }
+    }
+
+    fn active_count(&self) -> usize {
+        self.active.load(Ordering::SeqCst)
+    }
+}
+
+struct TokioConnectionGuard {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for TokioConnectionGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 struct StdNetAxServer {
@@ -4512,6 +4552,10 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     }
     if transport == ServerTransport::Tokio {
         println!("Tokio graceful shutdown is enabled for Ctrl+C.");
+        println!(
+            "Shutdown grace period: {} seconds.",
+            DEFAULT_SHUTDOWN_GRACE_SECONDS
+        );
     }
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
@@ -6802,6 +6846,7 @@ where
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("failed to bind Axonyx Tokio server at {bind}"))?;
+    let tracker = TokioConnectionTracker::new(Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS));
     tokio::pin!(shutdown);
 
     loop {
@@ -6815,8 +6860,10 @@ where
                 let (stream, _) = accepted?;
                 let state = Arc::clone(&state);
                 let mode = config.mode;
+                let connection_guard = tracker.track();
 
                 tokio::spawn(async move {
+                    let _connection_guard = connection_guard;
                     if let Err(error) = handle_tokio_connection(stream, state, mode).await {
                         eprintln!("Axonyx {} Tokio server error: {error:#}", mode.label());
                     }
@@ -6825,7 +6872,44 @@ where
         }
     }
 
+    wait_for_tokio_connections(&tracker).await;
     Ok(())
+}
+
+async fn wait_for_tokio_connections(tracker: &TokioConnectionTracker) {
+    let active = tracker.active_count();
+    if active == 0 {
+        println!("No active Tokio connections to drain.");
+        return;
+    }
+
+    println!(
+        "Waiting up to {} seconds for {} active Tokio connection{} to finish.",
+        tracker.grace_period.as_secs(),
+        active,
+        if active == 1 { "" } else { "s" }
+    );
+
+    let drained = tokio::time::timeout(tracker.grace_period, async {
+        loop {
+            if tracker.active_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+
+    if drained {
+        println!("All active Tokio connections drained.");
+    } else {
+        println!(
+            "Shutdown grace period elapsed with {} active Tokio connection{}.",
+            tracker.active_count(),
+            if tracker.active_count() == 1 { "" } else { "s" }
+        );
+    }
 }
 
 async fn tokio_shutdown_signal() {
@@ -11517,6 +11601,27 @@ axonyx-runtime = "0.1.0"
             .expect("tokio server should shut down cleanly");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn tokio_shutdown_waits_for_active_connection_guard() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("tokio runtime should build");
+
+        runtime.block_on(async {
+            let tracker = TokioConnectionTracker::new(Duration::from_millis(200));
+            let guard = tracker.track();
+
+            tokio::spawn(async move {
+                let _guard = guard;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            });
+
+            wait_for_tokio_connections(&tracker).await;
+            assert_eq!(tracker.active_count(), 0);
+        });
     }
 
     #[test]
