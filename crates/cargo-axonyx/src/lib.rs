@@ -1088,7 +1088,7 @@ fn doctor_render_deploy_checks(root: &Path) -> Vec<DoctorCheck> {
         message: "Render target expects a Web Service with Cargo build/start commands."
             .to_string(),
         hint: Some(
-            "Build command: cargo ax build --clean; start command: cargo ax run start --host 0.0.0.0 --port $PORT",
+            "Build command: cargo ax build --clean; start command: cargo ax run start --production-server --host 0.0.0.0 --port $PORT",
         ),
     });
 
@@ -1099,6 +1099,13 @@ fn doctor_render_deploy_checks(root: &Path) -> Vec<DoctorCheck> {
             "`cargo ax run start` is PORT-aware when --port is omitted or passed from the platform."
                 .to_string(),
         hint: Some("Render start command should pass --port $PORT for explicit hosted binding."),
+    });
+
+    checks.push(DoctorCheck {
+        code: "deploy-render-production-server",
+        severity: DoctorSeverity::Ok,
+        message: "Render deploy should use the production-server preview path.".to_string(),
+        hint: Some("Use `cargo ax run start --production-server --host 0.0.0.0 --port $PORT`."),
     });
 
     checks.push(match configured_max_request_body_bytes(root) {
@@ -11165,10 +11172,19 @@ axonyx-runtime = "0.1.14"
         let checks = doctor_checks(&root, Some(DeployTarget::Render));
 
         assert!(checks.iter().any(|check| {
-            check.code == "deploy-render-service" && check.severity == DoctorSeverity::Ok
+            check.code == "deploy-render-service"
+                && check.severity == DoctorSeverity::Ok
+                && check
+                    .hint
+                    .is_some_and(|hint| hint.contains("--production-server"))
         }));
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-port" && check.severity == DoctorSeverity::Ok
+        }));
+        assert!(checks.iter().any(|check| {
+            check.code == "deploy-render-production-server"
+                && check.severity == DoctorSeverity::Ok
+                && check.message.contains("production-server")
         }));
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-melt" && check.message.contains("1 page route")

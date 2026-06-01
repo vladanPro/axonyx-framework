@@ -144,6 +144,7 @@ create-axonyx registry-site --yes --template site --runtime-source registry
 cd registry-site
 cargo ax check
 cargo ax doctor --deny-warnings
+cargo ax doctor --deploy render
 cargo ax build --clean
 cargo ax run dev
 cargo ax run start --production-server --host 0.0.0.0 --port 3000

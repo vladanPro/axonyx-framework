@@ -68,6 +68,18 @@ cargo ax run start --production-server --host 0.0.0.0 --port 3000
 server path. It currently selects the Tokio transport underneath while
 preserving the same route, loader, action, page, and state model.
 
+Deployment checks should point at that same path:
+
+```text
+cargo ax doctor --deploy render
+```
+
+For Render, the recommended start command is:
+
+```text
+cargo ax run start --production-server --host 0.0.0.0 --port $PORT
+```
+
 and the app should still be authored through:
 
 - `app/**/page.ax`

@@ -73,6 +73,15 @@ Today this selects the Tokio transport while keeping the public authoring model
 unchanged. The lower-level `--transport tokio` flag remains available for
 transport testing.
 
+For Render-style deployment checks:
+
+```bash
+cargo ax doctor --deploy render
+```
+
+The Render check recommends the same `--production-server` start command so
+local smoke and hosted deploys exercise the same server path.
+
 This is intentionally a runtime choice, not an authoring burden: `.ax` pages,
 loaders, actions, and state patches keep the same shape while Axonyx chooses the
 transport layer underneath.
