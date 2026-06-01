@@ -25,6 +25,92 @@ $serverProcess = $null
 $stdout = Join-Path $WorkDir "server.out.log"
 $stderr = Join-Path $WorkDir "server.err.log"
 
+function Invoke-SmokeRequest {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $Url,
+
+    [string] $Method = "GET",
+
+    [int] $ExpectedStatus = 200,
+
+    [string] $Body = "",
+
+    [string] $ContentType = "application/x-www-form-urlencoded",
+
+    [string] $Expect = "",
+
+    [string] $ExpectHeader = "",
+
+    [string] $ExpectHeaderValue = ""
+  )
+
+  $request = [System.Net.HttpWebRequest]::Create($Url)
+  $request.Method = $Method
+  $request.AllowAutoRedirect = $false
+
+  if (![string]::IsNullOrEmpty($Body)) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+    $request.ContentType = $ContentType
+    $request.ContentLength = $bytes.Length
+    $stream = $request.GetRequestStream()
+    try {
+      $stream.Write($bytes, 0, $bytes.Length)
+    } finally {
+      $stream.Dispose()
+    }
+  }
+
+  $response = $null
+  try {
+    $response = $request.GetResponse()
+  } catch [System.Net.WebException] {
+    if ($_.Exception.Response -eq $null) {
+      throw
+    }
+    $response = $_.Exception.Response
+  }
+
+  try {
+    $status = [int] $response.StatusCode
+    if ($status -ne $ExpectedStatus) {
+      throw "Expected HTTP $ExpectedStatus from $Url, got $status"
+    }
+
+    $text = ""
+    if ($Method -ne "HEAD") {
+      $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+      try {
+        $text = $reader.ReadToEnd()
+      } finally {
+        $reader.Dispose()
+      }
+    }
+
+    if (![string]::IsNullOrEmpty($Expect) -and $text -notmatch $Expect) {
+      throw "Expected response body from $Url to match '$Expect'"
+    }
+
+    if (![string]::IsNullOrEmpty($ExpectHeader)) {
+      $actual = $response.Headers[$ExpectHeader]
+      if ([string]::IsNullOrEmpty($actual)) {
+        throw "Expected response header '$ExpectHeader' from $Url"
+      }
+      if (![string]::IsNullOrEmpty($ExpectHeaderValue) -and $actual -notmatch $ExpectHeaderValue) {
+        throw "Expected response header '$ExpectHeader' from $Url to match '$ExpectHeaderValue', got '$actual'"
+      }
+    }
+
+    return @{
+      Status = $status
+      Body = $text
+      Headers = $response.Headers
+    }
+  } finally {
+    $response.Dispose()
+  }
+}
+
 Write-Host "Axonyx production server smoke"
 Write-Host "  template: $Template"
 Write-Host "  port:     $Port"
@@ -69,12 +155,14 @@ try {
 
   $serverProcess = Start-Process -FilePath "cargo" -ArgumentList $args -WorkingDirectory $appRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
 
-  $url = "http://127.0.0.1:$Port/"
-  $response = $null
+  $baseUrl = "http://127.0.0.1:$Port"
+  $url = "$baseUrl/"
+  $ready = $false
   for ($attempt = 0; $attempt -lt 30; $attempt++) {
     Start-Sleep -Milliseconds 300
     try {
-      $response = Invoke-WebRequest -UseBasicParsing $url
+      Invoke-SmokeRequest -Url $url -ExpectedStatus 200 -Expect "Axonyx" | Out-Null
+      $ready = $true
       break
     } catch {
       if ($serverProcess.HasExited) {
@@ -83,17 +171,17 @@ try {
     }
   }
 
-  if ($null -eq $response) {
+  if (!$ready) {
     throw "Production server did not respond at $url"
   }
 
-  if ($response.StatusCode -ne 200) {
-    throw "Expected HTTP 200 from $url, got $($response.StatusCode)"
-  }
-
-  if ($response.Content -notmatch "Axonyx") {
-    throw "Expected response body to contain Axonyx"
-  }
+  Invoke-SmokeRequest -Url "$baseUrl/posts" -ExpectedStatus 200 -Expect "Posts" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/favicon.svg" -ExpectedStatus 200 -ExpectHeader "Content-Type" -ExpectHeaderValue "image/svg\+xml" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/_ax/pkg/axonyx-ui/index.css" -ExpectedStatus 200 -Expect "@import|--ax-" -ExpectHeader "Content-Type" -ExpectHeaderValue "text/css" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/api/posts" -ExpectedStatus 200 -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/api/posts" -Method "POST" -Body "title=Smoke+Post&featured=true" -ExpectedStatus 200 -Expect "Smoke Post" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/" -Method "HEAD" -ExpectedStatus 200 | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/definitely-missing" -ExpectedStatus 404 -Expect "not found|Not found|Back to home" | Out-Null
 
   $serverLog = Get-Content -LiteralPath $stdout -Raw
   if ($serverLog -notmatch "Production server preview is enabled") {
