@@ -55,6 +55,7 @@ const AXONYX_UI_VERSION: &str = "0.0.40";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
+const AXONYX_UI_PACKAGE_NAME: &str = "axonyx-ui";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 2;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
@@ -5164,11 +5165,14 @@ fn copy_public_assets_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
 }
 
 fn copy_package_assets_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
-    let Some(package_root) = resolve_package_asset_root(root, "axonyx-ui") else {
+    let Some(package_root) = resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME) else {
         return Ok(());
     };
 
-    let target = output_dir.join("_ax").join("pkg").join("axonyx-ui");
+    let target = output_dir
+        .join("_ax")
+        .join("pkg")
+        .join(AXONYX_UI_PACKAGE_NAME);
 
     let css_root = package_css_root(&package_root);
     if css_root.exists() {
@@ -5179,6 +5183,26 @@ fn copy_package_assets_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
     if js_root.exists() {
         copy_dir_all_filtered(&js_root, &target.join("js"), |_| false)?;
     }
+
+    copy_hashed_package_entry(&package_css_entry(&package_root), &target)?;
+    copy_hashed_package_entry(&package_js_entry(&package_root), &target.join("js"))?;
+
+    Ok(())
+}
+
+fn copy_hashed_package_entry(entry: &Path, target_dir: &Path) -> Result<()> {
+    if !entry.exists() || !entry.is_file() {
+        return Ok(());
+    }
+
+    let Some(file_name) = hashed_asset_file_name(entry)? else {
+        return Ok(());
+    };
+
+    fs::create_dir_all(target_dir)
+        .with_context(|| format!("failed to create '{}'", target_dir.display()))?;
+    fs::copy(entry, target_dir.join(file_name))
+        .with_context(|| format!("failed to copy hashed package asset '{}'", entry.display()))?;
 
     Ok(())
 }
@@ -7994,7 +8018,7 @@ fn load_package_asset(root: &Path, request_path: &str) -> Result<Option<StaticAs
 }
 
 fn resolve_package_asset_root(root: &Path, package_name: &str) -> Option<PathBuf> {
-    if package_name == "axonyx-ui" {
+    if package_name == AXONYX_UI_PACKAGE_NAME {
         let app_vendor = root.join("vendor").join("axonyx-ui");
         if app_vendor.exists() {
             return Some(app_vendor);
@@ -8057,9 +8081,10 @@ fn package_asset_path(package_root: &Path, relative: &str) -> Option<PathBuf> {
     let js_entry = package_js_entry(package_root);
 
     if relative_path.components().count() == 1
-        && css_entry
-            .file_name()
-            .is_some_and(|file_name| file_name == relative_path.as_os_str())
+        && css_entry.file_name().is_some_and(|file_name| {
+            file_name == relative_path.as_os_str()
+                || is_hashed_entry_file_name(&relative_path, file_name)
+        })
     {
         return Some(css_entry);
     }
@@ -8067,9 +8092,10 @@ fn package_asset_path(package_root: &Path, relative: &str) -> Option<PathBuf> {
     if relative_path.components().count() == 2
         && relative_path.starts_with("js")
         && js_entry.file_name().is_some_and(|file_name| {
-            relative_path
-                .file_name()
-                .is_some_and(|relative_file| file_name == relative_file)
+            relative_path.file_name().is_some_and(|relative_file| {
+                file_name == relative_file
+                    || is_hashed_entry_file_name(Path::new(relative_file), file_name)
+            })
         })
     {
         return Some(js_entry);
@@ -8080,6 +8106,58 @@ fn package_asset_path(package_root: &Path, relative: &str) -> Option<PathBuf> {
     }
 
     Some(css_root.join(relative_path))
+}
+
+fn is_hashed_entry_file_name(relative_path: &Path, entry_file_name: &std::ffi::OsStr) -> bool {
+    let Some(relative_name) = relative_path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(entry_name) = entry_file_name.to_str() else {
+        return false;
+    };
+    let Some((stem, extension)) = entry_name.rsplit_once('.') else {
+        return false;
+    };
+
+    let prefix = format!("{stem}.");
+    let suffix = format!(".{extension}");
+    if !relative_name.starts_with(&prefix) || !relative_name.ends_with(&suffix) {
+        return false;
+    }
+
+    let hash = &relative_name[prefix.len()..relative_name.len() - suffix.len()];
+    hash.len() == 12 && hash.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn hashed_asset_file_name(entry: &Path) -> Result<Option<OsString>> {
+    if !entry.exists() || !entry.is_file() {
+        return Ok(None);
+    }
+
+    let Some(stem) = entry.file_stem().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+    let Some(extension) = entry.extension().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+
+    let body = fs::read(entry).with_context(|| {
+        format!(
+            "failed to read package asset '{}' for hashing",
+            entry.display()
+        )
+    })?;
+    let hash = short_content_hash(&body);
+    Ok(Some(OsString::from(format!("{stem}.{hash}.{extension}"))))
+}
+
+fn short_content_hash(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}").chars().take(12).collect()
 }
 
 fn package_css_root(package_root: &Path) -> PathBuf {
@@ -8365,7 +8443,7 @@ fn apply_package_use_assets(
         return html;
     }
 
-    let package_available = resolve_package_asset_root(root, "axonyx-ui").is_some()
+    let package_available = resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME).is_some()
         || load_package_asset(root, AXONYX_UI_STYLESHEET_HREF)
             .ok()
             .flatten()
@@ -8374,8 +8452,53 @@ fn apply_package_use_assets(
         return html;
     }
 
-    let html = ensure_head_stylesheet(&html, AXONYX_UI_STYLESHEET_HREF);
-    ensure_head_script(&html, AXONYX_UI_SCRIPT_HREF)
+    let (stylesheet_href, script_href) = axonyx_ui_asset_hrefs(root);
+    let html = ensure_head_stylesheet(&html, &stylesheet_href);
+    ensure_head_script(&html, &script_href)
+}
+
+fn axonyx_ui_asset_hrefs(root: &Path) -> (String, String) {
+    let Some(package_root) = resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME) else {
+        return (
+            AXONYX_UI_STYLESHEET_HREF.to_string(),
+            AXONYX_UI_SCRIPT_HREF.to_string(),
+        );
+    };
+
+    let stylesheet = hashed_package_asset_href(
+        AXONYX_UI_PACKAGE_NAME,
+        "",
+        &package_css_entry(&package_root),
+        AXONYX_UI_STYLESHEET_HREF,
+    );
+    let script = hashed_package_asset_href(
+        AXONYX_UI_PACKAGE_NAME,
+        "js",
+        &package_js_entry(&package_root),
+        AXONYX_UI_SCRIPT_HREF,
+    );
+
+    (stylesheet, script)
+}
+
+fn hashed_package_asset_href(
+    package_name: &str,
+    prefix: &str,
+    entry: &Path,
+    fallback: &str,
+) -> String {
+    let Some(file_name) = hashed_asset_file_name(entry).ok().flatten() else {
+        return fallback.to_string();
+    };
+
+    if prefix.is_empty() {
+        format!("/_ax/pkg/{package_name}/{}", file_name.to_string_lossy())
+    } else {
+        format!(
+            "/_ax/pkg/{package_name}/{prefix}/{}",
+            file_name.to_string_lossy()
+        )
+    }
 }
 
 fn source_uses_package(source: &str, package: &str) -> bool {
@@ -10362,6 +10485,46 @@ axonyx-ui = {{ path = "{ui_path}" }}
     }
 
     #[test]
+    fn loads_hashed_package_asset_from_cargo_dependency() {
+        let workspace = make_temp_dir("hashed-package-asset-cargo");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(root.join("src")).expect("app src dir should exist");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("app target should write");
+        write_test_axonyx_ui_package(&ui_root, "Cargo UI", "body { color: silver; }");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("app cargo manifest should write");
+        let file_name = hashed_asset_file_name(&ui_root.join("src/css/index.css"))
+            .expect("asset hash should compute")
+            .expect("hashed file name should exist");
+        let request_path = format!("/_ax/pkg/axonyx-ui/{}", file_name.to_string_lossy());
+
+        let asset = load_package_asset(&root, &request_path)
+            .expect("package asset lookup should work")
+            .expect("package asset should exist");
+
+        assert_eq!(asset.content_type, "text/css; charset=utf-8");
+        assert_eq!(asset.body, b"body { color: silver; }");
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn cargo_dependency_asset_wins_over_framework_workspace_vendor() {
         let workspace = make_temp_dir("package-asset-cargo-before-framework-vendor");
         let root = workspace.join("axonyx-site");
@@ -10686,12 +10849,32 @@ page Home
                 .expect("package js should copy"),
             "window.__axonyxUiRuntime = true;"
         );
+        let css_file_name = hashed_asset_file_name(&ui_root.join("src/css/index.css"))
+            .expect("css hash should compute")
+            .expect("css hashed file name should exist");
+        let js_file_name = hashed_asset_file_name(&ui_root.join("src/js/index.js"))
+            .expect("js hash should compute")
+            .expect("js hashed file name should exist");
+        assert_eq!(
+            fs::read_to_string(root.join("dist/_ax/pkg/axonyx-ui").join(&css_file_name))
+                .expect("hashed package css should copy"),
+            "body { color: gold; }"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("dist/_ax/pkg/axonyx-ui/js").join(&js_file_name))
+                .expect("hashed package js should copy"),
+            "window.__axonyxUiRuntime = true;"
+        );
         let html = fs::read_to_string(root.join("dist/index.html"))
             .expect("static home page should write");
-        assert!(html.contains(r#"<link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css">"#));
-        assert!(
-            html.contains(r#"<script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true"></script>"#)
-        );
+        assert!(html.contains(&format!(
+            r#"<link rel="stylesheet" href="/_ax/pkg/axonyx-ui/{}">"#,
+            css_file_name.to_string_lossy()
+        )));
+        assert!(html.contains(&format!(
+            r#"<script src="/_ax/pkg/axonyx-ui/js/{}" defer="true"></script>"#,
+            js_file_name.to_string_lossy()
+        )));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -13368,11 +13551,21 @@ page Home
             .expect("route should exist");
         let state = test_dev_state(&root);
         let html = render_route_html(&state, &route).expect("route should render");
+        let css_file_name = hashed_asset_file_name(&ui_root.join("src/css/index.css"))
+            .expect("css hash should compute")
+            .expect("css hashed file name should exist");
+        let js_file_name = hashed_asset_file_name(&ui_root.join("src/js/index.js"))
+            .expect("js hash should compute")
+            .expect("js hashed file name should exist");
 
-        assert!(html.contains(r#"<link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css">"#));
-        assert!(
-            html.contains(r#"<script src="/_ax/pkg/axonyx-ui/js/index.js" defer="true"></script>"#)
-        );
+        assert!(html.contains(&format!(
+            r#"<link rel="stylesheet" href="/_ax/pkg/axonyx-ui/{}">"#,
+            css_file_name.to_string_lossy()
+        )));
+        assert!(html.contains(&format!(
+            r#"<script src="/_ax/pkg/axonyx-ui/js/{}" defer="true"></script>"#,
+            js_file_name.to_string_lossy()
+        )));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
