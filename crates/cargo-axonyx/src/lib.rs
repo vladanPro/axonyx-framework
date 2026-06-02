@@ -59,6 +59,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 2;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+const IMMUTABLE_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -6905,11 +6906,11 @@ fn handle_http_request(
 
     if request.method == "GET" {
         if let Some(asset) = load_package_asset(&state.root, &request.target)? {
-            return Ok(AxHttpResponse::bytes(200, asset.content_type, asset.body).with_no_store());
+            return Ok(cacheable_asset_response(asset));
         }
 
         if let Some(asset) = load_public_asset(&state.root, &request.target)? {
-            return Ok(AxHttpResponse::bytes(200, asset.content_type, asset.body).with_no_store());
+            return Ok(cacheable_asset_response(asset));
         }
     }
 
@@ -7930,6 +7931,11 @@ fn parse_form_body(body: &[u8]) -> std::collections::BTreeMap<String, String> {
 
 fn redirect_response(status: u16, location: &str) -> AxHttpResponse {
     AxHttpResponse::redirect_with_status(status, location).with_no_store()
+}
+
+fn cacheable_asset_response(asset: StaticAsset) -> AxHttpResponse {
+    AxHttpResponse::bytes(200, asset.content_type, asset.body)
+        .with_header("Cache-Control", IMMUTABLE_ASSET_CACHE_CONTROL)
 }
 
 fn load_public_asset(root: &Path, request_path: &str) -> Result<Option<StaticAsset>> {
@@ -10284,6 +10290,31 @@ route GET "/api/posts"
     }
 
     #[test]
+    fn public_asset_response_uses_immutable_cache_header() {
+        let root = make_temp_dir("public-cache");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+        fs::write(root.join("public/logo.svg"), "<svg></svg>").expect("asset should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/logo.svg".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.header_value("Cache-Control"),
+            Some(IMMUTABLE_ASSET_CACHE_CONTROL)
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn missing_public_asset_returns_none() {
         let root = make_temp_dir("missing-public");
 
@@ -12316,6 +12347,7 @@ axonyx-runtime = "0.1.0"
             handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
         let status = response.status;
         let content_type = response.content_type.clone();
+        assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
         let body = serde_json::from_slice::<serde_json::Value>(&response.body.into_bytes())
             .expect("health response should be json");
 
