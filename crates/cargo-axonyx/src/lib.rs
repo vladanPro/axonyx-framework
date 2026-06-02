@@ -392,6 +392,15 @@ struct PrerenderRoute {
 struct DevServerState {
     root: PathBuf,
     preview_store: Mutex<AxPreviewStore>,
+    runtime_config: AxServerRuntimeConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AxServerRuntimeConfig {
+    max_body_bytes: usize,
+    request_timeout: Duration,
+    shutdown_grace: Duration,
+    max_connections: usize,
 }
 
 #[derive(Clone)]
@@ -448,6 +457,28 @@ impl Drop for TokioConnectionGuard {
     }
 }
 
+impl AxServerRuntimeConfig {
+    fn from_root(root: &Path) -> std::result::Result<Self, String> {
+        Ok(Self {
+            max_body_bytes: configured_max_request_body_bytes(root)?,
+            request_timeout: configured_request_timeout_duration(root)?,
+            shutdown_grace: configured_shutdown_grace_duration(root)?,
+            max_connections: configured_max_connections(root)?,
+        })
+    }
+}
+
+impl Default for AxServerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_body_bytes: MAX_REQUEST_BODY_BYTES,
+            request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
+            shutdown_grace: Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS),
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+        }
+    }
+}
+
 struct StdNetAxServer {
     config: AxServerConfig,
     state: Arc<DevServerState>,
@@ -456,18 +487,12 @@ struct StdNetAxServer {
 struct TokioAxServer {
     config: AxServerConfig,
     state: Arc<DevServerState>,
-    max_body_bytes: usize,
-    request_timeout: Duration,
-    shutdown_grace: Duration,
-    max_connections: usize,
 }
 
 #[derive(Clone)]
 struct AxumServerState {
     dev: Arc<DevServerState>,
     mode: AxServerMode,
-    max_body_bytes: usize,
-    request_timeout: Duration,
     tracker: TokioConnectionTracker,
 }
 
@@ -517,22 +542,8 @@ impl AxServer for TokioAxServer {
             .context("failed to build Tokio runtime")?;
         let config = self.config.clone();
         let state = Arc::clone(&self.state);
-        let max_body_bytes = self.max_body_bytes;
-        let request_timeout = self.request_timeout;
-        let shutdown_grace = self.shutdown_grace;
-        let max_connections = self.max_connections;
 
-        runtime.block_on(async move {
-            serve_axum_tokio(
-                config,
-                state,
-                max_body_bytes,
-                request_timeout,
-                shutdown_grace,
-                max_connections,
-            )
-            .await
-        })?;
+        runtime.block_on(async move { serve_axum_tokio(config, state).await })?;
         Ok(())
     }
 }
@@ -4649,10 +4660,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     }
 
     let backend_status = compile_backend_from_app_root(&root)?;
-    let max_body_bytes = configured_max_request_body_bytes(&root).map_err(anyhow::Error::msg)?;
-    let request_timeout = configured_request_timeout_duration(&root).map_err(anyhow::Error::msg)?;
-    let shutdown_grace = configured_shutdown_grace_duration(&root).map_err(anyhow::Error::msg)?;
-    let max_connections = configured_max_connections(&root).map_err(anyhow::Error::msg)?;
+    let runtime_config = AxServerRuntimeConfig::from_root(&root).map_err(anyhow::Error::msg)?;
     let env_port = std::env::var("PORT").ok();
     let port = resolve_server_port(mode, args.port, env_port.as_deref())?;
     let uses_env_port = mode == AxServerMode::Start
@@ -4669,6 +4677,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(preview_store),
+        runtime_config,
     });
 
     print_backend_build_status(&backend_status);
@@ -4687,18 +4696,21 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
         println!("Tokio graceful shutdown is enabled for Ctrl+C.");
         println!(
             "Shutdown grace period: {} seconds.",
-            shutdown_grace.as_secs()
+            runtime_config.shutdown_grace.as_secs()
         );
-        println!("Tokio max connections: {max_connections}.");
+        println!("Tokio max connections: {}.", runtime_config.max_connections);
     }
     println!(
         "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
     );
-    println!("Request body limit: {}", format_bytes(max_body_bytes));
+    println!(
+        "Request body limit: {}",
+        format_bytes(runtime_config.max_body_bytes)
+    );
     println!(
         "Request read timeout: {} second{}",
-        request_timeout.as_secs(),
-        if request_timeout.as_secs() == 1 {
+        runtime_config.request_timeout.as_secs(),
+        if runtime_config.request_timeout.as_secs() == 1 {
             ""
         } else {
             "s"
@@ -4724,10 +4736,6 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
             let server = TokioAxServer {
                 config: server_config,
                 state: shared_state,
-                max_body_bytes,
-                request_timeout,
-                shutdown_grace,
-                max_connections,
             };
             server.serve().map_err(|error| anyhow::anyhow!("{error}"))
         }
@@ -4856,6 +4864,7 @@ fn build_static_site_from_app_root(
     let state = DevServerState {
         root: root.to_path_buf(),
         preview_store: Mutex::new(preview_store_from_content(root)?),
+        runtime_config: AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?,
     };
 
     for route in &static_routes {
@@ -6841,15 +6850,11 @@ fn handle_connection(
     state: &DevServerState,
     mode: AxServerMode,
 ) -> Result<()> {
-    let request_timeout =
-        configured_request_timeout_duration(&state.root).map_err(anyhow::Error::msg)?;
     stream
-        .set_read_timeout(Some(request_timeout))
+        .set_read_timeout(Some(state.runtime_config.request_timeout))
         .context("failed to set read timeout")?;
 
-    let max_body_bytes =
-        configured_max_request_body_bytes(&state.root).map_err(anyhow::Error::msg)?;
-    let Some(request) = read_http_request(&mut stream, max_body_bytes)? else {
+    let Some(request) = read_http_request(&mut stream, state.runtime_config.max_body_bytes)? else {
         return Ok(());
     };
 
@@ -6865,8 +6870,7 @@ fn handle_http_request(
     mode: AxServerMode,
     request: AxHttpRequest,
 ) -> Result<AxHttpResponse> {
-    let max_body_bytes =
-        configured_max_request_body_bytes(&state.root).map_err(anyhow::Error::msg)?;
+    let max_body_bytes = state.runtime_config.max_body_bytes;
     if request_body_exceeds_limit(&request, max_body_bytes) {
         return Ok(AxHttpResponse::text(
             413,
@@ -6989,30 +6993,13 @@ fn health_response(mode: AxServerMode) -> Result<AxHttpResponse> {
 async fn serve_axum_tokio(
     config: AxServerConfig,
     state: Arc<DevServerState>,
-    max_body_bytes: usize,
-    request_timeout: Duration,
-    shutdown_grace: Duration,
-    max_connections: usize,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    serve_axum_tokio_until(
-        config,
-        state,
-        max_body_bytes,
-        request_timeout,
-        shutdown_grace,
-        max_connections,
-        tokio_shutdown_signal(),
-    )
-    .await
+    serve_axum_tokio_until(config, state, tokio_shutdown_signal()).await
 }
 
 async fn serve_axum_tokio_until<S>(
     config: AxServerConfig,
     state: Arc<DevServerState>,
-    max_body_bytes: usize,
-    request_timeout: Duration,
-    shutdown_grace: Duration,
-    max_connections: usize,
     shutdown: S,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
@@ -7022,13 +7009,15 @@ where
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("failed to bind Axonyx Axum/Tokio server at {bind}"))?;
-    let tracker = TokioConnectionTracker::new(shutdown_grace, max_connections);
+    let runtime_config = state.runtime_config;
+    let tracker = TokioConnectionTracker::new(
+        runtime_config.shutdown_grace,
+        runtime_config.max_connections,
+    );
     let mode = config.mode;
     let router_state = AxumServerState {
         dev: state,
         mode,
-        max_body_bytes,
-        request_timeout,
         tracker: tracker.clone(),
     };
     let router = axum::Router::new()
@@ -7070,7 +7059,14 @@ async fn axum_tokio_handler(
         );
     };
 
-    match axum_request_to_dev_request(request, state.max_body_bytes, state.request_timeout).await {
+    let runtime_config = state.dev.runtime_config;
+    match axum_request_to_dev_request(
+        request,
+        runtime_config.max_body_bytes,
+        runtime_config.request_timeout,
+    )
+    .await
+    {
         Ok(request) => {
             let suppress_body = suppress_response_body_for_method(&request.method);
             let request = normalize_request_for_routing(request);
@@ -9249,6 +9245,14 @@ mod tests {
         let path = std::env::temp_dir().join(unique);
         fs::create_dir_all(&path).expect("temp dir should create");
         path
+    }
+
+    fn test_dev_state(root: &Path) -> DevServerState {
+        DevServerState {
+            root: root.to_path_buf(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+            runtime_config: AxServerRuntimeConfig::default(),
+        }
     }
 
     fn write_test_axonyx_ui_package(root: &Path, card_title: &str, css: &str) {
@@ -12132,10 +12136,7 @@ axonyx-runtime = "0.1.0"
     #[test]
     fn tokio_server_can_shutdown_without_request() {
         let root = make_temp_dir("tokio-server-shutdown");
-        let state = Arc::new(DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        });
+        let state = Arc::new(test_dev_state(&root));
         let config = AxServerConfig::new("127.0.0.1", 0, AxServerMode::Start);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
@@ -12159,10 +12160,7 @@ axonyx-runtime = "0.1.0"
     #[test]
     fn axum_tokio_server_can_shutdown_without_request() {
         let root = make_temp_dir("axum-tokio-server-shutdown");
-        let state = Arc::new(DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        });
+        let state = Arc::new(test_dev_state(&root));
         let config = AxServerConfig::new("127.0.0.1", 0, AxServerMode::Start);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
@@ -12171,15 +12169,7 @@ axonyx-runtime = "0.1.0"
             .expect("tokio runtime should build");
 
         runtime
-            .block_on(serve_axum_tokio_until(
-                config,
-                state,
-                MAX_REQUEST_BODY_BYTES,
-                Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
-                Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS),
-                DEFAULT_MAX_CONNECTIONS,
-                async {},
-            ))
+            .block_on(serve_axum_tokio_until(config, state, async {}))
             .expect("axum tokio server should shut down cleanly");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
@@ -12292,10 +12282,7 @@ axonyx-runtime = "0.1.0"
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let request = AxHttpRequest {
             method: "PUT".to_string(),
             target: "/".to_string(),
@@ -12317,10 +12304,7 @@ axonyx-runtime = "0.1.0"
         let root = make_temp_dir("health-endpoint");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let request = AxHttpRequest {
             method: "GET".to_string(),
             target: "/__axonyx/health?probe=1".to_string(),
@@ -12361,10 +12345,7 @@ axonyx-runtime = "0.1.0"
         let root = make_temp_dir("stream-probe-route");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener
             .local_addr()
@@ -12398,10 +12379,7 @@ axonyx-runtime = "0.1.0"
         let root = make_temp_dir("stream-html-probe-route");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener
             .local_addr()
@@ -12446,10 +12424,7 @@ axonyx-runtime = "0.1.0"
             "page NotFound\n<Copy>Custom Axonyx not found</Copy>\n",
         )
         .expect("not-found boundary should write");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener
             .local_addr()
@@ -12495,10 +12470,7 @@ axonyx-runtime = "0.1.0"
             "page Error\n<Copy>Custom Axonyx error</Copy>\n",
         )
         .expect("error boundary should write");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener
             .local_addr()
@@ -12557,10 +12529,7 @@ action SetTheme
             manifest.resolve_signal_key("root:theme:1").as_deref(),
             Some("page:root:theme:1")
         );
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener
             .local_addr()
@@ -12650,10 +12619,7 @@ page state count: Number = 0
             "page Home\n<Copy>Streamed from page route</Copy>\n",
         )
         .expect("page should write");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener
             .local_addr()
@@ -12696,10 +12662,7 @@ page state count: Number = 0
             "page Home\n<Copy>Config streamed page route</Copy>\n",
         )
         .expect("page should write");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener
             .local_addr()
@@ -12738,10 +12701,7 @@ page state count: Number = 0
         )
         .expect("route should write");
 
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let request = AxHttpRequest {
             method: "GET".to_string(),
             target: "/api/posts".to_string(),
@@ -12777,10 +12737,7 @@ page state count: Number = 0
         )
         .expect("route should write");
 
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let request = AxHttpRequest {
             method: "GET".to_string(),
             target: "/api/posts/draft-preview?status=draft".to_string(),
@@ -12810,10 +12767,7 @@ page state count: Number = 0
         )
         .expect("route should write");
 
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let request = AxHttpRequest::new("POST", "/api/session")
             .with_header("Cookie", "theme=gold")
             .with_header("User-Agent", "AxonyxTest")
@@ -12856,10 +12810,7 @@ page state count: Number = 0
         let route = resolve_route(&root, "/posts/draft-preview?status=draft")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html = render_route_html(&state, &route).expect("dynamic route should render");
 
         assert!(html.contains("Draft Preview"));
@@ -12900,10 +12851,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html = render_route_html(&state, &route).expect("route should render");
 
         assert!(html.contains("/__axonyx/action?path=%2F&amp;name=SetTheme"));
@@ -12929,10 +12877,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let response = render_route_response(&state, &route, true, false)
             .expect("route response should render");
 
@@ -12964,10 +12909,7 @@ page Home
         let route = resolve_route(&root, "/?__ax_stream=1")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let response = render_route_response(
             &state,
             &route,
@@ -13008,10 +12950,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let response = render_route_response(
             &state,
             &route,
@@ -13055,10 +12994,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html =
             render_route_html(&state, &route).expect("imported component route should render");
 
@@ -13097,10 +13033,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html = render_route_html(&state, &route).expect("route should render");
 
         assert!(html.contains(r#"<html data-theme="silver" lang="en">"#));
@@ -13141,10 +13074,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html = render_route_html(&state, &route).expect("route should render");
 
         assert!(html.contains(r#"data-theme="gold""#));
@@ -13231,10 +13161,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html =
             render_route_html(&state, &route).expect("package component route should render");
 
@@ -13282,10 +13209,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html =
             render_route_html(&state, &route).expect("src/foundry package route should render");
 
@@ -13374,10 +13298,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html =
             render_route_html(&state, &route).expect("cargo package component route should render");
 
@@ -13413,10 +13334,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html = render_route_html(&state, &route).expect("route should render");
 
         assert!(html.contains(r#"<link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css">"#));
@@ -13511,10 +13429,7 @@ page Home
         let route = resolve_route(&root, "/")
             .expect("route resolution should work")
             .expect("route should exist");
-        let state = DevServerState {
-            root: root.clone(),
-            preview_store: Mutex::new(AxPreviewStore::default()),
-        };
+        let state = test_dev_state(&root);
         let html = render_route_html(&state, &route).expect("vendored package route should render");
 
         assert!(html.contains("Vendored package"));
