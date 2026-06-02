@@ -52,7 +52,8 @@ const DOCS_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.14";
+const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
+const AXONYX_RUNTIME_VERSION: &str = "0.1.15";
 const AXONYX_UI_VERSION: &str = "0.0.40";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -95,7 +96,7 @@ enum Commands {
     State(StateArgs),
     Stream(DevArgs),
     Test(TestArgs),
-    Upgrade,
+    Upgrade(UpgradeArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -151,6 +152,13 @@ struct BuildArgs {
     /// Remove the output directory before generating build artifacts.
     #[arg(long)]
     clean: bool,
+}
+
+#[derive(Debug, Parser)]
+struct UpgradeArgs {
+    /// Do not check/reinstall the cargo-axonyx CLI.
+    #[arg(long)]
+    skip_cli: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -847,7 +855,7 @@ fn run() -> Result<()> {
         Commands::State(args) => state_command(args),
         Commands::Stream(args) => run_stream_server(args),
         Commands::Test(args) => test_command(args),
-        Commands::Upgrade => upgrade_command(),
+        Commands::Upgrade(args) => upgrade_command(args),
     }
 }
 
@@ -964,7 +972,7 @@ fn run_command(args: RunArgs) -> Result<()> {
     }
 }
 
-fn upgrade_command() -> Result<()> {
+fn upgrade_command(args: UpgradeArgs) -> Result<()> {
     let root = app_root()?;
     let cargo_toml = root.join("Cargo.toml");
     if !cargo_toml.exists() {
@@ -972,6 +980,10 @@ fn upgrade_command() -> Result<()> {
     }
 
     let mut changes = Vec::new();
+    if !args.skip_cli && ensure_cargo_axonyx_cli_installed(AXONYX_CLI_VERSION)? {
+        changes.push(format!("cargo-axonyx CLI = {AXONYX_CLI_VERSION}"));
+    }
+
     if upgrade_cargo_dependency_version(&cargo_toml, "axonyx-runtime", AXONYX_RUNTIME_VERSION)? {
         changes.push(format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\""));
     }
@@ -996,14 +1008,61 @@ fn upgrade_command() -> Result<()> {
     if changes.is_empty() {
         println!("Axonyx packages are already current or use path/git dependencies.");
     } else {
-        println!("Updated Cargo.toml:");
+        println!("Updated Axonyx toolchain/project:");
         for change in changes {
             println!("  {change}");
         }
-        println!("Next: cargo update");
+        println!("Next: cargo update && cargo ax build --clean");
     }
 
     Ok(())
+}
+
+fn ensure_cargo_axonyx_cli_installed(version: &str) -> Result<bool> {
+    let installed = installed_cargo_axonyx_version().unwrap_or(None);
+    if installed.as_deref() == Some(version) {
+        return Ok(false);
+    }
+
+    let status = Command::new("cargo")
+        .args(["install", "cargo-axonyx", "--version", version, "--force"])
+        .status()
+        .context("failed to run `cargo install cargo-axonyx`")?;
+
+    if !status.success() {
+        bail!("failed to install cargo-axonyx {version}");
+    }
+
+    Ok(true)
+}
+
+fn installed_cargo_axonyx_version() -> Result<Option<String>> {
+    let output = Command::new("cargo")
+        .args(["install", "--list"])
+        .output()
+        .context("failed to run `cargo install --list`")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("cargo-axonyx v") else {
+            continue;
+        };
+        let version = rest
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !version.is_empty() {
+            return Ok(Some(version));
+        }
+    }
+
+    Ok(None)
 }
 
 fn doctor_command(args: DoctorArgs) -> Result<()> {
@@ -11649,6 +11708,17 @@ page Home
     }
 
     #[test]
+    fn parses_upgrade_skip_cli_command() {
+        let cli = Cli::try_parse_from(["cargo-ax", "upgrade", "--skip-cli"])
+            .expect("upgrade command should parse");
+
+        let Commands::Upgrade(args) = cli.command else {
+            panic!("expected upgrade command");
+        };
+        assert!(args.skip_cli);
+    }
+
+    #[test]
     fn parses_graph_json_command() {
         let cli = Cli::try_parse_from(["cargo-ax", "graph", "--format", "json"])
             .expect("graph command should parse");
@@ -11946,7 +12016,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.14"
+axonyx-runtime = "0.1.15"
 
 [dependencies.axonyx-ui]
 path = "vendor/axonyx-ui"
@@ -12436,7 +12506,7 @@ serde_json = "1"
         );
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
-        assert!(updated.contains("axonyx-runtime = \"0.1.14\""));
+        assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
         assert!(updated.contains("version = \"0.0.40\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
