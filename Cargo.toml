@@ -15,7 +15,7 @@ repository = "https://github.com/vladanPro/axonyx-framework"
 homepage = "https://github.com/vladanPro/axonyx-framework"
 documentation = "https://github.com/vladanPro/axonyx-framework"
 rust-version = "1.82"
-version = "0.1.35"
+version = "0.1.36"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
@@ -25,6 +25,7 @@ serde_json = "1.0.145"
 clap = { version = "4.5.48", features = ["derive"] }
 toml = "0.8.23"
 axum = "0.8.9"
+flate2 = "1.0.35"
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
 syn = { version = "2.0.117", features = ["full"] }

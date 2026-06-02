@@ -40,6 +40,8 @@ use axonyx_runtime::{
     AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use serde::Serialize;
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -60,6 +62,8 @@ const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_SECONDS: u64 = 2;
 const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+const DEFAULT_COMPRESSION_ENABLED: bool = true;
+const DEFAULT_SECURITY_HEADERS_ENABLED: bool = true;
 const IMMUTABLE_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
@@ -403,6 +407,8 @@ struct AxServerRuntimeConfig {
     request_timeout: Duration,
     shutdown_grace: Duration,
     max_connections: usize,
+    compression: bool,
+    security_headers: bool,
 }
 
 #[derive(Clone)]
@@ -466,6 +472,12 @@ impl AxServerRuntimeConfig {
             request_timeout: configured_request_timeout_duration(root)?,
             shutdown_grace: configured_shutdown_grace_duration(root)?,
             max_connections: configured_max_connections(root)?,
+            compression: configured_server_bool(root, "compression", DEFAULT_COMPRESSION_ENABLED)?,
+            security_headers: configured_server_bool(
+                root,
+                "security_headers",
+                DEFAULT_SECURITY_HEADERS_ENABLED,
+            )?,
         })
     }
 }
@@ -477,6 +489,8 @@ impl Default for AxServerRuntimeConfig {
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
             shutdown_grace: Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS),
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            compression: DEFAULT_COMPRESSION_ENABLED,
+            security_headers: DEFAULT_SECURITY_HEADERS_ENABLED,
         }
     }
 }
@@ -1043,6 +1057,8 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_request_timeout_check(root));
     checks.push(doctor_server_shutdown_grace_check(root));
     checks.push(doctor_server_max_connections_check(root));
+    checks.push(doctor_server_compression_check(root));
+    checks.push(doctor_server_security_headers_check(root));
     checks.push(doctor_aegis_config_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
@@ -1139,6 +1155,46 @@ fn doctor_server_max_connections_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message,
             hint: Some("Set [server].max_connections to a positive integer."),
+        },
+    }
+}
+
+fn doctor_server_compression_check(root: &Path) -> DoctorCheck {
+    match configured_server_bool(root, "compression", DEFAULT_COMPRESSION_ENABLED) {
+        Ok(enabled) => DoctorCheck {
+            code: "server-compression",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "HTTP compression is {}.",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+            hint: Some("Tune [server].compression for hosted response size/performance."),
+        },
+        Err(message) => DoctorCheck {
+            code: "server-compression",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Set [server].compression to true or false."),
+        },
+    }
+}
+
+fn doctor_server_security_headers_check(root: &Path) -> DoctorCheck {
+    match configured_server_bool(root, "security_headers", DEFAULT_SECURITY_HEADERS_ENABLED) {
+        Ok(enabled) => DoctorCheck {
+            code: "server-security-headers",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "Baseline security headers are {}.",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+            hint: Some("Tune [server].security_headers before custom edge/security setups."),
+        },
+        Err(message) => DoctorCheck {
+            code: "server-security-headers",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Set [server].security_headers to true or false."),
         },
     }
 }
@@ -3448,6 +3504,31 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     }
 
+    for key in ["compression", "security_headers"] {
+        if let Some(value) = value
+            .get("server")
+            .and_then(toml::Value::as_table)
+            .and_then(|server| server.get(key))
+        {
+            if parse_bool_config_value(value).is_err() {
+                diagnostics.push(CheckDiagnostic {
+                    file: display_path(&path),
+                    line: line_for_config_key(&source, key),
+                    column: 1,
+                    severity: "error",
+                    code: if key == "compression" {
+                        "axonyx-config-compression"
+                    } else {
+                        "axonyx-config-security-headers"
+                    },
+                    message: format!(
+                        "[server].{key} must be a boolean or one of true/false/1/0/yes/no/on/off."
+                    ),
+                });
+            }
+        }
+    }
+
     Ok(diagnostics)
 }
 
@@ -4716,6 +4797,22 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
             ""
         } else {
             "s"
+        }
+    );
+    println!(
+        "Compression: {}.",
+        if runtime_config.compression {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "Security headers: {}.",
+        if runtime_config.security_headers {
+            "enabled"
+        } else {
+            "disabled"
         }
     );
     if mode == AxServerMode::Dev {
@@ -6885,7 +6982,8 @@ fn handle_connection(
 
     let suppress_body = suppress_response_body_for_method(&request.method);
     let request = normalize_request_for_routing(request);
-    let response = handle_http_request(state, mode, request)?;
+    let response = handle_http_request(state, mode, request.clone())?;
+    let response = apply_server_response_policy(state, &request, response, suppress_body)?;
     write_ax_response(&mut stream, &response, suppress_body)?;
     Ok(())
 }
@@ -7095,11 +7193,19 @@ async fn axum_tokio_handler(
         Ok(request) => {
             let suppress_body = suppress_response_body_for_method(&request.method);
             let request = normalize_request_for_routing(request);
-            let response = match handle_http_request(&state.dev, state.mode, request) {
+            let response = match handle_http_request(&state.dev, state.mode, request.clone()) {
                 Ok(response) => response,
                 Err(error) => AxHttpResponse::text(500, format!("Axonyx server error: {error:#}"))
                     .with_no_store(),
             };
+            let response =
+                match apply_server_response_policy(&state.dev, &request, response, suppress_body) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        AxHttpResponse::text(500, format!("Axonyx server policy error: {error:#}"))
+                            .with_no_store()
+                    }
+                };
             let mut response = axonyx_response_to_axum(response);
             if suppress_body {
                 *response.body_mut() = axum::body::Body::empty();
@@ -7339,6 +7445,102 @@ fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
     }
     http.set_cookies.extend(response.set_cookies);
     http
+}
+
+fn apply_server_response_policy(
+    state: &DevServerState,
+    request: &AxHttpRequest,
+    response: AxHttpResponse,
+    suppress_body: bool,
+) -> Result<AxHttpResponse> {
+    let mut response = if state.runtime_config.security_headers {
+        apply_security_headers(response)
+    } else {
+        response
+    };
+
+    if state.runtime_config.compression
+        && !suppress_body
+        && request_accepts_gzip(request)
+        && should_gzip_response(&response)
+    {
+        response = gzip_response(response)?;
+    }
+
+    Ok(response)
+}
+
+fn apply_security_headers(mut response: AxHttpResponse) -> AxHttpResponse {
+    response = ensure_response_header(response, "X-Content-Type-Options", "nosniff");
+    response = ensure_response_header(response, "X-Frame-Options", "DENY");
+    response = ensure_response_header(
+        response,
+        "Referrer-Policy",
+        "strict-origin-when-cross-origin",
+    );
+    response = ensure_response_header(
+        response,
+        "Permissions-Policy",
+        "geolocation=(), microphone=(), camera=()",
+    );
+    response
+}
+
+fn ensure_response_header(
+    response: AxHttpResponse,
+    name: &'static str,
+    value: &'static str,
+) -> AxHttpResponse {
+    if response.header_value(name).is_some() {
+        response
+    } else {
+        response.with_header(name, value)
+    }
+}
+
+fn request_accepts_gzip(request: &AxHttpRequest) -> bool {
+    request.headers.get("accept-encoding").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|encoding| encoding.trim().eq_ignore_ascii_case("gzip"))
+    })
+}
+
+fn should_gzip_response(response: &AxHttpResponse) -> bool {
+    if response.body.is_streaming()
+        || response.body_len() < 1024
+        || response.header_value("Content-Encoding").is_some()
+    {
+        return false;
+    }
+
+    let content_type = response.content_type.to_ascii_lowercase();
+    content_type.starts_with("text/")
+        || content_type.contains("json")
+        || content_type.contains("javascript")
+        || content_type.contains("xml")
+        || content_type.contains("wasm")
+}
+
+fn gzip_response(response: AxHttpResponse) -> Result<AxHttpResponse> {
+    let AxHttpResponse {
+        status,
+        content_type,
+        headers,
+        set_cookies,
+        body,
+    } = response;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    encoder
+        .write_all(&body.into_bytes())
+        .context("failed to gzip response body")?;
+    let compressed = encoder.finish().context("failed to finish gzip body")?;
+    let mut response = AxHttpResponse::bytes(status, content_type, compressed);
+    response.headers = headers;
+    response.set_cookies = set_cookies;
+    response = response.with_header("Content-Encoding", "gzip");
+    response = response.with_header("Vary", "Accept-Encoding");
+    Ok(response)
 }
 
 fn method_not_allowed_response(allow: &str) -> AxHttpResponse {
@@ -7581,6 +7783,28 @@ fn configured_max_connections(root: &Path) -> std::result::Result<usize, String>
     match axonyx_config_value(root, "server", "max_connections") {
         Some(value) => parse_max_connections_value(&value),
         None => Ok(DEFAULT_MAX_CONNECTIONS),
+    }
+}
+
+fn configured_server_bool(
+    root: &Path,
+    key: &str,
+    default: bool,
+) -> std::result::Result<bool, String> {
+    match axonyx_config_value(root, "server", key) {
+        Some(value) => parse_bool_config_value(&value)
+            .map_err(|_| format!("[server].{key} must be a boolean.")),
+        None => Ok(default),
+    }
+}
+
+fn parse_bool_config_value(value: &toml::Value) -> std::result::Result<bool, String> {
+    match value {
+        toml::Value::Boolean(value) => Ok(*value),
+        toml::Value::String(value) => {
+            parse_boolish_strict(value).ok_or_else(|| "expected a boolean-like string".to_string())
+        }
+        _ => Err("expected a boolean".to_string()),
     }
 }
 
@@ -10352,6 +10576,30 @@ page state enabled = signal(true)
     }
 
     #[test]
+    fn check_app_sources_reports_invalid_server_hardening_config() {
+        let root = make_temp_dir("invalid-server-hardening-config");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\ncompression = 12\nsecurity_headers = \"sometimes\"\n",
+        )
+        .expect("config should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "axonyx-config-compression"));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "axonyx-config-security-headers"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn check_app_sources_reports_duplicate_backend_api_routes() {
         let root = make_temp_dir("duplicate-api-routes");
         fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
@@ -10417,7 +10665,12 @@ route GET "/api/posts"
         let root = make_temp_dir("public-cache");
         fs::create_dir_all(root.join("public")).expect("public dir should exist");
         fs::write(root.join("public/logo.svg"), "<svg></svg>").expect("asset should write");
-        let state = test_dev_state(&root);
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+            runtime_config: AxServerRuntimeConfig::from_root(&root)
+                .expect("runtime config should load"),
+        };
         let request = AxHttpRequest {
             method: "GET".to_string(),
             target: "/logo.svg".to_string(),
@@ -12496,7 +12749,12 @@ axonyx-runtime = "0.1.0"
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
-        let state = test_dev_state(&root);
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+            runtime_config: AxServerRuntimeConfig::from_root(&root)
+                .expect("runtime config should load"),
+        };
         let request = AxHttpRequest {
             method: "PUT".to_string(),
             target: "/".to_string(),
@@ -12539,6 +12797,90 @@ axonyx-runtime = "0.1.0"
         assert_eq!(body["ok"], true);
         assert_eq!(body["service"], "axonyx");
         assert_eq!(body["mode"], "start");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn server_policy_adds_baseline_security_headers() {
+        let root = make_temp_dir("security-headers");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+        let response = AxHttpResponse::html(200, "<main>ok</main>");
+
+        let response = apply_server_response_policy(&state, &request, response, false)
+            .expect("policy should apply");
+
+        assert_eq!(
+            response.header_value("X-Content-Type-Options"),
+            Some("nosniff")
+        );
+        assert_eq!(response.header_value("X-Frame-Options"), Some("DENY"));
+        assert_eq!(
+            response.header_value("Referrer-Policy"),
+            Some("strict-origin-when-cross-origin")
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn server_policy_gzips_large_text_responses_when_accepted() {
+        let root = make_temp_dir("gzip-response");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/".to_string(),
+            headers: BTreeMap::from([("accept-encoding".to_string(), "br, gzip".to_string())]),
+            body: Vec::new(),
+        };
+        let response = AxHttpResponse::html(200, "Axonyx ".repeat(512));
+
+        let response = apply_server_response_policy(&state, &request, response, false)
+            .expect("policy should apply");
+
+        assert_eq!(response.header_value("Content-Encoding"), Some("gzip"));
+        assert_eq!(response.header_value("Vary"), Some("Accept-Encoding"));
+        assert!(response.body.into_bytes().starts_with(&[0x1f, 0x8b]));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn server_policy_skips_gzip_when_disabled() {
+        let root = make_temp_dir("gzip-disabled");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[server]\ncompression = false\n",
+        )
+        .expect("config should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+            runtime_config: AxServerRuntimeConfig::from_root(&root)
+                .expect("runtime config should load"),
+        };
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/".to_string(),
+            headers: BTreeMap::from([("accept-encoding".to_string(), "gzip".to_string())]),
+            body: Vec::new(),
+        };
+        let response = AxHttpResponse::html(200, "Axonyx ".repeat(512));
+
+        let response = apply_server_response_policy(&state, &request, response, false)
+            .expect("policy should apply");
+
+        assert_eq!(response.header_value("Content-Encoding"), None);
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

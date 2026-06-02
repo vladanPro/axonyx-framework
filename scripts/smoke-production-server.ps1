@@ -354,6 +354,8 @@ try {
   }
 
   Invoke-TemplateRouteChecks -BaseUrl $baseUrl -Template $Template
+  Invoke-SmokeRequest -Url "$baseUrl/" -ExpectedStatus 200 -ExpectHeader "X-Content-Type-Options" -ExpectHeaderValue "nosniff" | Out-Null
+  Invoke-SmokeCurlRequest -Url "$baseUrl/" -Headers @("Accept-Encoding: gzip") -ExpectedStatus 200 -Expect "Content-Encoding: gzip" | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/__axonyx/health" -ExpectedStatus 200 -Expect '"ok":true|"ok": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
   Invoke-OversizedHeaderSmoke -HostName "127.0.0.1" -Port $Port
   if ($Template -ne "docs") {
@@ -388,6 +390,14 @@ try {
 
   if ($serverLog -notmatch "Request read timeout: 2 seconds") {
     throw "Expected server log to report request read timeout"
+  }
+
+  if ($serverLog -notmatch "Compression: enabled") {
+    throw "Expected server log to report compression"
+  }
+
+  if ($serverLog -notmatch "Security headers: enabled") {
+    throw "Expected server log to report security headers"
   }
 
   Write-Host "Axonyx production server smoke passed."
