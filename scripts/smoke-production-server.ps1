@@ -400,6 +400,14 @@ try {
     throw "Expected server log to report security headers"
   }
 
+  if ($serverLog -notmatch "Request logging: enabled \(text\) to stdout") {
+    throw "Expected server log to report request logging"
+  }
+
+  if ($serverLog -notmatch "\[axonyx\] GET / 200") {
+    throw "Expected server log to include request log lines"
+  }
+
   Write-Host "Axonyx production server smoke passed."
   Write-Host "  url: $url"
 } finally {

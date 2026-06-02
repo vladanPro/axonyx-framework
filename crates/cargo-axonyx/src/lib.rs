@@ -10,7 +10,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex, OnceLock,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use axonyx_core::ax_ast_prelude::{AxExpr, AxImport};
@@ -64,6 +64,8 @@ const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 5;
 const DEFAULT_MAX_CONNECTIONS: usize = 1024;
 const DEFAULT_COMPRESSION_ENABLED: bool = true;
 const DEFAULT_SECURITY_HEADERS_ENABLED: bool = true;
+const DEFAULT_REQUEST_LOGGING_ENABLED: bool = true;
+const DEFAULT_LOG_FORMAT: &str = "text";
 const IMMUTABLE_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
@@ -409,6 +411,23 @@ struct AxServerRuntimeConfig {
     max_connections: usize,
     compression: bool,
     security_headers: bool,
+    request_logging: bool,
+    log_format: AxServerLogFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AxServerLogFormat {
+    Text,
+    Json,
+}
+
+impl AxServerLogFormat {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Json => "json",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -478,6 +497,12 @@ impl AxServerRuntimeConfig {
                 "security_headers",
                 DEFAULT_SECURITY_HEADERS_ENABLED,
             )?,
+            request_logging: configured_server_bool(
+                root,
+                "request_logging",
+                DEFAULT_REQUEST_LOGGING_ENABLED,
+            )?,
+            log_format: configured_server_log_format(root)?,
         })
     }
 }
@@ -491,6 +516,8 @@ impl Default for AxServerRuntimeConfig {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             compression: DEFAULT_COMPRESSION_ENABLED,
             security_headers: DEFAULT_SECURITY_HEADERS_ENABLED,
+            request_logging: DEFAULT_REQUEST_LOGGING_ENABLED,
+            log_format: AxServerLogFormat::Text,
         }
     }
 }
@@ -1059,6 +1086,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_max_connections_check(root));
     checks.push(doctor_server_compression_check(root));
     checks.push(doctor_server_security_headers_check(root));
+    checks.push(doctor_server_request_logging_check(root));
     checks.push(doctor_aegis_config_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
@@ -1195,6 +1223,30 @@ fn doctor_server_security_headers_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message,
             hint: Some("Set [server].security_headers to true or false."),
+        },
+    }
+}
+
+fn doctor_server_request_logging_check(root: &Path) -> DoctorCheck {
+    match (
+        configured_server_bool(root, "request_logging", DEFAULT_REQUEST_LOGGING_ENABLED),
+        configured_server_log_format(root),
+    ) {
+        (Ok(enabled), Ok(format)) => DoctorCheck {
+            code: "server-request-logging",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "Request logging is {} using {} format.",
+                if enabled { "enabled" } else { "disabled" },
+                format.label()
+            ),
+            hint: Some("Axonyx writes request logs to stdout for Render, Docker, and systemd."),
+        },
+        (Err(message), _) | (_, Err(message)) => DoctorCheck {
+            code: "server-request-logging",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Set [server].request_logging to true/false and [server].log_format to \"text\" or \"json\"."),
         },
     }
 }
@@ -3504,7 +3556,7 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     }
 
-    for key in ["compression", "security_headers"] {
+    for key in ["compression", "security_headers", "request_logging"] {
         if let Some(value) = value
             .get("server")
             .and_then(toml::Value::as_table)
@@ -3516,16 +3568,33 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
                     line: line_for_config_key(&source, key),
                     column: 1,
                     severity: "error",
-                    code: if key == "compression" {
-                        "axonyx-config-compression"
-                    } else {
-                        "axonyx-config-security-headers"
+                    code: match key {
+                        "compression" => "axonyx-config-compression",
+                        "security_headers" => "axonyx-config-security-headers",
+                        _ => "axonyx-config-request-logging",
                     },
                     message: format!(
                         "[server].{key} must be a boolean or one of true/false/1/0/yes/no/on/off."
                     ),
                 });
             }
+        }
+    }
+
+    if let Some(log_format) = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("log_format"))
+    {
+        if parse_server_log_format_value(log_format).is_err() {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&path),
+                line: line_for_config_key(&source, "log_format"),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-log-format",
+                message: "[server].log_format must be \"text\" or \"json\".".to_string(),
+            });
         }
     }
 
@@ -4814,6 +4883,15 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
         } else {
             "disabled"
         }
+    );
+    println!(
+        "Request logging: {} ({}) to stdout.",
+        if runtime_config.request_logging {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        runtime_config.log_format.label()
     );
     if mode == AxServerMode::Dev {
         println!("Live reload polling is enabled.");
@@ -6982,8 +7060,10 @@ fn handle_connection(
 
     let suppress_body = suppress_response_body_for_method(&request.method);
     let request = normalize_request_for_routing(request);
+    let started = Instant::now();
     let response = handle_http_request(state, mode, request.clone())?;
     let response = apply_server_response_policy(state, &request, response, suppress_body)?;
+    log_request_if_enabled(state, &request, &response, started.elapsed());
     write_ax_response(&mut stream, &response, suppress_body)?;
     Ok(())
 }
@@ -7193,6 +7273,7 @@ async fn axum_tokio_handler(
         Ok(request) => {
             let suppress_body = suppress_response_body_for_method(&request.method);
             let request = normalize_request_for_routing(request);
+            let started = Instant::now();
             let response = match handle_http_request(&state.dev, state.mode, request.clone()) {
                 Ok(response) => response,
                 Err(error) => AxHttpResponse::text(500, format!("Axonyx server error: {error:#}"))
@@ -7206,6 +7287,7 @@ async fn axum_tokio_handler(
                             .with_no_store()
                     }
                 };
+            log_request_if_enabled(&state.dev, &request, &response, started.elapsed());
             let mut response = axonyx_response_to_axum(response);
             if suppress_body {
                 *response.body_mut() = axum::body::Body::empty();
@@ -7543,6 +7625,75 @@ fn gzip_response(response: AxHttpResponse) -> Result<AxHttpResponse> {
     Ok(response)
 }
 
+fn log_request_if_enabled(
+    state: &DevServerState,
+    request: &AxHttpRequest,
+    response: &AxHttpResponse,
+    duration: Duration,
+) {
+    if !state.runtime_config.request_logging {
+        return;
+    }
+
+    println!(
+        "{}",
+        render_request_log_line(state.runtime_config.log_format, request, response, duration)
+    );
+}
+
+fn render_request_log_line(
+    format: AxServerLogFormat,
+    request: &AxHttpRequest,
+    response: &AxHttpResponse,
+    duration: Duration,
+) -> String {
+    match format {
+        AxServerLogFormat::Text => render_text_request_log_line(request, response, duration),
+        AxServerLogFormat::Json => render_json_request_log_line(request, response, duration),
+    }
+}
+
+fn render_text_request_log_line(
+    request: &AxHttpRequest,
+    response: &AxHttpResponse,
+    duration: Duration,
+) -> String {
+    format!(
+        "[axonyx] {} {} {} {} {} {}",
+        request.method,
+        request.target,
+        response.status,
+        format_duration(duration),
+        response.content_type,
+        format_bytes(response.body_len())
+    )
+}
+
+fn render_json_request_log_line(
+    request: &AxHttpRequest,
+    response: &AxHttpResponse,
+    duration: Duration,
+) -> String {
+    serde_json::json!({
+        "source": "axonyx",
+        "method": request.method,
+        "path": request.target,
+        "status": response.status,
+        "duration_ms": duration.as_millis(),
+        "content_type": response.content_type,
+        "bytes": response.body_len(),
+    })
+    .to_string()
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_millis() == 0 {
+        format!("{}us", duration.as_micros())
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
+}
+
 fn method_not_allowed_response(allow: &str) -> AxHttpResponse {
     AxHttpResponse::text(405, "Method Not Allowed")
         .with_header("Allow", allow)
@@ -7798,6 +7949,13 @@ fn configured_server_bool(
     }
 }
 
+fn configured_server_log_format(root: &Path) -> std::result::Result<AxServerLogFormat, String> {
+    match axonyx_config_value(root, "server", "log_format") {
+        Some(value) => parse_server_log_format_value(&value),
+        None => parse_server_log_format_str(DEFAULT_LOG_FORMAT),
+    }
+}
+
 fn parse_bool_config_value(value: &toml::Value) -> std::result::Result<bool, String> {
     match value {
         toml::Value::Boolean(value) => Ok(*value),
@@ -7805,6 +7963,23 @@ fn parse_bool_config_value(value: &toml::Value) -> std::result::Result<bool, Str
             parse_boolish_strict(value).ok_or_else(|| "expected a boolean-like string".to_string())
         }
         _ => Err("expected a boolean".to_string()),
+    }
+}
+
+fn parse_server_log_format_value(
+    value: &toml::Value,
+) -> std::result::Result<AxServerLogFormat, String> {
+    match value {
+        toml::Value::String(value) => parse_server_log_format_str(value),
+        _ => Err("[server].log_format must be a string.".to_string()),
+    }
+}
+
+fn parse_server_log_format_str(value: &str) -> std::result::Result<AxServerLogFormat, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "text" => Ok(AxServerLogFormat::Text),
+        "json" => Ok(AxServerLogFormat::Json),
+        _ => Err("[server].log_format must be \"text\" or \"json\".".to_string()),
     }
 }
 
@@ -10581,7 +10756,7 @@ page state enabled = signal(true)
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
         fs::write(
             root.join("Axonyx.toml"),
-            "[app]\nname = \"demo\"\n\n[server]\ncompression = 12\nsecurity_headers = \"sometimes\"\n",
+            "[app]\nname = \"demo\"\n\n[server]\ncompression = 12\nsecurity_headers = \"sometimes\"\nrequest_logging = []\nlog_format = \"xml\"\n",
         )
         .expect("config should write");
         fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
@@ -10595,6 +10770,12 @@ page state enabled = signal(true)
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "axonyx-config-security-headers"));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "axonyx-config-request-logging"));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "axonyx-config-log-format"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -12883,6 +13064,55 @@ axonyx-runtime = "0.1.0"
         assert_eq!(response.header_value("Content-Encoding"), None);
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn request_log_line_renders_text_summary() {
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/docs".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+        let response = AxHttpResponse::html(200, "Axonyx docs");
+
+        let line = render_request_log_line(
+            AxServerLogFormat::Text,
+            &request,
+            &response,
+            Duration::from_millis(14),
+        );
+
+        assert!(line.contains("[axonyx] GET /docs 200 14ms"));
+        assert!(line.contains("text/html; charset=utf-8"));
+        assert!(line.contains("11 bytes"));
+    }
+
+    #[test]
+    fn request_log_line_renders_json_summary() {
+        let request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/api/posts".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+        let response = AxHttpResponse::json(201, &serde_json::json!({ "ok": true }))
+            .expect("json response should render");
+
+        let line = render_request_log_line(
+            AxServerLogFormat::Json,
+            &request,
+            &response,
+            Duration::from_millis(3),
+        );
+        let value =
+            serde_json::from_str::<serde_json::Value>(&line).expect("request log should be json");
+
+        assert_eq!(value["source"], "axonyx");
+        assert_eq!(value["method"], "POST");
+        assert_eq!(value["path"], "/api/posts");
+        assert_eq!(value["status"], 201);
+        assert_eq!(value["duration_ms"], 3);
     }
 
     #[test]
