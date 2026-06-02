@@ -6974,7 +6974,7 @@ fn ensure_ui_layout_setup_jsx(source: &str) -> String {
     let mut updated = ensure_package_use_directive(source, AXONYX_UI_USE_DIRECTIVE);
 
     if updated.contains("<Head>") {
-        if !updated.contains(THEME_TAG) {
+        if !updated.contains("<Theme") {
             updated = updated.replacen("<Head>", &format!("<Head>\n  {THEME_TAG}"), 1);
         }
 
@@ -12817,6 +12817,27 @@ axonyx-runtime = "0.1.0"
         assert!(!updated.contains(AXONYX_UI_STYLESHEET_HREF));
         assert!(!updated.contains(AXONYX_UI_SCRIPT_HREF));
         assert!(updated.contains("<Title>Demo</Title>"));
+    }
+
+    #[test]
+    fn jsx_layout_setup_keeps_existing_theme_preflight() {
+        let source = r#"page SiteLayout
+
+<Head>
+  <Title>Demo</Title>
+  <Theme default="silver" storageKey="axonyx-site-theme" preflight="true" />
+</Head>
+
+<Container max="xl">
+  <Slot />
+</Container>"#;
+
+        let updated = ensure_ui_layout_setup_jsx(source);
+
+        assert!(updated.contains(
+            r#"<Theme default="silver" storageKey="axonyx-site-theme" preflight="true" />"#
+        ));
+        assert!(!updated.contains("<Theme>silver</Theme>"));
     }
 
     #[test]
