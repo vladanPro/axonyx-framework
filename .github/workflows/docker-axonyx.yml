@@ -1,0 +1,54 @@
+name: Docker Axonyx Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Docker image tag
+        required: true
+        default: "0.1.42"
+      push_latest:
+        description: Also push latest tag
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set lowercase owner
+        id: owner
+        run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        run: |
+          docker build \
+            -t ghcr.io/${{ steps.owner.outputs.value }}/axonyx:${{ inputs.tag }} \
+            -f docker/axonyx/Dockerfile .
+
+      - name: Push version tag
+        run: docker push ghcr.io/${{ steps.owner.outputs.value }}/axonyx:${{ inputs.tag }}
+
+      - name: Push latest tag
+        if: inputs.push_latest == 'true'
+        run: |
+          docker tag ghcr.io/${{ steps.owner.outputs.value }}/axonyx:${{ inputs.tag }} ghcr.io/${{ steps.owner.outputs.value }}/axonyx:latest
+          docker push ghcr.io/${{ steps.owner.outputs.value }}/axonyx:latest
