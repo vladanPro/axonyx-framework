@@ -1087,6 +1087,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_compression_check(root));
     checks.push(doctor_server_security_headers_check(root));
     checks.push(doctor_server_request_logging_check(root));
+    checks.push(doctor_error_boundaries_check(root));
     checks.push(doctor_aegis_config_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
@@ -1247,6 +1248,39 @@ fn doctor_server_request_logging_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message,
             hint: Some("Set [server].request_logging to true/false and [server].log_format to \"text\" or \"json\"."),
+        },
+    }
+}
+
+fn doctor_error_boundaries_check(root: &Path) -> DoctorCheck {
+    let has_not_found = root.join("app/not-found.ax").exists();
+    let has_error = root.join("app/error.ax").exists();
+    match (has_not_found, has_error) {
+        (true, true) => DoctorCheck {
+            code: "error-boundaries",
+            severity: DoctorSeverity::Ok,
+            message: "Global not-found.ax and error.ax boundaries found.".to_string(),
+            hint: Some(
+                "Nested app/**/error.ax and not-found.ax files can override a route subtree.",
+            ),
+        },
+        (false, true) => DoctorCheck {
+            code: "error-boundaries",
+            severity: DoctorSeverity::Warn,
+            message: "Global app/not-found.ax boundary is missing.".to_string(),
+            hint: Some("Add app/not-found.ax so missing routes render a branded 404 page."),
+        },
+        (true, false) => DoctorCheck {
+            code: "error-boundaries",
+            severity: DoctorSeverity::Warn,
+            message: "Global app/error.ax boundary is missing.".to_string(),
+            hint: Some("Add app/error.ax so production render errors use a branded fallback."),
+        },
+        (false, false) => DoctorCheck {
+            code: "error-boundaries",
+            severity: DoctorSeverity::Warn,
+            message: "Global app/not-found.ax and app/error.ax boundaries are missing.".to_string(),
+            hint: Some("Add both files or scaffold a fresh template with create-axonyx."),
         },
     }
 }
@@ -8655,26 +8689,51 @@ fn resolve_boundary_route(
     request_path: &str,
 ) -> Option<ResolvedRoute> {
     let app_root = root.join("app");
-    let page_path = app_root.join(file_name);
-    if !page_path.exists() {
-        return None;
+    let normalized = normalize_request_path(request_path).unwrap_or_else(|_| "/".to_string());
+    let segments = path_segments(&normalized);
+    let mut candidate_dirs = Vec::new();
+    let mut current = app_root.clone();
+    candidate_dirs.push(current.clone());
+    for segment in &segments {
+        current = current.join(segment);
+        candidate_dirs.push(current.clone());
     }
 
-    let mut layout_paths = Vec::new();
-    let root_layout = app_root.join("layout.ax");
-    if root_layout.exists() {
-        layout_paths.push(root_layout);
+    for boundary_dir in candidate_dirs.into_iter().rev() {
+        let page_path = boundary_dir.join(file_name);
+        if !page_path.exists() || !page_path.is_file() {
+            continue;
+        }
+
+        let mut layout_paths = Vec::new();
+        let mut current = app_root.clone();
+        let root_layout = current.join("layout.ax");
+        if root_layout.exists() {
+            layout_paths.push(root_layout);
+        }
+
+        if let Ok(relative) = boundary_dir.strip_prefix(&app_root) {
+            for segment in relative.components() {
+                current.push(segment.as_os_str());
+                let layout_path = current.join("layout.ax");
+                if layout_path.exists() {
+                    layout_paths.push(layout_path);
+                }
+            }
+        }
+
+        return Some(ResolvedRoute {
+            request_path: normalized,
+            request_target: request_path.to_string(),
+            page_path,
+            layout_paths,
+            loader_path: None,
+            actions_path: None,
+            params: std::collections::BTreeMap::new(),
+        });
     }
 
-    Some(ResolvedRoute {
-        request_path: normalize_request_path(request_path).unwrap_or_else(|_| "/".to_string()),
-        request_target: request_path.to_string(),
-        page_path,
-        layout_paths,
-        loader_path: None,
-        actions_path: None,
-        params: std::collections::BTreeMap::new(),
-    })
+    None
 }
 
 fn resolve_app_route_dir(
@@ -11911,6 +11970,16 @@ page RootLayout
             "base_url = \"http://127.0.0.1:3000\"\n",
         )
         .expect("aegis config should write");
+        fs::write(
+            app_root.join("app/not-found.ax"),
+            "page NotFound\n<Copy>404</Copy>\n",
+        )
+        .expect("not-found boundary should write");
+        fs::write(
+            app_root.join("app/error.ax"),
+            "page Error\n<Copy>500</Copy>\n",
+        )
+        .expect("error boundary should write");
 
         let checks = doctor_checks(&app_root, None);
 
@@ -13240,6 +13309,62 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn missing_nested_route_uses_nearest_not_found_boundary() {
+        let root = make_temp_dir("nested-not-found-boundary");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/docs")).expect("docs dir should exist");
+        fs::write(
+            root.join("app/layout.ax"),
+            "page RootLayout\n<Container><Copy>Root shell</Copy><Slot /></Container>\n",
+        )
+        .expect("root layout should write");
+        fs::write(
+            root.join("app/docs/layout.ax"),
+            "page DocsLayout\n<Container><Copy>Docs shell</Copy><Slot /></Container>\n",
+        )
+        .expect("docs layout should write");
+        fs::write(
+            root.join("app/not-found.ax"),
+            "page NotFound\n<Copy>Root not found</Copy>\n",
+        )
+        .expect("root not-found boundary should write");
+        fs::write(
+            root.join("app/docs/not-found.ax"),
+            "page DocsNotFound\n<Copy>Docs not found</Copy>\n",
+        )
+        .expect("docs not-found boundary should write");
+        let state = test_dev_state(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Start).expect("request should handle");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(b"GET /docs/missing HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 404 Not Found"));
+        assert!(raw.contains("Root shell"));
+        assert!(raw.contains("Docs shell"));
+        assert!(raw.contains("Docs not found"));
+        assert!(!raw.contains("Root not found"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn render_error_renders_error_boundary() {
         let root = make_temp_dir("error-boundary");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
@@ -13281,6 +13406,64 @@ axonyx-runtime = "0.1.0"
         assert!(raw.starts_with("HTTP/1.1 500 Internal Server Error"));
         assert!(raw.contains("Shell"));
         assert!(raw.contains("Custom Axonyx error"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn nested_render_error_uses_nearest_error_boundary() {
+        let root = make_temp_dir("nested-error-boundary");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/docs")).expect("docs dir should exist");
+        fs::write(
+            root.join("app/layout.ax"),
+            "page RootLayout\n<Container><Copy>Root shell</Copy><Slot /></Container>\n",
+        )
+        .expect("root layout should write");
+        fs::write(
+            root.join("app/docs/layout.ax"),
+            "page DocsLayout\n<Container><Copy>Docs shell</Copy><Slot /></Container>\n",
+        )
+        .expect("docs layout should write");
+        fs::write(root.join("app/docs/page.ax"), "page Docs\n<Copy></Card>\n")
+            .expect("broken docs page should write");
+        fs::write(
+            root.join("app/error.ax"),
+            "page Error\n<Copy>Root error</Copy>\n",
+        )
+        .expect("root error boundary should write");
+        fs::write(
+            root.join("app/docs/error.ax"),
+            "page DocsError\n<Copy>Docs error</Copy>\n",
+        )
+        .expect("docs error boundary should write");
+        let state = test_dev_state(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Start).expect("request should handle");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(b"GET /docs HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert!(raw.contains("Root shell"));
+        assert!(raw.contains("Docs shell"));
+        assert!(raw.contains("Docs error"));
+        assert!(!raw.contains("Root error"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

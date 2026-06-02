@@ -369,7 +369,7 @@ try {
     Invoke-SmokeRequest -Url "$baseUrl/_ax/pkg/axonyx-ui/index.css" -ExpectedStatus 200 -ExpectHeader "Cache-Control" -ExpectHeaderValue "public, max-age=31536000, immutable" | Out-Null
   }
   Invoke-SmokeRequest -Url "$baseUrl/" -Method "HEAD" -ExpectedStatus 200 | Out-Null
-  Invoke-SmokeRequest -Url "$baseUrl/definitely-missing" -ExpectedStatus 404 -Expect "not found|Not found|Back to home" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/definitely-missing" -ExpectedStatus 404 -Expect "not found|Not found|Page not found|Back to home" | Out-Null
 
   $serverLog = Get-Content -LiteralPath $stdout -Raw
   if ($serverLog -notmatch "using tokio transport") {
