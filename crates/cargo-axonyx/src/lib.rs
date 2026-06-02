@@ -998,17 +998,10 @@ fn upgrade_command(args: UpgradeArgs) -> Result<()> {
         changes.push(format!("axonyx-ui = \"{AXONYX_UI_VERSION}\""));
     }
 
-    if ui_enabled || cargo_manifest_has_dependency_file(&cargo_toml, "axonyx-ui")? {
-        let layout_changed = ensure_ui_layout_setup(&root)?;
-        if layout_changed {
-            changes.push("app/layout.ax UI stylesheet/runtime setup".to_string());
-        }
-    }
-
     if changes.is_empty() {
         println!("Axonyx packages are already current or use path/git dependencies.");
     } else {
-        println!("Updated Axonyx toolchain/project:");
+        println!("Updated Axonyx toolchain/dependencies:");
         for change in changes {
             println!("  {change}");
         }
