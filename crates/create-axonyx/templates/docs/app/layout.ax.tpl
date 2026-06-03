@@ -2,7 +2,6 @@ use "@axonyx/ui"
 import { AppShell } from "@axonyx/ui/foundry/AppShell.ax"
 import { Badge } from "@axonyx/ui/foundry/Badge.ax"
 import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { DocsNav } from "@axonyx/ui/foundry/DocsNav.ax"
 import { Navbar } from "@axonyx/ui/foundry/Navbar.ax"
 import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
 import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
@@ -31,19 +30,56 @@ page DocsLayout
     <ThemeSwitcher label="Theme" size="sm" surface="forged" storageKey="{{APP_SLUG}}-theme" ariaLabel="Theme switcher" />
   </Navbar>
 
-  <AppShell rail="left" railWidth="18rem">
-    <DocsNav slot="sidebar" title="Docs starter">
-      <a href="/">Overview</a>
-      <a href="/getting-started">Getting started</a>
-      <a href="/components">Components</a>
-      <a href="/reference">Reference</a>
-      <a href="/examples">Examples</a>
-      <a href="/feedback">Feedback action</a>
-      <Badge slot="actions" tone="success">Foundry ready</Badge>
-      <Button slot="actions" href="/components" variant="primary" size="sm">Explore UI</Button>
-    </DocsNav>
+  <AppShell rail="left" railWidth="md">
+    <aside slot="sidebar" class="ax-sidebar">
+      <div class="ax-sidebar__header">
+        <span class="ax-sidebar__title">Docs starter</span>
+        <Badge tone="success">Foundry</Badge>
+      </div>
 
-    <main>
+      <div class="ax-sidebar__body">
+        <section class="ax-sidebar-section">
+          <span class="ax-sidebar-section__title">Start</span>
+          <div class="ax-sidebar-section__body">
+            <a class="ax-sidebar-item" href="/">
+              <span class="ax-sidebar-item__content">Overview</span>
+            </a>
+            <a class="ax-sidebar-item" href="/getting-started">
+              <span class="ax-sidebar-item__content">Getting started</span>
+            </a>
+          </div>
+        </section>
+
+        <section class="ax-sidebar-section">
+          <span class="ax-sidebar-section__title">Build</span>
+          <div class="ax-sidebar-section__body">
+            <a class="ax-sidebar-item" href="/components">
+              <span class="ax-sidebar-item__content">Components</span>
+              <span class="ax-sidebar-item__meta">UI</span>
+            </a>
+            <a class="ax-sidebar-item" href="/reference">
+              <span class="ax-sidebar-item__content">Reference</span>
+            </a>
+            <a class="ax-sidebar-item" href="/examples">
+              <span class="ax-sidebar-item__content">Examples</span>
+            </a>
+          </div>
+        </section>
+
+        <section class="ax-sidebar-section">
+          <span class="ax-sidebar-section__title">Action</span>
+          <div class="ax-sidebar-section__body">
+            <a class="ax-sidebar-item" href="/feedback">
+              <span class="ax-sidebar-item__content">Feedback action</span>
+            </a>
+          </div>
+        </section>
+
+        <Button href="/components" variant="primary" size="sm">Explore UI</Button>
+      </div>
+    </aside>
+
+    <main class="ax-main">
       <Slot />
     </main>
   </AppShell>

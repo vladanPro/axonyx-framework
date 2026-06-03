@@ -29,7 +29,7 @@ http://localhost:3000
 ## What The Image Contains
 
 - Rust `1.95`
-- `create-axonyx 0.1.24`
+- `create-axonyx 0.1.25`
 - `cargo-axonyx 0.1.42`
 - a generated Axonyx docs starter app
 - prebuilt Axonyx output from `cargo ax build --clean`
@@ -65,7 +65,7 @@ docker run --rm -e PORT=8080 -p 8080:8080 axonyx:0.1.42
 ```bash
 docker build \
   --build-arg CARGO_AXONYX_VERSION=0.1.42 \
-  --build-arg CREATE_AXONYX_VERSION=0.1.24 \
+  --build-arg CREATE_AXONYX_VERSION=0.1.25 \
   --build-arg AXONYX_RUNTIME_VERSION=0.1.15 \
   -t axonyx:0.1.42 \
   -f docker/axonyx/Dockerfile .
