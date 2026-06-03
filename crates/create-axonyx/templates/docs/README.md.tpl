@@ -6,7 +6,15 @@ Generated with `create-axonyx` using the `docs` template.
 
 This starter is focused on product docs, framework references, and example-driven documentation pages built directly in Axonyx.
 
-The `docs` template already depends on the published `axonyx-ui` Cargo package, activates Foundry assets with `use "@axonyx/ui"`, and starts with the `silver` theme wired in `app/layout.ax`.
+The `docs` template already depends on the published `axonyx-ui` Cargo package, activates Foundry assets with `use "@axonyx/ui"`, and starts with a preflight `silver` theme in `app/layout.ax`.
+
+It includes a product-docs shell with:
+
+- top navigation
+- left docs sidebar
+- theme switcher
+- Foundry component showcase
+- branded 404/error pages
 
 ## Authoring Direction
 
@@ -62,6 +70,7 @@ Static build output:
 dist/
   index.html
   getting-started/index.html
+  components/index.html
   reference/index.html
   examples/index.html
   feedback/index.html
@@ -94,7 +103,7 @@ Suggested first edit:
 ## Starter Shape
 
 - docs-first `app/page.ax`
-- section pages for `getting-started`, `reference`, and `examples`
+- section pages for `getting-started`, `components`, `reference`, and `examples`
 - feedback action demo in `app/feedback/page.ax`
 - reusable Foundry imports from `@axonyx/ui/...`
 - static brand assets in `public/`
@@ -104,6 +113,7 @@ Suggested first edit:
 
 - `/`
 - `/getting-started`
+- `/components`
 - `/reference`
 - `/examples`
 - `/feedback`

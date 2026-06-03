@@ -1,7 +1,9 @@
+import { Alert } from "@axonyx/ui/foundry/Alert.ax"
+import { Badge } from "@axonyx/ui/foundry/Badge.ax"
 import { Button } from "@axonyx/ui/foundry/Button.ax"
+import { Card } from "@axonyx/ui/foundry/Card.ax"
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
 page DocsHome
@@ -12,56 +14,67 @@ page DocsHome
 
 <Container max="xl">
   <PageHeader title="{{APP_NAME}} Docs">
-    <Copy slot="eyebrow">Documentation</Copy>
+    <Copy slot="eyebrow">Axonyx docs showcase</Copy>
     <Copy tone="lead">
-      Start with a docs shell that already knows about Axonyx UI imports,
-      silver theming, and route-based pages.
+      A docs starter that looks like a real product surface from the first run:
+      theme switcher, sidebar navigation, Foundry components, and route-first
+      pages.
     </Copy>
     <Copy>
-      Use this starter to explain your framework, product, or internal platform
-      without rebuilding the shell patterns from scratch.
+      Use this template for framework docs, internal platforms, product guides,
+      or any site that should not need a heavy client-side app just to explain
+      itself.
     </Copy>
     <Button slot="actions" href="/getting-started" variant="primary">Get started</Button>
-    <Button slot="actions" href="/reference" variant="ghost">Open reference</Button>
-    <Button slot="actions" href="/feedback" variant="ghost">Feedback demo</Button>
+    <Button slot="actions" href="/components" variant="ghost">View components</Button>
+    <Badge slot="actions" tone="success">Low JS</Badge>
   </PageHeader>
 
+  <Alert tone="info" title="Docker demo ready">
+    This template is what the Axonyx Docker demo image runs by default.
+  </Alert>
+
   <ContentGrid cols={3} gap="lg">
-    <SectionCard title="Getting Started">
+    <Card title="Theme-first">
       <Stack gap="md" align="start">
+        <div class="ax-status-lamp" data-tone="success" data-pulse="true">
+          <span class="ax-status-lamp__light"></span>
+          <span class="ax-status-lamp__body">
+            <span class="ax-status-lamp__label">Preflight theme</span>
+            <span class="ax-status-lamp__description">Stored themes apply before CSS paints.</span>
+          </span>
+        </div>
         <Copy>
-          Explain install, scaffold, runtime sources, and the first Axonyx page
-          loop.
+          The layout uses `Theme default="silver" storageKey="{{APP_SLUG}}-theme" preflight="true"`.
         </Copy>
-        <Button href="/getting-started" variant="primary">Open section</Button>
       </Stack>
-    </SectionCard>
-    <SectionCard title="Reference">
-      <Stack gap="md" align="start">
-        <Copy>
-          Document components, layout rules, metadata directives, and runtime
-          behavior.
-        </Copy>
-        <Button href="/reference" variant="ghost">Open section</Button>
-      </Stack>
-    </SectionCard>
-    <SectionCard title="Examples">
-      <Stack gap="md" align="start">
-        <Copy>
-          Collect small complete examples that show how Axonyx should feel in
-          practice.
-        </Copy>
-        <Button href="/examples" variant="ghost">Open section</Button>
-      </Stack>
-    </SectionCard>
-    <SectionCard title="Action Feedback">
-      <Stack gap="md" align="start">
-        <Copy>
-          Try a route-local ActionForm with typed/defaulted inputs and lifecycle
-          status messages.
-        </Copy>
-        <Button href="/feedback" variant="ghost">Open feedback demo</Button>
-      </Stack>
-    </SectionCard>
+    </Card>
+    <Card title="Route-first docs">
+      <Copy>
+        Each section is a normal `app/**/page.ax` route, wrapped by the shared
+        docs layout and sidebar.
+      </Copy>
+      <Button href="/getting-started" variant="ghost" size="sm">Open guide</Button>
+    </Card>
+    <Card title="Foundry UI">
+      <Copy>
+        Buttons, cards, badges, alerts, lamps, and layout primitives are already
+        wired through `use "@axonyx/ui"`.
+      </Copy>
+      <Button href="/components" variant="primary" size="sm">Open showcase</Button>
+    </Card>
+  </ContentGrid>
+
+  <ContentGrid cols={2} gap="lg">
+    <Card title="What to edit first">
+      <Copy>Edit `app/page.ax` for the overview page.</Copy>
+      <Copy>Edit `app/layout.ax` for the shell, nav, theme, and sidebar.</Copy>
+      <Copy>Add nested folders with `page.ax` to create new routes.</Copy>
+    </Card>
+    <Card title="Production loop">
+      <Copy>`cargo ax check` validates `.ax` sources.</Copy>
+      <Copy>`cargo ax build --clean` writes static output and route artifacts.</Copy>
+      <Copy>`cargo ax run start` serves through the Axonyx production path.</Copy>
+    </Card>
   </ContentGrid>
 </Container>

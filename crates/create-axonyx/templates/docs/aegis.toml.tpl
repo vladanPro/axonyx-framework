@@ -17,3 +17,9 @@ name = "reference"
 goto = "/reference"
 expect_text = "Reference"
 expect_not = ["Internal Server Error", "Application error"]
+
+[[fast]]
+name = "components"
+goto = "/components"
+expect_text = "Component showcase"
+expect_not = ["Internal Server Error", "Application error"]

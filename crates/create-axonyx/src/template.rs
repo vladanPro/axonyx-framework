@@ -56,6 +56,7 @@ const DOCS_APP_GETTING_STARTED_AX: &str =
     include_str!("../templates/docs/app/getting-started/page.ax.tpl");
 const DOCS_APP_REFERENCE_AX: &str = include_str!("../templates/docs/app/reference/page.ax.tpl");
 const DOCS_APP_EXAMPLES_AX: &str = include_str!("../templates/docs/app/examples/page.ax.tpl");
+const DOCS_APP_COMPONENTS_AX: &str = include_str!("../templates/docs/app/components/page.ax.tpl");
 const DOCS_APP_FEEDBACK_PAGE_AX: &str = include_str!("../templates/docs/app/feedback/page.ax.tpl");
 const DOCS_APP_FEEDBACK_ACTIONS_AX: &str =
     include_str!("../templates/docs/app/feedback/actions.ax.tpl");
@@ -261,6 +262,10 @@ pub fn template_files(
                 TemplateFile {
                     relative_path: "app/examples/page.ax",
                     contents: apply_vars(DOCS_APP_EXAMPLES_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/components/page.ax",
+                    contents: apply_vars(DOCS_APP_COMPONENTS_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "app/feedback/page.ax",
