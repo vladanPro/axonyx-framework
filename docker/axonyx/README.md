@@ -33,11 +33,25 @@ http://localhost:3000
 - `cargo-axonyx 0.1.42`
 - a generated Axonyx docs starter app
 - prebuilt Axonyx output from `cargo ax build --clean`
+- OCI image labels for registry metadata
+- Docker healthcheck against `/__axonyx/health`
+- startup output that prints the local demo URL and package versions
 
 The container starts the generated docs app with:
 
 ```bash
 cargo ax run start --host 0.0.0.0 --port 3000
+```
+
+On startup it prints:
+
+```text
+Axonyx demo is running.
+
+Open: http://localhost:3000
+Template: docs
+CLI: cargo-axonyx 0.1.42
+Runtime: axonyx-runtime 0.1.15
 ```
 
 If a host provides `PORT`, the image uses it:
