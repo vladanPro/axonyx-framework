@@ -14,6 +14,12 @@ Run it with:
 docker run --rm -p 3000:3000 axonyx:0.1.42
 ```
 
+After publishing to Docker Hub:
+
+```bash
+docker run --rm -p 3000:3000 vladanpro2/axonyx:0.1.42
+```
+
 Then open:
 
 ```text

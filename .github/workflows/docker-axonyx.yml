@@ -38,17 +38,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build image
         run: |
           docker build \
             -t ghcr.io/${{ steps.owner.outputs.value }}/axonyx:${{ inputs.tag }} \
+            -t ${{ secrets.DOCKERHUB_USERNAME }}/axonyx:${{ inputs.tag }} \
             -f docker/axonyx/Dockerfile .
 
-      - name: Push version tag
-        run: docker push ghcr.io/${{ steps.owner.outputs.value }}/axonyx:${{ inputs.tag }}
+      - name: Push version tags
+        run: |
+          docker push ghcr.io/${{ steps.owner.outputs.value }}/axonyx:${{ inputs.tag }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/axonyx:${{ inputs.tag }}
 
       - name: Push latest tag
         if: inputs.push_latest == 'true'
         run: |
           docker tag ghcr.io/${{ steps.owner.outputs.value }}/axonyx:${{ inputs.tag }} ghcr.io/${{ steps.owner.outputs.value }}/axonyx:latest
+          docker tag ${{ secrets.DOCKERHUB_USERNAME }}/axonyx:${{ inputs.tag }} ${{ secrets.DOCKERHUB_USERNAME }}/axonyx:latest
           docker push ghcr.io/${{ steps.owner.outputs.value }}/axonyx:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/axonyx:latest
