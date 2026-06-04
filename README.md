@@ -6,6 +6,10 @@ Status: public beta loop.
 
 Axonyx can already scaffold apps, render `.ax` pages, build static output, serve route-aware local previews, import Foundry UI from `axonyx-ui`, and publish deployable sites. It is not yet a full replacement for React, Next.js, or mature CMS platforms. The next runtime work is tracked in the GitHub issues and Wiki.
 
+Current builds emit framework inspection artifacts under `dist/_ax`, including
+the Melt graph, content manifests, and state manifests when `.ax` files declare
+state signals.
+
 ## What Works Today
 
 - JSX-like `.ax` authoring in `app/**/page.ax` and `app/**/layout.ax`

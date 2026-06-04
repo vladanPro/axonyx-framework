@@ -79,7 +79,7 @@ need the same graph as structured data. Use `cargo ax melt --check` as a short
 CI preflight that verifies the graph can be collected without diagnostics.
 
 `cargo ax content` reads `[content.collections]` from `Axonyx.toml` and prints the current Melt-time content manifest.
-`cargo ax build` uses the Melt graph as its diagnostics preflight, writes the content manifest to `dist/_ax/content/manifest.json` when collections are configured, and always writes the Melt graph to `dist/_ax/melt/graph.json`.
+`cargo ax build` uses the Melt graph as its diagnostics preflight, writes the content manifest to `dist/_ax/content/manifest.json` when collections are configured, writes `dist/_ax/state/manifest.json` when state signals exist, and always writes the Melt graph to `dist/_ax/melt/graph.json`.
 
 `cargo ax routes` prints page/API routes and the current server
 `stream_pages` setting. JSON output is a report object with `stream_pages` and

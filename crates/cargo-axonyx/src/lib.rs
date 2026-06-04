@@ -617,12 +617,14 @@ enum StaticBuildStatus {
         prerendered_count: usize,
         skipped_dynamic_count: usize,
         content_collection_count: usize,
+        state_signal_count: usize,
         melt_graph_written: bool,
         output_dir: PathBuf,
     },
     NoPages {
         skipped_dynamic_count: usize,
         content_collection_count: usize,
+        state_signal_count: usize,
         melt_graph_written: bool,
         output_dir: PathBuf,
     },
@@ -5113,12 +5115,14 @@ fn build_static_site_from_app_root(
     copy_public_assets_to_dist(root, &output_dir)?;
     copy_package_assets_to_dist(root, &output_dir)?;
     let content_collection_count = write_content_manifest_to_dist(root, &output_dir)?;
+    let state_signal_count = write_state_manifest_to_dist(root, &output_dir)?;
     let melt_graph_written = write_melt_graph_to_dist(root, &output_dir)?;
 
     if static_routes.is_empty() && prerender_routes.is_empty() {
         return Ok(StaticBuildStatus::NoPages {
             skipped_dynamic_count: dynamic_routes.len(),
             content_collection_count,
+            state_signal_count,
             melt_graph_written,
             output_dir,
         });
@@ -5168,6 +5172,7 @@ fn build_static_site_from_app_root(
         prerendered_count,
         skipped_dynamic_count,
         content_collection_count,
+        state_signal_count,
         melt_graph_written,
         output_dir,
     })
@@ -5489,6 +5494,27 @@ fn write_content_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usiz
     Ok(count)
 }
 
+fn write_state_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize> {
+    let report = collect_state_report(root)?;
+    let signal_count = report.files.iter().map(|file| file.signals.len()).sum();
+    if signal_count == 0 {
+        return Ok(0);
+    }
+
+    let target = output_dir.join("_ax").join("state").join("manifest.json");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create '{}'", parent.display()))?;
+    }
+
+    let json =
+        serde_json::to_string_pretty(&report).context("failed to render state manifest as JSON")?;
+    fs::write(&target, json)
+        .with_context(|| format!("failed to write state manifest to '{}'", target.display()))?;
+
+    Ok(signal_count)
+}
+
 fn write_melt_graph_to_dist(root: &Path, output_dir: &Path) -> Result<bool> {
     let report = collect_melt_report(root)?;
     let target = output_dir.join("_ax").join("melt").join("graph.json");
@@ -5528,6 +5554,7 @@ fn print_static_build_status(status: &StaticBuildStatus) {
             prerendered_count,
             skipped_dynamic_count,
             content_collection_count,
+            state_signal_count,
             melt_graph_written,
             output_dir,
         } => {
@@ -5549,6 +5576,12 @@ fn print_static_build_status(status: &StaticBuildStatus) {
                     output_dir.display()
                 );
             }
+            if *state_signal_count > 0 {
+                println!(
+                    "Wrote state manifest for {state_signal_count} signal(s) into {}/_ax/state/manifest.json",
+                    output_dir.display()
+                );
+            }
             if *melt_graph_written {
                 println!(
                     "Wrote Melt graph into {}/_ax/melt/graph.json",
@@ -5559,6 +5592,7 @@ fn print_static_build_status(status: &StaticBuildStatus) {
         StaticBuildStatus::NoPages {
             skipped_dynamic_count,
             content_collection_count,
+            state_signal_count,
             melt_graph_written,
             output_dir,
         } => {
@@ -5574,6 +5608,12 @@ fn print_static_build_status(status: &StaticBuildStatus) {
             if *content_collection_count > 0 {
                 println!(
                     "Wrote content manifest for {content_collection_count} collection(s) into {}/_ax/content/manifest.json",
+                    output_dir.display()
+                );
+            }
+            if *state_signal_count > 0 {
+                println!(
+                    "Wrote state manifest for {state_signal_count} signal(s) into {}/_ax/state/manifest.json",
                     output_dir.display()
                 );
             }
@@ -11332,6 +11372,7 @@ page Docs
                 prerendered_count,
                 skipped_dynamic_count,
                 content_collection_count,
+                state_signal_count,
                 melt_graph_written,
                 output_dir,
             } => {
@@ -11339,6 +11380,7 @@ page Docs
                 assert_eq!(prerendered_count, 0);
                 assert_eq!(skipped_dynamic_count, 0);
                 assert_eq!(content_collection_count, 0);
+                assert_eq!(state_signal_count, 0);
                 assert!(melt_graph_written);
                 assert_eq!(output_dir, root.join("dist"));
             }
@@ -11356,6 +11398,60 @@ page Docs
             .expect("Melt graph should exist");
         assert!(melt_graph.contains("\"summary\""));
         assert!(melt_graph.contains("\"Axonyx Pages\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_writes_state_manifest_when_signals_exist() {
+        let root = make_temp_dir("static-build-state-manifest");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+page state theme: String = "silver"
+page state count: Number = 1
+
+<main>
+  <select bind:value={theme}>
+    <option value="silver">Silver</option>
+    <option value="gold">Gold</option>
+  </select>
+  <strong bind:text={theme}>{theme}</strong>
+  <input type="number" bind:value={count} />
+</main>
+"#,
+        )
+        .expect("page should write");
+
+        let status = build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect("static build works");
+
+        match status {
+            StaticBuildStatus::Generated {
+                state_signal_count,
+                melt_graph_written,
+                ..
+            } => {
+                assert_eq!(state_signal_count, 2);
+                assert!(melt_graph_written);
+            }
+            StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
+        }
+
+        let manifest = fs::read_to_string(root.join("dist/_ax/state/manifest.json"))
+            .expect("state manifest should exist");
+        assert!(manifest.contains("\"file\": \"app/page.ax\""));
+        assert!(manifest.contains("\"name\": \"theme\""));
+        assert!(manifest.contains("\"key\": \"page:root:theme:1\""));
+        assert!(manifest.contains("\"owner\": \"page:/\""));
+        assert!(manifest.contains("\"ty\": \"String\""));
+        assert!(manifest.contains("\"name\": \"count\""));
+        assert!(manifest.contains("\"key\": \"page:root:count:2\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -11446,12 +11542,14 @@ page BlogPost
             StaticBuildStatus::NoPages {
                 skipped_dynamic_count,
                 content_collection_count,
+                state_signal_count,
                 melt_graph_written,
                 output_dir,
             } => {
                 assert_eq!(output_dir, root.join("dist"));
                 assert_eq!(skipped_dynamic_count, 1);
                 assert_eq!(content_collection_count, 0);
+                assert_eq!(state_signal_count, 0);
                 assert!(melt_graph_written);
             }
             StaticBuildStatus::Generated {
@@ -11459,6 +11557,7 @@ page BlogPost
                 prerendered_count,
                 skipped_dynamic_count,
                 content_collection_count,
+                state_signal_count,
                 melt_graph_written,
                 ..
             } => {
@@ -11466,6 +11565,7 @@ page BlogPost
                 assert_eq!(prerendered_count, 0);
                 assert_eq!(skipped_dynamic_count, 1);
                 assert_eq!(content_collection_count, 0);
+                assert_eq!(state_signal_count, 0);
                 assert!(melt_graph_written);
             }
         }
@@ -11509,6 +11609,7 @@ page BlogPost
                 prerendered_count,
                 skipped_dynamic_count,
                 content_collection_count,
+                state_signal_count,
                 melt_graph_written,
                 output_dir,
             } => {
@@ -11516,6 +11617,7 @@ page BlogPost
                 assert_eq!(prerendered_count, 2);
                 assert_eq!(skipped_dynamic_count, 0);
                 assert_eq!(content_collection_count, 0);
+                assert_eq!(state_signal_count, 0);
                 assert!(melt_graph_written);
                 assert_eq!(output_dir, root.join("dist"));
             }
@@ -11589,12 +11691,14 @@ page DocDetail
                 prerendered_count,
                 skipped_dynamic_count,
                 content_collection_count,
+                state_signal_count,
                 melt_graph_written,
                 ..
             } => {
                 assert_eq!(prerendered_count, 1);
                 assert_eq!(skipped_dynamic_count, 0);
                 assert_eq!(content_collection_count, 1);
+                assert_eq!(state_signal_count, 0);
                 assert!(melt_graph_written);
             }
             StaticBuildStatus::NoPages { .. } => panic!("content prerender page should build"),
@@ -15426,10 +15530,12 @@ page Home
         match status {
             StaticBuildStatus::Generated {
                 content_collection_count,
+                state_signal_count,
                 melt_graph_written,
                 ..
             } => {
                 assert_eq!(content_collection_count, 1);
+                assert_eq!(state_signal_count, 0);
                 assert!(melt_graph_written);
             }
             StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
