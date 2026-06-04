@@ -745,6 +745,20 @@ struct StateReportSignal {
     initial: AxStateValue,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct StateSnapshotReport {
+    version: u32,
+    signals: Vec<StateSnapshotSignal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct StateSnapshotSignal {
+    key: String,
+    owner: String,
+    ty: String,
+    value: AxStateValue,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeltReport {
     app: MeltAppReport,
@@ -5501,18 +5515,52 @@ fn write_state_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize>
         return Ok(0);
     }
 
-    let target = output_dir.join("_ax").join("state").join("manifest.json");
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create '{}'", parent.display()))?;
-    }
+    let state_dir = output_dir.join("_ax").join("state");
+    fs::create_dir_all(&state_dir)
+        .with_context(|| format!("failed to create '{}'", state_dir.display()))?;
 
-    let json =
+    let manifest_target = state_dir.join("manifest.json");
+    let manifest_json =
         serde_json::to_string_pretty(&report).context("failed to render state manifest as JSON")?;
-    fs::write(&target, json)
-        .with_context(|| format!("failed to write state manifest to '{}'", target.display()))?;
+    fs::write(&manifest_target, manifest_json).with_context(|| {
+        format!(
+            "failed to write state manifest to '{}'",
+            manifest_target.display()
+        )
+    })?;
+
+    let snapshot = state_snapshot_from_report(&report);
+    let snapshot_target = state_dir.join("snapshot.json");
+    let snapshot_json = serde_json::to_string_pretty(&snapshot)
+        .context("failed to render state snapshot as JSON")?;
+    fs::write(&snapshot_target, snapshot_json).with_context(|| {
+        format!(
+            "failed to write state snapshot to '{}'",
+            snapshot_target.display()
+        )
+    })?;
 
     Ok(signal_count)
+}
+
+fn state_snapshot_from_report(report: &StateReport) -> StateSnapshotReport {
+    let mut signals = Vec::new();
+
+    for file in &report.files {
+        for signal in &file.signals {
+            signals.push(StateSnapshotSignal {
+                key: signal.key.clone(),
+                owner: signal.owner.clone(),
+                ty: signal.ty.clone(),
+                value: signal.initial.clone(),
+            });
+        }
+    }
+
+    StateSnapshotReport {
+        version: 1,
+        signals,
+    }
 }
 
 fn write_melt_graph_to_dist(root: &Path, output_dir: &Path) -> Result<bool> {
@@ -5578,7 +5626,7 @@ fn print_static_build_status(status: &StaticBuildStatus) {
             }
             if *state_signal_count > 0 {
                 println!(
-                    "Wrote state manifest for {state_signal_count} signal(s) into {}/_ax/state/manifest.json",
+                    "Wrote state manifest and snapshot for {state_signal_count} signal(s) into {}/_ax/state/",
                     output_dir.display()
                 );
             }
@@ -5613,7 +5661,7 @@ fn print_static_build_status(status: &StaticBuildStatus) {
             }
             if *state_signal_count > 0 {
                 println!(
-                    "Wrote state manifest for {state_signal_count} signal(s) into {}/_ax/state/manifest.json",
+                    "Wrote state manifest and snapshot for {state_signal_count} signal(s) into {}/_ax/state/",
                     output_dir.display()
                 );
             }
@@ -11452,6 +11500,18 @@ page state count: Number = 1
         assert!(manifest.contains("\"ty\": \"String\""));
         assert!(manifest.contains("\"name\": \"count\""));
         assert!(manifest.contains("\"key\": \"page:root:count:2\""));
+
+        let snapshot = fs::read_to_string(root.join("dist/_ax/state/snapshot.json"))
+            .expect("state snapshot should exist");
+        assert!(snapshot.contains("\"version\": 1"));
+        assert!(snapshot.contains("\"key\": \"page:root:theme:1\""));
+        assert!(snapshot.contains("\"owner\": \"page:/\""));
+        assert!(snapshot.contains("\"ty\": \"String\""));
+        assert!(snapshot.contains("\"kind\": \"string\""));
+        assert!(snapshot.contains("\"value\": \"silver\""));
+        assert!(snapshot.contains("\"key\": \"page:root:count:2\""));
+        assert!(snapshot.contains("\"kind\": \"number\""));
+        assert!(snapshot.contains("\"value\": 1.0"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
