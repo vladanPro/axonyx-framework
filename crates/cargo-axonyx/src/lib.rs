@@ -53,7 +53,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.15";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.16";
 const AXONYX_UI_VERSION: &str = "0.0.48";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -12166,18 +12166,20 @@ axonyx-runtime = "0.1.0"
         .expect("config should write");
         fs::write(
             app_root.join("Cargo.toml"),
-            r#"
+            format!(
+                r#"
 [package]
 name = "demo-app"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-runtime = "0.1.15"
+axonyx-runtime = "{AXONYX_RUNTIME_VERSION}"
 
 [dependencies.axonyx-ui]
 path = "vendor/axonyx-ui"
 "#,
+            ),
         )
         .expect("cargo manifest should write");
         fs::write(
