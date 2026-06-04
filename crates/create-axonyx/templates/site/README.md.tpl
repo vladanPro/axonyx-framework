@@ -4,9 +4,9 @@ Generated with `create-axonyx` using the `site` template.
 
 {{AXONYX_RUNTIME_SOURCE_NOTE}}
 
-This starter is oriented around a marketing or presentation site shape with a stronger landing page voice while keeping the same Axonyx runtime and backend authoring model.
+This starter is oriented around a polished marketing or product site shape while keeping the same Axonyx runtime and backend authoring model.
 
-The `site` template already depends on the published `axonyx-ui` Cargo package, activates Foundry assets with `use "@axonyx/ui"`, and wires the `silver` theme in `app/layout.ax`.
+The `site` template already depends on the published `axonyx-ui` Cargo package, activates Foundry assets with `use "@axonyx/ui"`, wires a `silver` theme preflight in `app/layout.ax`, and includes a theme switcher for Foundry bronze/silver/gold testing.
 
 ## Authoring Direction
 
@@ -15,6 +15,8 @@ This starter follows the recommended AX v2 authoring path:
 - JSX-like `.ax` files
 - `app/layout.ax` and `app/page.ax` route entrypoints
 - nested app routes for site sections
+- a reusable top navigation shell
+- a landing page with hero, stats, feature sections, commands, and CTA areas
 - imports from `@/components/...` and `@axonyx/ui/...`
 
 Older indentation-first `.ax` syntax still exists for compatibility, but new site pages
@@ -86,15 +88,17 @@ Suggested first edit:
 
 - open `app/page.ax`
 - change hero copy or card titles
+- try the theme switcher in the header
 - run `cargo ax run dev`
 - reload `http://127.0.0.1:3000`
 
 ## Starter Shape
 
-- landing-focused `app/page.ax`
+- landing-focused `app/page.ax` with Foundry hero, stats, feature cards, and command panels
 - featured posts section in `app/posts/page.ax`
 - action-backed form demo with `ActionForm`, `ActionStatus`, typed inputs, and
   defaulted optional action fields
+- page state demo that writes a state manifest during `cargo ax build`
 - typed `POST /api/posts` route input example in `routes/api/posts.ax`
 - reusable Foundry imports from `@axonyx/ui/...`
 - same backend route/loader/action/job draft structure as the minimal template

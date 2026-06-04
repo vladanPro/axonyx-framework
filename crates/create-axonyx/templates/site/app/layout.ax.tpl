@@ -1,41 +1,37 @@
 use "@axonyx/ui"
-import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
-import { HeroCard } from "@axonyx/ui/foundry/HeroCard.ax"
+import { Header } from "@axonyx/ui/foundry/Header.ax"
+import { Navbar } from "@axonyx/ui/foundry/Navbar.ax"
 import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
+import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
+import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
 
 page RootLayout
 
 <Head>
   <Title>{{APP_NAME}}</Title>
-  <Theme>silver</Theme>
+  <Theme storageKey="axonyx-site-theme" default="silver" preflight="true" />
   <Meta
     name="description"
-    content="{{APP_NAME}} ships presentation-first pages in Axonyx with minimal browser-side JavaScript."
+    content="{{APP_NAME}} is an Axonyx site starter with Foundry UI, route-first pages, and minimal browser-side JavaScript."
   />
   <Link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 </Head>
 
 <SiteShell max="xl">
-  <HeroCard title="{{APP_NAME}}">
-    <Copy tone="eyebrow">Axonyx site starter</Copy>
-    <img
-      src="/brand-mark.svg"
-      alt="{{APP_NAME}} brand mark"
-      width={80}
-      height={80}
-    />
-    <Copy tone="lead">
-      A presentation-first starter that already ships with Axonyx UI Foundry
-      imports, silver theme tokens, and minimal browser-side JavaScript.
-    </Copy>
-    <Copy>
-      Start editing content in route files while the shell and visual contract
-      stay reusable.
-    </Copy>
-    <nav class="docs-nav">
+  <Header sticky="top">
+    <Navbar brandHref="/">
+      <span slot="brand">{{APP_NAME}}</span>
       <TextLink href="/">Home</TextLink>
       <TextLink href="/posts">Posts</TextLink>
-    </nav>
-  </HeroCard>
+      <TextLink href="/api/posts">API</TextLink>
+      <ThemeSwitcher
+        label="Theme"
+        size="sm"
+        surface="raised"
+        storageKey="axonyx-site-theme"
+        ariaLabel="Choose Foundry theme"
+      />
+    </Navbar>
+  </Header>
   <Slot />
 </SiteShell>
