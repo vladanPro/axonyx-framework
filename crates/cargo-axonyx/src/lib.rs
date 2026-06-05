@@ -8554,9 +8554,9 @@ fn load_dist_ax_asset(root: &Path, request_path: &str) -> Result<Option<StaticAs
         return Ok(None);
     }
 
-    let asset_path = segments.iter().fold(root.join("dist"), |current, segment| {
-        current.join(segment)
-    });
+    let asset_path = segments
+        .iter()
+        .fold(root.join("dist"), |current, segment| current.join(segment));
 
     if !asset_path.exists() || !asset_path.is_file() {
         return Ok(None);
@@ -11133,10 +11133,7 @@ route GET "/api/posts"
 
         assert_eq!(response.status, 200);
         assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
-        assert_eq!(
-            response.body.into_bytes(),
-            br#"{"version":1,"signals":[]}"#
-        );
+        assert_eq!(response.body.into_bytes(), br#"{"version":1,"signals":[]}"#);
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
