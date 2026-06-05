@@ -7281,6 +7281,10 @@ fn handle_http_request(
     }
 
     if request.method == "GET" {
+        if let Some(asset) = load_dist_ax_asset(&state.root, &request.target)? {
+            return Ok(internal_asset_response(asset));
+        }
+
         if let Some(asset) = load_package_asset(&state.root, &request.target)? {
             return Ok(cacheable_asset_response(asset));
         }
@@ -8533,6 +8537,38 @@ fn redirect_response(status: u16, location: &str) -> AxHttpResponse {
 fn cacheable_asset_response(asset: StaticAsset) -> AxHttpResponse {
     AxHttpResponse::bytes(200, asset.content_type, asset.body)
         .with_header("Cache-Control", IMMUTABLE_ASSET_CACHE_CONTROL)
+}
+
+fn internal_asset_response(asset: StaticAsset) -> AxHttpResponse {
+    AxHttpResponse::bytes(200, asset.content_type, asset.body).with_no_store()
+}
+
+fn load_dist_ax_asset(root: &Path, request_path: &str) -> Result<Option<StaticAsset>> {
+    let normalized = normalize_request_path(request_path)?;
+    let segments = path_segments(&normalized);
+    if segments.len() < 3 || segments[0] != "_ax" {
+        return Ok(None);
+    }
+
+    if !matches!(segments[1].as_str(), "state" | "content" | "melt") {
+        return Ok(None);
+    }
+
+    let asset_path = segments.iter().fold(root.join("dist"), |current, segment| {
+        current.join(segment)
+    });
+
+    if !asset_path.exists() || !asset_path.is_file() {
+        return Ok(None);
+    }
+
+    let body = fs::read(&asset_path)
+        .with_context(|| format!("failed to read internal asset '{}'", asset_path.display()))?;
+
+    Ok(Some(StaticAsset {
+        content_type: content_type_for(&asset_path),
+        body,
+    }))
 }
 
 fn load_public_asset(root: &Path, request_path: &str) -> Result<Option<StaticAsset>> {
@@ -11065,6 +11101,41 @@ route GET "/api/posts"
         assert_eq!(
             response.header_value("Cache-Control"),
             Some(IMMUTABLE_ASSET_CACHE_CONTROL)
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn start_server_serves_state_snapshot_from_dist_ax_with_no_store() {
+        let root = make_temp_dir("state-snapshot-asset");
+        fs::create_dir_all(root.join("dist/_ax/state")).expect("state dir should exist");
+        fs::write(
+            root.join("dist/_ax/state/snapshot.json"),
+            r#"{"version":1,"signals":[]}"#,
+        )
+        .expect("snapshot should write");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+            runtime_config: AxServerRuntimeConfig::from_root(&root)
+                .expect("runtime config should load"),
+        };
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/_ax/state/snapshot.json".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+        assert_eq!(
+            response.body.into_bytes(),
+            br#"{"version":1,"signals":[]}"#
         );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
