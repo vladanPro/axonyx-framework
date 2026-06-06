@@ -53,7 +53,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.24";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.25";
 const AXONYX_UI_VERSION: &str = "0.0.48";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -4061,6 +4061,7 @@ fn check_backend_requirements(
         &plan,
         type_names.as_ref(),
     ));
+    diagnostics.extend(check_backend_env_contracts(path, source, root, &plan));
 
     if !backend_plan_uses_signed_session(&plan)
         || auth_secret_configured(root, "AX_SECRET_SESSION_KEY")
@@ -4076,6 +4077,35 @@ fn check_backend_requirements(
         code: "axonyx-auth-secret",
         message: "Auth.signedSession requires AX_SECRET_SESSION_KEY. Set it in the environment or local .env file.".to_string(),
     });
+
+    diagnostics
+}
+
+fn check_backend_env_contracts(
+    path: &Path,
+    source: &str,
+    root: Option<&Path>,
+    plan: &AxBackendPlan,
+) -> Vec<CheckDiagnostic> {
+    let declared = declared_backend_env_names(root, plan);
+    let mut diagnostics = Vec::new();
+
+    for key in backend_plan_env_refs(plan) {
+        if declared.contains(&key) {
+            continue;
+        }
+
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_source_pattern(source, &format!("env.{key}")),
+            column: 1,
+            severity: "error",
+            code: "axonyx-env-declaration",
+            message: format!(
+                "env.{key} is used but not declared. Add `env {key}: Secret<String>` or `env {key}: Public<String>` to app/backend.ax."
+            ),
+        });
+    }
 
     diagnostics
 }
@@ -4455,6 +4485,127 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             AxStepPlan::Let { .. } | AxStepPlan::Delete { .. } | AxStepPlan::Return(_) => false,
         })
     })
+}
+
+fn declared_backend_env_names(
+    root: Option<&Path>,
+    plan: &AxBackendPlan,
+) -> std::collections::BTreeSet<String> {
+    let mut declared = plan
+        .envs
+        .iter()
+        .map(|env| env.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let Some(root) = root else {
+        return declared;
+    };
+    let path = root.join("app").join("backend.ax");
+    let Ok(source) = fs::read_to_string(&path) else {
+        return declared;
+    };
+    let Ok(document) = parse_backend_ax(&source) else {
+        return declared;
+    };
+    let Ok(plan) = lower_backend_document(&document) else {
+        return declared;
+    };
+
+    declared.extend(plan.envs.into_iter().map(|env| env.name));
+    declared
+}
+
+fn backend_plan_env_refs(plan: &AxBackendPlan) -> std::collections::BTreeSet<String> {
+    let mut refs = std::collections::BTreeSet::new();
+
+    for step in plan.globals.iter().chain(
+        plan.handlers
+            .iter()
+            .flat_map(|handler| handler.steps.iter()),
+    ) {
+        collect_env_refs_from_step(step, &mut refs);
+    }
+
+    refs
+}
+
+fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BTreeSet<String>) {
+    match step {
+        AxStepPlan::Let {
+            value: AxValuePlan::Expr(expr),
+            ..
+        } => collect_env_refs_from_expr(expr, refs),
+        AxStepPlan::Let {
+            value: AxValuePlan::Query(query),
+            ..
+        } => {
+            for filter in &query.filters {
+                collect_env_refs_from_expr(&filter.value, refs);
+            }
+        }
+        AxStepPlan::Require { value, fallback } => {
+            collect_env_refs_from_expr(value, refs);
+            if let Some(fallback) = fallback {
+                collect_env_refs_from_return(fallback, refs);
+            }
+        }
+        AxStepPlan::Return(value) => collect_env_refs_from_return(value, refs),
+        AxStepPlan::Patch { signal, value } => {
+            collect_env_refs_from_expr(signal, refs);
+            collect_env_refs_from_expr(value, refs);
+        }
+        AxStepPlan::Header { name, value } | AxStepPlan::Cookie { name, value } => {
+            collect_env_refs_from_expr(name, refs);
+            collect_env_refs_from_expr(value, refs);
+        }
+        AxStepPlan::Hook { value, .. } => collect_env_refs_from_expr(value, refs),
+        AxStepPlan::ClearCookie { name } => collect_env_refs_from_expr(name, refs),
+        AxStepPlan::Revalidate { target } => collect_env_refs_from_expr(target, refs),
+        AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => {
+            for field in fields {
+                collect_env_refs_from_expr(&field.value, refs);
+            }
+        }
+        AxStepPlan::Delete { filters, .. } => {
+            for filter in filters {
+                collect_env_refs_from_expr(&filter.value, refs);
+            }
+        }
+        AxStepPlan::Send { payload, .. } => collect_env_refs_from_expr(payload, refs),
+    }
+}
+
+fn collect_env_refs_from_return(
+    value: &axonyx_core::ax_backend_lowering_prelude::AxReturnPlan,
+    refs: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Expr(expr)
+        | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Json(expr) => {
+            collect_env_refs_from_expr(expr, refs);
+        }
+        axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Redirect { target, .. } => {
+            collect_env_refs_from_expr(target, refs);
+        }
+        axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NoContent
+        | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Ok => {}
+    }
+}
+
+fn collect_env_refs_from_expr(
+    expr: &axonyx_core::ax_backend_lowering_prelude::AxRustExpr,
+    refs: &mut std::collections::BTreeSet<String>,
+) {
+    let code = expr.code.as_str();
+    let prefix = "runtime.env().value(\"";
+    let suffix = "\")?";
+    let Some(key) = code
+        .strip_prefix(prefix)
+        .and_then(|key| key.strip_suffix(suffix))
+    else {
+        return;
+    };
+    refs.insert(key.to_string());
 }
 
 fn auth_secret_configured(root: Option<&Path>, key: &str) -> bool {
@@ -4921,6 +5072,7 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::UnexpectedIndentation { line }
         | AxBackendParseError::InvalidBlock { line }
         | AxBackendParseError::InvalidDataBinding { line }
+        | AxBackendParseError::InvalidEnvDeclaration { line }
         | AxBackendParseError::InvalidInputSection { line }
         | AxBackendParseError::InvalidField { line }
         | AxBackendParseError::InvalidMutation { line }
@@ -15313,6 +15465,58 @@ type Post {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 2);
         assert_eq!(diagnostics[0].code, "axonyx-backend-parse");
+    }
+
+    #[test]
+    fn check_app_sources_reports_undeclared_env_scope_usage() {
+        let root = make_temp_dir("undeclared-env-scope");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action ReadEnv
+  data dbUrl = env.DATABASE_URL
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-env-declaration");
+        assert!(diagnostics[0].message.contains("env.DATABASE_URL"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_accepts_declared_env_scope_usage() {
+        let root = make_temp_dir("declared-env-scope");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            r#"
+backend
+  env DATABASE_URL: Secret<String>
+"#,
+        )
+        .expect("backend root should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action ReadEnv
+  data dbUrl = env.DATABASE_URL
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
