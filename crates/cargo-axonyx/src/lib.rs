@@ -53,7 +53,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.22";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.23";
 const AXONYX_UI_VERSION: &str = "0.0.48";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -8515,6 +8515,10 @@ fn action_patch_response(
     route: &ResolvedRoute,
     result: &AxPreviewActionResult,
 ) -> Result<AxHttpResponse> {
+    if let Some(error) = &result.error {
+        return action_error_response(route, error);
+    }
+
     let patches = normalize_action_patches(route, &result.patches)?;
     validate_action_patches(route, &patches)?;
 
@@ -8534,6 +8538,31 @@ fn action_patch_response(
         AxHttpResponse::bytes(200, "application/ax-patch+json; charset=utf-8", body)
             .with_no_store(),
     )
+}
+
+fn action_error_response(
+    route: &ResolvedRoute,
+    error: &axonyx_runtime::AxPreviewActionError,
+) -> Result<AxHttpResponse> {
+    let redirect_to = route.request_path.clone();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "ok": false,
+        "redirect": redirect_to,
+        "error": {
+            "message": error.message,
+            "status": error.status,
+            "value": ax_value_to_json(&error.value),
+        },
+        "patches": [],
+    }))
+    .context("failed to serialize action error response")?;
+
+    Ok(AxHttpResponse::bytes(
+        error.status,
+        "application/ax-error+json; charset=utf-8",
+        body,
+    )
+    .with_no_store())
 }
 
 fn normalize_action_patches(
@@ -14018,6 +14047,68 @@ action SetTheme
     }
 
     #[test]
+    fn action_request_can_return_validation_error_response() {
+        let root = make_temp_dir("action-validation-error-response");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\npage state theme: String = \"silver\"\n<Copy>Home</Copy>\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetTheme
+  input:
+    theme: string
+
+  data themes = ["silver", "bronze", "gold"]
+  require input.theme in themes else error "Theme is not supported."
+  patch theme = input.theme
+  return ok
+"#,
+        )
+        .expect("actions should write");
+        let state = test_dev_state(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Dev).expect("request should handle");
+        });
+
+        let body = "__ax_patch=1&theme=blue";
+        let request = format!(
+            "POST /__axonyx/action?path=%2F&name=SetTheme HTTP/1.1\r\nHost: localhost\r\nAccept: application/ax-patch+json\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(request.as_bytes())
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 422 Unprocessable Entity"));
+        assert!(raw.contains("Content-Type: application/ax-error+json; charset=utf-8"));
+        assert!(raw.contains("\"ok\":false"));
+        assert!(raw.contains("\"message\":\"Theme is not supported.\""));
+        assert!(raw.contains("\"patches\":[]"));
+        assert!(!raw.contains("page:root:theme:1"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn action_patch_response_rejects_known_state_type_mismatch() {
         let root = make_temp_dir("action-patch-type-mismatch");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
@@ -14044,6 +14135,7 @@ page state count: Number = 0
                 "root:count:1",
                 AxValue::String("not-a-number".to_string()),
             )],
+            error: None,
         };
 
         let error =
