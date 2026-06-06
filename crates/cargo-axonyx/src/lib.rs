@@ -53,7 +53,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.23";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.24";
 const AXONYX_UI_VERSION: &str = "0.0.48";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -4785,6 +4785,7 @@ fn import_source_line(source: &str, import_source: &str) -> usize {
 fn looks_like_backend_ax(source: &str) -> bool {
     source.lines().map(str::trim_start).any(|line| {
         line.starts_with("route ")
+            || line == "backend"
             || line.starts_with("loader ")
             || line.starts_with("action ")
             || line.starts_with("job ")
@@ -6957,7 +6958,12 @@ fn collect_backend_sources(root: &Path, out: &mut Vec<(String, String)>) -> Resu
 
     collect_backend_sources_in_dir(&routes_root, &routes_root, out, true)?;
     collect_backend_sources_in_dir(&jobs_root, &jobs_root, out, true)?;
-    collect_named_backend_files(&app_root, &app_root, out, &["loader.ax", "actions.ax"])?;
+    collect_named_backend_files(
+        &app_root,
+        &app_root,
+        out,
+        &["backend.ax", "loader.ax", "actions.ax"],
+    )?;
     Ok(())
 }
 
@@ -7862,6 +7868,11 @@ fn execute_backend_route_request(
     request: &AxHttpRequest,
 ) -> Result<Option<AxPreviewHttpResponse>> {
     let mut sources = Vec::new();
+    sources.extend(
+        read_app_backend_sources(&state.root)?
+            .into_iter()
+            .map(|source| ("app/backend.ax".to_string(), source)),
+    );
     let routes_root = state.root.join("routes");
     collect_backend_sources_in_dir(&routes_root, &routes_root, &mut sources, true)?;
 
@@ -7894,6 +7905,17 @@ fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
     }
     http.set_cookies.extend(response.set_cookies);
     http
+}
+
+fn read_app_backend_sources(root: &Path) -> Result<Vec<String>> {
+    let path = root.join("app").join("backend.ax");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![fs::read_to_string(&path).with_context(|| {
+        format!("failed to read backend source '{}'", path.display())
+    })?])
 }
 
 fn apply_server_response_policy(
@@ -8471,13 +8493,19 @@ fn handle_action_request(
 
     let action_source = fs::read_to_string(actions_path)
         .with_context(|| format!("failed to read '{}'", actions_path.display()))?;
+    let mut action_sources = read_app_backend_sources(&state.root)?;
+    action_sources.push(action_source);
+    let action_source_refs = action_sources
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let input_fields = parse_form_body(&request.body);
     let mut store = state
         .preview_store
         .lock()
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
     let result = execute_preview_action_sources(
-        &[action_source.as_str()],
+        &action_source_refs,
         &action_name,
         &input_fields,
         &mut store,
@@ -14058,13 +14086,20 @@ action SetTheme
         )
         .expect("page should write");
         fs::write(
+            root.join("app/backend.ax"),
+            r#"
+backend
+  data themes: List<String> = ["silver", "bronze", "gold"]
+"#,
+        )
+        .expect("backend root should write");
+        fs::write(
             root.join("app/actions.ax"),
             r#"
 action SetTheme
   input:
     theme: string
 
-  data themes = ["silver", "bronze", "gold"]
   require input.theme in themes else error "Theme is not supported."
   patch theme = input.theme
   return ok
