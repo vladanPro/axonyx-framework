@@ -19,8 +19,8 @@ use axonyx_core::ax_backend_ast_prelude::{
 };
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
-    lower_backend_document, AxBackendPlan, AxHandlerKind, AxReturnPlan, AxRustExpr, AxStepPlan,
-    AxValuePlan,
+    lower_backend_document, AxBackendPlan, AxFieldPlan, AxHandlerKind, AxReturnPlan, AxRustExpr,
+    AxStepPlan, AxValuePlan,
 };
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_lowering_prelude::AxValue;
@@ -3538,8 +3538,197 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     }
     diagnostics.extend(check_axonyx_config(root)?);
     diagnostics.extend(check_route_manifest(root)?);
+    diagnostics.extend(check_action_patch_contracts(root)?);
 
     Ok(diagnostics)
+}
+
+fn check_action_patch_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let mut diagnostics = Vec::new();
+
+    for route in collect_page_route_manifest(root)? {
+        let Some(actions_file) = &route.actions else {
+            continue;
+        };
+        let actions_path = root.join(actions_file);
+        let source = fs::read_to_string(&actions_path)
+            .with_context(|| format!("failed to read '{}'", actions_path.display()))?;
+        let document = match parse_backend_ax(&source) {
+            Ok(document) => document,
+            Err(_) => continue,
+        };
+        let plan = match lower_backend_document(&document) {
+            Ok(plan) => plan,
+            Err(_) => continue,
+        };
+        let route_state =
+            collect_route_state_manifest_from_route_item(root, &route).with_context(|| {
+                format!(
+                    "failed to collect state manifest for action route '{}'",
+                    route.route
+                )
+            })?;
+
+        for handler in &plan.handlers {
+            let AxHandlerKind::Action { input, .. } = &handler.kind else {
+                continue;
+            };
+
+            for step in &handler.steps {
+                let AxStepPlan::Patch { signal, value } = step else {
+                    continue;
+                };
+
+                let Some(signal_name) = literal_string_expr(signal) else {
+                    continue;
+                };
+                let line = line_for_action_patch_signal(&source, &signal_name);
+                let Some(canonical_signal) = route_state.resolve_signal_key(&signal_name) else {
+                    diagnostics.push(CheckDiagnostic {
+                        file: display_path(&actions_path),
+                        line,
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-action-patch-target",
+                        message: format!(
+                            "action `{}` patches unknown state `{}`. Declare matching state in this route page/layout or patch an existing state signal.",
+                            handler.name, signal_name
+                        ),
+                    });
+                    continue;
+                };
+
+                let Some(expected_ty) = route_state.signal_type(&canonical_signal) else {
+                    continue;
+                };
+                let Some(actual_ty) = infer_action_patch_value_type(value, input) else {
+                    continue;
+                };
+                if ax_state_type_compatible(&actual_ty, expected_ty) {
+                    continue;
+                }
+
+                diagnostics.push(CheckDiagnostic {
+                    file: display_path(&actions_path),
+                    line,
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-action-patch-type",
+                    message: format!(
+                        "action `{}` patches state `{}` with {} but the state expects {}.",
+                        handler.name, canonical_signal, actual_ty, expected_ty
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(diagnostics)
+}
+
+fn collect_route_state_manifest_from_route_item(
+    root: &Path,
+    route: &RouteManifestItem,
+) -> Result<RouteStateManifest> {
+    let page_path = root.join(&route.file);
+    let layout_paths = route
+        .layouts
+        .iter()
+        .map(|layout| root.join(layout))
+        .collect::<Vec<_>>();
+    collect_route_state_manifest_from_paths(root, &page_path, layout_paths.iter())
+}
+
+fn collect_route_state_manifest_from_paths<'a>(
+    root: &Path,
+    page_path: &Path,
+    layout_paths: impl Iterator<Item = &'a PathBuf>,
+) -> Result<RouteStateManifest> {
+    let mut signals = RouteStateManifest::default();
+    let mut paths = layout_paths.map(PathBuf::as_path).collect::<Vec<&Path>>();
+    paths.push(page_path);
+
+    for path in paths {
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("failed to read '{}'", path.display()))?;
+        if !source_has_state_declaration(&source) {
+            continue;
+        }
+
+        let file = parse_ax_v2(&source).with_context(|| {
+            format!(
+                "failed to parse state declarations from '{}'",
+                path.display()
+            )
+        })?;
+        let scope = state_scope_for_path(root, path);
+        let manifest =
+            build_state_manifest_with_scope_mapper(&file, &scope, |state, default_scope| {
+                scoped_state_decl_scope(root, path, state.scope.as_deref())
+                    .unwrap_or_else(|| default_scope.to_string())
+            })
+            .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
+
+        for signal in manifest.signals {
+            let legacy_key = format!("root:{}:{}", signal.name, signal.id.index);
+            signals.insert(signal.name, signal.key, legacy_key, signal.ty);
+        }
+    }
+
+    Ok(signals)
+}
+
+fn literal_string_expr(expr: &AxRustExpr) -> Option<String> {
+    let code = expr.code.trim();
+    let literal = code.strip_suffix(".to_string()").unwrap_or(code).trim();
+    serde_json::from_str::<String>(literal).ok()
+}
+
+fn infer_action_patch_value_type(value: &AxRustExpr, input: &[AxFieldPlan]) -> Option<String> {
+    let code = value.code.trim();
+    if code.starts_with('"') {
+        return Some("String".to_string());
+    }
+    if code == "true" || code == "false" {
+        return Some("Bool".to_string());
+    }
+    if code.parse::<f64>().is_ok() {
+        return Some("Number".to_string());
+    }
+    let field = code.strip_prefix("input.")?;
+    input
+        .iter()
+        .find(|input| input.name == field)
+        .map(|input| ax_state_type_for_rust_type(&input.rust_ty))
+}
+
+fn ax_state_type_for_rust_type(ty: &str) -> String {
+    match ty.trim() {
+        "String" | "&str" => "String".to_string(),
+        "bool" => "Bool".to_string(),
+        "i64" | "u64" | "f64" | "usize" | "isize" => "Number".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn ax_state_type_compatible(actual_ty: &str, expected_ty: &str) -> bool {
+    expected_ty == "Unknown" || actual_ty == "Unknown" || actual_ty == expected_ty
+}
+
+fn line_for_action_patch_signal(source: &str, signal: &str) -> usize {
+    let friendly = signal
+        .strip_prefix("root:")
+        .and_then(|rest| rest.rsplit_once(':').map(|(name, _)| name))
+        .unwrap_or(signal);
+
+    source
+        .lines()
+        .position(|line| {
+            let line = line.trim_start();
+            line.starts_with("patch ") && (line.contains(signal) || line.contains(friendly))
+        })
+        .map(|index| index + 1)
+        .unwrap_or_else(|| line_for_source_pattern(source, "patch "))
 }
 
 fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
@@ -8398,48 +8587,15 @@ fn validate_action_patches(route: &ResolvedRoute, patches: &[AxPreviewStatePatch
 }
 
 fn collect_route_state_manifest(route: &ResolvedRoute) -> Result<RouteStateManifest> {
-    let mut signals = RouteStateManifest::default();
-
-    for path in route
-        .layout_paths
-        .iter()
-        .chain(std::iter::once(&route.page_path))
-    {
-        let source = fs::read_to_string(path)
-            .with_context(|| format!("failed to read '{}'", path.display()))?;
-        if !source_has_state_declaration(&source) {
-            continue;
-        }
-
-        let file = parse_ax_v2(&source).with_context(|| {
-            format!(
-                "failed to parse state declarations from '{}'",
-                path.display()
-            )
-        })?;
-        let app_root = app_root_for_app_path(&route.page_path).unwrap_or_else(|| {
-            route
-                .page_path
-                .parent()
-                .unwrap_or_else(|| Path::new(""))
-                .to_path_buf()
-        });
-        let root = app_root.parent().unwrap_or_else(|| Path::new(""));
-        let scope = state_scope_for_path(root, path);
-        let manifest =
-            build_state_manifest_with_scope_mapper(&file, &scope, |state, default_scope| {
-                scoped_state_decl_scope(root, path, state.scope.as_deref())
-                    .unwrap_or_else(|| default_scope.to_string())
-            })
-            .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
-
-        for signal in manifest.signals {
-            let legacy_key = format!("root:{}:{}", signal.name, signal.id.index);
-            signals.insert(signal.name, signal.key, legacy_key, signal.ty);
-        }
-    }
-
-    Ok(signals)
+    let app_root = app_root_for_app_path(&route.page_path).unwrap_or_else(|| {
+        route
+            .page_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf()
+    });
+    let root = app_root.parent().unwrap_or_else(|| Path::new(""));
+    collect_route_state_manifest_from_paths(root, &route.page_path, route.layout_paths.iter())
 }
 
 #[derive(Debug, Default)]
@@ -8463,6 +8619,10 @@ impl RouteStateManifest {
 
     fn resolve_signal_key(&self, signal: &str) -> Option<String> {
         self.aliases.get(signal).cloned()
+    }
+
+    fn signal_type(&self, signal: &str) -> Option<&str> {
+        self.signal_types.get(signal).map(String::as_str)
     }
 }
 
@@ -13892,6 +14052,87 @@ page state count: Number = 0
         assert!(error
             .to_string()
             .contains("state patch for 'page:root:count:1' expected Number but got String"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_unknown_action_patch_target() {
+        let root = make_temp_dir("action-patch-unknown-target");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+page state theme: String = "silver"
+
+<Copy>Home</Copy>
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetTheme
+  input:
+    theme: string
+
+  patch missingTheme = input.theme
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, "axonyx-action-patch-target");
+        assert_eq!(diagnostics[0].line, 6);
+        assert!(diagnostics[0].message.contains("missingTheme"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_action_patch_input_type_mismatch() {
+        let root = make_temp_dir("action-patch-input-type-mismatch");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home
+
+page state count: Number = 0
+
+<input bind:value={count} />
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetCount
+  input:
+    count: string
+
+  patch count = input.count
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, "axonyx-action-patch-type");
+        assert_eq!(diagnostics[0].line, 6);
+        assert!(diagnostics[0].message.contains("String"));
+        assert!(diagnostics[0].message.contains("Number"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
