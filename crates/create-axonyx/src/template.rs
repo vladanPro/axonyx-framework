@@ -19,6 +19,7 @@ const APP_DOMAIN_POSTS_RS: &str = include_str!("../templates/minimal/src/domain/
 const APP_DB_MOD_RS: &str = include_str!("../templates/minimal/src/db/mod.rs.tpl");
 const APP_AXONYX_TOML: &str = include_str!("../templates/minimal/Axonyx.toml.tpl");
 const APP_LAYOUT_AX: &str = include_str!("../templates/minimal/app/layout.ax.tpl");
+const APP_BACKEND_AX: &str = include_str!("../templates/minimal/app/backend.ax.tpl");
 const APP_PAGE_AX: &str = include_str!("../templates/minimal/app/page.ax.tpl");
 const APP_NOT_FOUND_AX: &str = include_str!("../templates/minimal/app/not-found.ax.tpl");
 const APP_ERROR_AX: &str = include_str!("../templates/minimal/app/error.ax.tpl");
@@ -140,6 +141,10 @@ pub fn template_files(
                     contents: apply_vars(APP_LAYOUT_AX, &vars),
                 },
                 TemplateFile {
+                    relative_path: "app/backend.ax",
+                    contents: apply_vars(APP_BACKEND_AX, &vars),
+                },
+                TemplateFile {
                     relative_path: "app/page.ax",
                     contents: apply_vars(APP_PAGE_AX, &vars),
                 },
@@ -186,6 +191,10 @@ pub fn template_files(
                 TemplateFile {
                     relative_path: "app/layout.ax",
                     contents: apply_vars(SITE_APP_LAYOUT_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/backend.ax",
+                    contents: apply_vars(APP_BACKEND_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "app/page.ax",
@@ -238,6 +247,10 @@ pub fn template_files(
                 TemplateFile {
                     relative_path: "app/layout.ax",
                     contents: apply_vars(DOCS_APP_LAYOUT_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/backend.ax",
+                    contents: apply_vars(APP_BACKEND_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "app/page.ax",

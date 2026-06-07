@@ -687,6 +687,10 @@ mod tests {
         assert!(layout.contains("@axonyx/ui/foundry/ThemeSwitcher.ax"));
         assert!(layout.contains("use \"@axonyx/ui\""));
 
+        let backend =
+            fs::read_to_string(target_dir.join("app/backend.ax")).expect("backend should read");
+        assert!(backend.contains("env DATABASE_URL: Secret<String>"));
+
         let cargo_toml =
             fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
         assert!(cargo_toml.contains("axonyx-runtime = \"0.1.20\""));
