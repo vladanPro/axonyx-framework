@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use axonyx_core::ax_ast_prelude::{AxExpr, AxImport};
 use axonyx_core::ax_backend_ast_prelude::{
-    AxBackendBlock, AxBackendDocument, AxBackendStmt, AxHookPhase,
+    AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
 };
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
@@ -27,6 +27,7 @@ use axonyx_core::ax_lowering_prelude::AxValue;
 use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
 use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
+use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
 use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
@@ -35,9 +36,9 @@ use axonyx_runtime::server_prelude::{
     AxSseEvent,
 };
 use axonyx_runtime::{
-    execute_preview_action_sources, execute_preview_route_request_sources,
-    preview_ax_route_with_request_context_and_imports, AxPreviewActionResult,
-    AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
+    backend_prelude as ax_backend_runtime, execute_preview_action_sources,
+    execute_preview_route_request_sources, preview_ax_route_with_request_context_and_imports,
+    AxPreviewActionResult, AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::write::GzEncoder;
@@ -86,6 +87,7 @@ enum Commands {
     Build(BuildArgs),
     Check(CheckArgs),
     Content(ContentArgs),
+    Db(DbArgs),
     Dev(DevArgs),
     Doctor(DoctorArgs),
     Graph(GraphArgs),
@@ -177,6 +179,28 @@ struct ContentArgs {
     /// Output format for the content manifest.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
+}
+
+#[derive(Debug, Parser)]
+struct DbArgs {
+    #[command(subcommand)]
+    command: DbCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum DbCommands {
+    Check(DbCheckArgs),
+}
+
+#[derive(Debug, Parser)]
+struct DbCheckArgs {
+    /// Output format for the database check report.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+
+    /// Temporarily override DATABASE_URL / DB_URL for this check.
+    #[arg(long)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -844,6 +868,16 @@ struct InferredField {
     optional: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbCheckReport {
+    ok: bool,
+    driver: String,
+    transport: String,
+    url: Option<String>,
+    tables: Vec<String>,
+    message: String,
+}
+
 pub fn main_entry() {
     if let Err(error) = run() {
         print_cli_error(&error);
@@ -861,6 +895,7 @@ fn run() -> Result<()> {
         Commands::Build(args) => build_command(args),
         Commands::Check(args) => check_command(args),
         Commands::Content(args) => content_command(args),
+        Commands::Db(args) => db_command(args),
         Commands::Dev(args) => run_dev_server(args),
         Commands::Doctor(args) => doctor_command(args),
         Commands::Graph(args) => graph_command(args),
@@ -979,6 +1014,205 @@ fn check_command(args: CheckArgs) -> Result<()> {
     } else {
         std::process::exit(1);
     }
+}
+
+fn db_command(args: DbArgs) -> Result<()> {
+    match args.command {
+        DbCommands::Check(args) => db_check_command(args),
+    }
+}
+
+fn db_check_command(args: DbCheckArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_db_check_report(&root, args.url.as_deref())?;
+
+    match args.format {
+        CheckFormat::Text => print_db_check_text(&report),
+        CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+    }
+
+    if report.ok {
+        Ok(())
+    } else {
+        bail!("{}", report.message)
+    }
+}
+
+fn collect_db_check_report(root: &Path, url_override: Option<&str>) -> Result<DbCheckReport> {
+    let env = db_env_for_root(root, url_override)?;
+    let config = env
+        .database_config()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    config
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    if config.driver != ax_backend_runtime::AxDatabaseDriver::Sqlite {
+        bail!(
+            "cargo ax db check supports SQLite introspection first; configured driver is {}",
+            config.driver.as_str()
+        );
+    }
+
+    let runtime = ax_backend_runtime::runtime_from_env(env)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let value = ax_backend_runtime::AxQueryExecutor::load(
+        &runtime,
+        &ax_backend_runtime::AxQueryRequest {
+            collection: "sqlite_master".to_string(),
+            filters: vec![ax_backend_runtime::AxQueryFilterRequest {
+                field: "type".to_string(),
+                op: ax_backend_runtime::AxQueryFilterOp::Eq,
+                value: serde_json::json!("table"),
+            }],
+            orders: vec![ax_backend_runtime::AxQueryOrderRequest {
+                field: "name".to_string(),
+                direction: ax_backend_runtime::AxQueryOrderDirection::Asc,
+            }],
+            limit: None,
+            offset: None,
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    let tables = sqlite_master_tables_from_value(&value);
+    Ok(DbCheckReport {
+        ok: true,
+        driver: config.driver.as_str().to_string(),
+        transport: config.transport.as_str().to_string(),
+        url: config.url.map(|url| redact_db_url(&url)),
+        message: format!("SQLite database is reachable ({} table(s)).", tables.len()),
+        tables,
+    })
+}
+
+fn print_db_check_text(report: &DbCheckReport) {
+    println!("Database check: {}", if report.ok { "ok" } else { "error" });
+    println!("Driver: {}", report.driver);
+    println!("Transport: {}", report.transport);
+    if let Some(url) = &report.url {
+        println!("URL: {url}");
+    }
+    println!("{}", report.message);
+    if report.tables.is_empty() {
+        println!("Tables: none");
+    } else {
+        println!("Tables:");
+        for table in &report.tables {
+            println!("  - {table}");
+        }
+    }
+}
+
+fn sqlite_master_tables_from_value(value: &serde_json::Value) -> Vec<String> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+        .filter(|name| !name.starts_with("sqlite_"))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn db_env_for_root(root: &Path, url_override: Option<&str>) -> Result<ax_backend_runtime::AxEnv> {
+    let mut env = ax_backend_runtime::AxEnv::new();
+    merge_env_file_into_ax_env(&mut env, &root.join(".env"))?;
+    merge_env_file_into_ax_env(&mut env, &root.join(".env.local"))?;
+    for (key, value) in std::env::vars() {
+        set_ax_env_key(&mut env, &key, &value);
+    }
+    infer_sqlite_driver_from_env_url(&mut env);
+    if let Some(url) = url_override {
+        env.secret
+            .insert("database_url".to_string(), url.to_string());
+        if looks_like_sqlite_url(url) {
+            env.secret
+                .insert("database_driver".to_string(), "sqlite".to_string());
+        }
+    }
+    Ok(env)
+}
+
+fn infer_sqlite_driver_from_env_url(env: &mut ax_backend_runtime::AxEnv) {
+    if env.secret.contains_key("database_driver") || env.secret.contains_key("db_driver") {
+        return;
+    }
+
+    let Some(url) = env
+        .secret
+        .get("database_url")
+        .or_else(|| env.secret.get("db_url"))
+    else {
+        return;
+    };
+
+    if looks_like_sqlite_url(url) {
+        env.secret
+            .insert("database_driver".to_string(), "sqlite".to_string());
+    }
+}
+
+fn merge_env_file_into_ax_env(env: &mut ax_backend_runtime::AxEnv, path: &Path) -> Result<()> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if !key.is_empty() {
+            set_ax_env_key(env, key, value);
+        }
+    }
+
+    Ok(())
+}
+
+fn set_ax_env_key(env: &mut ax_backend_runtime::AxEnv, key: &str, value: &str) {
+    if let Some(public_key) = key.strip_prefix("AX_PUBLIC_") {
+        env.public
+            .insert(normalize_cli_env_key(public_key), value.to_string());
+    } else if let Some(secret_key) = key.strip_prefix("AX_SECRET_") {
+        env.secret
+            .insert(normalize_cli_env_key(secret_key), value.to_string());
+    } else {
+        env.secret
+            .insert(normalize_cli_env_key(key), value.to_string());
+    }
+}
+
+fn normalize_cli_env_key(key: &str) -> String {
+    key.trim().to_ascii_lowercase()
+}
+
+fn looks_like_sqlite_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower == ":memory:"
+        || lower.starts_with("sqlite:")
+        || lower.ends_with(".db")
+        || lower.ends_with(".sqlite")
+        || lower.ends_with(".sqlite3")
+}
+
+fn redact_db_url(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if let Some((user_info, host)) = rest.rsplit_once('@') {
+            if user_info.contains(':') {
+                return format!("{scheme}://<redacted>@{host}");
+            }
+        }
+    }
+    url.to_string()
 }
 
 fn run_command(args: RunArgs) -> Result<()> {
@@ -4055,6 +4289,7 @@ fn check_backend_requirements(
 
     let type_names = root.and_then(|root| collect_project_type_names(root).ok());
     let mut diagnostics = check_backend_route_inputs(path, source, document, &plan);
+    diagnostics.extend(check_backend_database_surface(path, source, root, document));
     diagnostics.extend(check_backend_return_contracts(
         path,
         source,
@@ -4062,6 +4297,7 @@ fn check_backend_requirements(
         type_names.as_ref(),
     ));
     diagnostics.extend(check_backend_env_contracts(path, source, root, &plan));
+    diagnostics.extend(check_backend_database_contracts(path, source, root, &plan));
 
     if !backend_plan_uses_signed_session(&plan)
         || auth_secret_configured(root, "AX_SECRET_SESSION_KEY")
@@ -4108,6 +4344,428 @@ fn check_backend_env_contracts(
     }
 
     diagnostics
+}
+
+fn check_backend_database_contracts(
+    path: &Path,
+    source: &str,
+    root: Option<&Path>,
+    plan: &AxBackendPlan,
+) -> Vec<CheckDiagnostic> {
+    if !backend_plan_uses_database(plan) {
+        return Vec::new();
+    }
+
+    let declared = declared_backend_env_names(root, plan);
+    if declared.contains("DATABASE_URL")
+        || declared.contains("DB_URL")
+        || declared.contains("AX_SECRET_DB_URL")
+    {
+        return Vec::new();
+    }
+
+    vec![CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_database_usage(source),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-env",
+        message: "database usage requires an env contract. Add `env DATABASE_URL: Secret<String>` to app/backend.ax.".to_string(),
+    }]
+}
+
+fn check_backend_database_surface(
+    path: &Path,
+    source: &str,
+    root: Option<&Path>,
+    document: &AxBackendDocument,
+) -> Vec<CheckDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let resources = root
+        .and_then(|root| collect_project_database_resources(root).ok())
+        .unwrap_or_default();
+
+    for block in &document.blocks {
+        match block {
+            AxBackendBlock::Backend(root) => collect_db_surface_diagnostics_from_stmts(
+                path,
+                source,
+                &root.body,
+                &resources,
+                &mut diagnostics,
+            ),
+            AxBackendBlock::Route(route) => collect_db_surface_diagnostics_from_stmts(
+                path,
+                source,
+                &route.body,
+                &resources,
+                &mut diagnostics,
+            ),
+            AxBackendBlock::Loader(loader) => collect_db_surface_diagnostics_from_stmts(
+                path,
+                source,
+                &loader.body,
+                &resources,
+                &mut diagnostics,
+            ),
+            AxBackendBlock::Action(action) => collect_db_surface_diagnostics_from_stmts(
+                path,
+                source,
+                &action.body,
+                &resources,
+                &mut diagnostics,
+            ),
+            AxBackendBlock::Job(job) => collect_db_surface_diagnostics_from_stmts(
+                path,
+                source,
+                &job.body,
+                &resources,
+                &mut diagnostics,
+            ),
+        }
+    }
+
+    diagnostics
+}
+
+fn collect_db_surface_diagnostics_from_stmts(
+    path: &Path,
+    source: &str,
+    body: &[AxBackendStmt],
+    resources: &std::collections::BTreeSet<String>,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    for stmt in body {
+        match stmt {
+            AxBackendStmt::Data(data) => match &data.value {
+                AxBackendValue::Expr(expr) => collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    expr,
+                    resources,
+                    diagnostics,
+                ),
+                AxBackendValue::Query(query) => {
+                    if let Some(collection) = query_source_collection(&query.source) {
+                        collect_db_resource_diagnostic(
+                            path,
+                            source,
+                            collection,
+                            resources,
+                            diagnostics,
+                        );
+                    }
+                    for filter in &query.filters {
+                        collect_db_surface_diagnostics_from_expr(
+                            path,
+                            source,
+                            &filter.value,
+                            resources,
+                            diagnostics,
+                        );
+                    }
+                }
+            },
+            AxBackendStmt::Env(_) => {}
+            AxBackendStmt::Insert(mutation)
+            | AxBackendStmt::Update(mutation)
+            | AxBackendStmt::Delete(mutation) => {
+                for field in &mutation.fields {
+                    collect_db_surface_diagnostics_from_expr(
+                        path,
+                        source,
+                        &field.value,
+                        resources,
+                        diagnostics,
+                    );
+                }
+                for filter in &mutation.filters {
+                    collect_db_surface_diagnostics_from_expr(
+                        path,
+                        source,
+                        &filter.value,
+                        resources,
+                        diagnostics,
+                    );
+                }
+            }
+            AxBackendStmt::Patch(patch) => {
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &patch.signal,
+                    resources,
+                    diagnostics,
+                );
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &patch.value,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::Hook(hook) => collect_db_surface_diagnostics_from_expr(
+                path,
+                source,
+                &hook.value,
+                resources,
+                diagnostics,
+            ),
+            AxBackendStmt::Header(header) => {
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &header.name,
+                    resources,
+                    diagnostics,
+                );
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &header.value,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::Cookie(cookie) => {
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &cookie.name,
+                    resources,
+                    diagnostics,
+                );
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &cookie.value,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::ClearCookie(expr) | AxBackendStmt::Revalidate(expr) => {
+                collect_db_surface_diagnostics_from_expr(path, source, expr, resources, diagnostics)
+            }
+            AxBackendStmt::Require(requirement) => {
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &requirement.value,
+                    resources,
+                    diagnostics,
+                );
+                if let Some(fallback) = &requirement.fallback {
+                    collect_db_surface_diagnostics_from_return(
+                        path,
+                        source,
+                        fallback,
+                        resources,
+                        diagnostics,
+                    );
+                }
+            }
+            AxBackendStmt::Return(value) => collect_db_surface_diagnostics_from_return(
+                path,
+                source,
+                value,
+                resources,
+                diagnostics,
+            ),
+            AxBackendStmt::Send(send) => collect_db_surface_diagnostics_from_expr(
+                path,
+                source,
+                &send.payload,
+                resources,
+                diagnostics,
+            ),
+        }
+    }
+}
+
+fn query_source_collection(source: &AxQuerySource) -> Option<&str> {
+    match source {
+        AxQuerySource::Stream { collection } | AxQuerySource::ContentCollection { collection } => {
+            Some(collection)
+        }
+        AxQuerySource::RawSql { .. } => None,
+    }
+}
+
+fn collect_db_surface_diagnostics_from_return(
+    path: &Path,
+    source: &str,
+    value: &AxReturn,
+    resources: &std::collections::BTreeSet<String>,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    if let AxReturn::Expr(expr) = value {
+        collect_db_surface_diagnostics_from_expr(path, source, expr, resources, diagnostics);
+    }
+}
+
+fn collect_db_surface_diagnostics_from_expr(
+    path: &Path,
+    source: &str,
+    expr: &AxExpr,
+    resources: &std::collections::BTreeSet<String>,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    match expr {
+        AxExpr::String(_) | AxExpr::Number(_) | AxExpr::Bool(_) | AxExpr::Identifier(_) => {}
+        AxExpr::Member { object, .. } | AxExpr::OptionalMember { object, .. } => {
+            collect_db_surface_diagnostics_from_expr(path, source, object, resources, diagnostics)
+        }
+        AxExpr::Call {
+            path: call_path,
+            args,
+        } => {
+            if call_path.first().is_some_and(|segment| segment == "db") {
+                collect_db_call_diagnostic(path, source, call_path, args, resources, diagnostics);
+            }
+
+            for arg in args {
+                collect_db_surface_diagnostics_from_expr(path, source, arg, resources, diagnostics);
+            }
+        }
+    }
+}
+
+fn collect_db_call_diagnostic(
+    path: &Path,
+    source: &str,
+    call_path: &[String],
+    args: &[AxExpr],
+    resources: &std::collections::BTreeSet<String>,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    if call_path == ["db", "query"] {
+        if matches!(args.first(), Some(AxExpr::String(_))) {
+            return;
+        }
+
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_db_call(source, call_path),
+            column: 1,
+            severity: "error",
+            code: "axonyx-db-method",
+            message: "db.query() expects a SQL string followed by optional parameters.".to_string(),
+        });
+        return;
+    }
+
+    if let Some(resource) = call_path.get(1) {
+        if collect_db_resource_diagnostic(path, source, resource, resources, diagnostics) {
+            return;
+        }
+    }
+
+    if call_path.len() == 3 && call_path[2] == "all" {
+        if args.is_empty() {
+            return;
+        }
+
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_db_call(source, call_path),
+            column: 1,
+            severity: "error",
+            code: "axonyx-db-method",
+            message: format!(
+                "db.{}.all() does not accept arguments yet. Use `db.{}.all()`.",
+                call_path[1], call_path[1]
+            ),
+        });
+        return;
+    }
+
+    let method = call_path.get(2).map(String::as_str).unwrap_or("<missing>");
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_db_call(source, call_path),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-method",
+        message: format!(
+            "unknown db method `{method}`. Supported database read methods are `db.<table>.all()` and `db.query()`."
+        ),
+    });
+}
+
+fn collect_db_resource_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    resources: &std::collections::BTreeSet<String>,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) -> bool {
+    if resources.is_empty() || resources.contains(resource) {
+        return false;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, &format!("db.{resource}.")),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-resource",
+        message: format!("unknown db resource `{resource}`"),
+    });
+    true
+}
+
+fn line_for_db_call(source: &str, call_path: &[String]) -> usize {
+    if call_path.len() >= 2 {
+        let line = line_for_source_pattern(source, &format!("db.{}.", call_path[1]));
+        if line != 1 || source.contains(&format!("db.{}.", call_path[1])) {
+            return line;
+        }
+    }
+
+    line_for_source_pattern(source, "db.")
+}
+
+fn collect_project_database_resources(root: &Path) -> Result<std::collections::BTreeSet<String>> {
+    Ok(collect_project_type_schemas(root)?
+        .into_iter()
+        .flat_map(|schema| database_resource_names_for_type(&schema.name))
+        .collect())
+}
+
+fn database_resource_names_for_type(type_name: &str) -> Vec<String> {
+    let snake = pascal_to_snake(type_name);
+    let plural = pluralize_resource_name(&snake);
+    if plural == snake {
+        vec![snake]
+    } else {
+        vec![snake, plural]
+    }
+}
+
+fn pascal_to_snake(value: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn pluralize_resource_name(value: &str) -> String {
+    if value.ends_with('s') {
+        value.to_string()
+    } else if let Some(stem) = value.strip_suffix('y') {
+        format!("{stem}ies")
+    } else {
+        format!("{value}s")
+    }
 }
 
 fn check_backend_route_inputs(
@@ -4485,6 +5143,42 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             AxStepPlan::Let { .. } | AxStepPlan::Delete { .. } | AxStepPlan::Return(_) => false,
         })
     })
+}
+
+fn backend_plan_uses_database(plan: &AxBackendPlan) -> bool {
+    plan.globals
+        .iter()
+        .chain(
+            plan.handlers
+                .iter()
+                .flat_map(|handler| handler.steps.iter()),
+        )
+        .any(step_uses_database)
+}
+
+fn step_uses_database(step: &AxStepPlan) -> bool {
+    match step {
+        AxStepPlan::Let {
+            value: AxValuePlan::Query(query),
+            ..
+        } => matches!(
+            query.source,
+            axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::Stream { .. }
+                | axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::RawSql { .. }
+        ),
+        AxStepPlan::Insert { .. } | AxStepPlan::Update { .. } | AxStepPlan::Delete { .. } => true,
+        _ => false,
+    }
+}
+
+fn line_for_database_usage(source: &str) -> usize {
+    for pattern in ["db.", "insert ", "update ", "delete "] {
+        let line = line_for_source_pattern(source, pattern);
+        if line != 1 || source.contains(pattern) {
+            return line;
+        }
+    }
+    1
 }
 
 fn declared_backend_env_names(
@@ -10449,7 +11143,7 @@ page SectionCard
             .expect("nested layout should write");
         fs::write(
             root.join("app/docs/loader.ax"),
-            "loader DocsList\n  data docs = Db.Stream(\"docs\")\n  return docs\n",
+            "loader DocsList\n  data docs = db.docs.all()\n  return docs\n",
         )
         .expect("loader should write");
         fs::write(
@@ -11692,7 +12386,7 @@ axonyx-ui = {{ path = "{ui_path}" }}
             .expect("config should write");
         fs::write(
             root.join("routes").join("api").join("posts.ax"),
-            "route GET \"/api/posts\"\n  data posts = Db.Stream(\"posts\")\n  return posts\n",
+            "route GET \"/api/posts\"\n  data posts = db.posts.all()\n  return posts\n",
         )
         .expect("route should write");
 
@@ -12250,6 +12944,23 @@ page Home
     }
 
     #[test]
+    fn db_check_report_can_open_empty_sqlite_database() {
+        let root = make_temp_dir("db-check-empty-sqlite");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let db_path = root.join("app.db");
+        let report = collect_db_check_report(&root, Some(&db_path.to_string_lossy()))
+            .expect("db check should open sqlite database");
+
+        assert!(report.ok);
+        assert_eq!(report.driver, "sqlite");
+        assert!(report.tables.is_empty());
+        assert!(db_path.exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn strips_cargo_subcommand_prefix_for_ax() {
         let args = vec![
             OsString::from("cargo-ax.exe"),
@@ -12273,6 +12984,27 @@ page Home
         let cli = Cli::try_parse_from(normalized).expect("cargo ax args should parse");
 
         assert!(matches!(cli.command, Commands::Run(_)));
+    }
+
+    #[test]
+    fn parses_db_check_command() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "db",
+            "check",
+            "--format",
+            "json",
+            "--url",
+            "sqlite://app.db",
+        ])
+        .expect("db check command should parse");
+
+        let Commands::Db(args) = cli.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Check(args) = args.command;
+        assert_eq!(args.format, CheckFormat::Json);
+        assert_eq!(args.url.as_deref(), Some("sqlite://app.db"));
     }
 
     #[test]
@@ -14505,7 +15237,7 @@ action SetCount
         fs::create_dir_all(root.join("routes").join("api")).expect("routes dir should exist");
         fs::write(
             root.join("routes").join("api").join("posts.ax"),
-            "route GET \"/api/posts\"\n  data posts = Db.Stream(\"posts\")\n    where status = \"published\"\n    limit 2\n  return posts\n",
+            "route GET \"/api/posts\"\n  data posts = db.posts.all()\n    where status = \"published\"\n    limit 2\n  return posts\n",
         )
         .expect("route should write");
 
@@ -14541,7 +15273,7 @@ action SetCount
                 .join("api")
                 .join("posts")
                 .join("show.ax"),
-            "route GET \"/api/posts/:slug\"\n  data posts = Db.Stream(\"posts\")\n    where slug = params.slug\n    where status = query.status\n  return posts\n",
+            "route GET \"/api/posts/:slug\"\n  data posts = db.posts.all()\n    where slug = params.slug\n    where status = query.status\n  return posts\n",
         )
         .expect("route should write");
 
@@ -14606,7 +15338,7 @@ action SetCount
         fs::create_dir_all(root.join("app/posts/[slug]")).expect("dynamic app dir should exist");
         fs::write(
             root.join("app/posts/[slug]/loader.ax"),
-            "loader PostDetail\n  data posts = Db.Stream(\"posts\")\n    where slug = params.slug\n    where status = query.status\n  return posts\n",
+            "loader PostDetail\n  data posts = db.posts.all()\n    where slug = params.slug\n    where status = query.status\n  return posts\n",
         )
         .expect("loader should write");
         fs::write(
@@ -15515,6 +16247,178 @@ action ReadEnv
         let diagnostics = check_app_sources(&root).expect("check should run");
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_missing_database_env_contract() {
+        let root = make_temp_dir("missing-database-env-contract");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+loader PostsList
+  data posts = db.posts.all()
+  return posts
+"#,
+        )
+        .expect("loader should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-db-env");
+        assert!(diagnostics[0].message.contains("DATABASE_URL"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_accepts_declared_database_env_contract() {
+        let root = make_temp_dir("declared-database-env-contract");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            r#"
+backend
+  env DATABASE_URL: Secret<String>
+"#,
+        )
+        .expect("backend root should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+loader PostsList
+  data posts = db.posts.all()
+  return posts
+"#,
+        )
+        .expect("loader should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_accepts_declared_raw_sql_query() {
+        let root = make_temp_dir("declared-raw-sql-query");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            r#"
+backend
+  env DATABASE_URL: Secret<String>
+"#,
+        )
+        .expect("backend root should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+loader PostsList
+  data posts = db.query("select * from posts where status = ?", "published")
+  return posts
+"#,
+        )
+        .expect("loader should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_unknown_database_method() {
+        let root = make_temp_dir("unknown-database-method");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action BadDb
+  data value = db.trables.call()
+  return value
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-db-method");
+        assert!(diagnostics[0].message.contains("call"));
+        assert!(diagnostics[0].message.contains("db.<table>.all()"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_database_all_arguments() {
+        let root = make_temp_dir("database-all-arguments");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action BadDb
+  data value = db.posts.all("draft")
+  return value
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-db-method");
+        assert!(diagnostics[0].message.contains("does not accept arguments"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_unknown_database_resource() {
+        let root = make_temp_dir("unknown-database-resource");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            r#"
+backend
+  env DATABASE_URL: Secret<String>
+"#,
+        )
+        .expect("backend root should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Schema
+
+type Post {
+  title: String
+}
+
+<Copy>Schema</Copy>
+"#,
+        )
+        .expect("schema page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action BadDb
+  data value = db.trables.all()
+  return value
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-db-resource");
+        assert_eq!(diagnostics[0].message, "unknown db resource `trables`");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

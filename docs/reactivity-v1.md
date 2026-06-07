@@ -388,7 +388,7 @@ let records = vec![
 ];
 
 let node = render_pipeline_node(
-    r#"Db.Stream("posts") |> layout.Grid(2) |> Card()"#,
+    r#"db.posts.all() |> layout.Grid(2) |> Card()"#,
     &records,
 )?;
 ```
@@ -445,7 +445,7 @@ What the parser sketch currently targets:
 
 What the lowering sketch currently targets:
 
-- resolving `Db.Stream(...)`-style calls through an injected resolver
+- resolving `db.collection.all()`-style calls through an injected resolver
 - turning `AxDocument` into a renderable `AxNode`
 - mapping common components such as `Container`, `Grid`, `Card`, `Copy`, and `Button`
 - preserving style layering as concrete output attributes
@@ -482,7 +482,7 @@ Axonyx now also has a first query AST draft for backend data loading and databas
 
 Current query nodes cover:
 
-- stream sources such as `Db.Stream("posts")`
+- stream sources such as `db.posts.all()`
 - equality filters through `where`
 - sort clauses through `order`
 - pagination through `limit` and `offset`

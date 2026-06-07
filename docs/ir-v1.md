@@ -43,7 +43,7 @@ Any API style compiles into IR.
 Pipeline string:
 
 ```text
-Db.Stream("posts") |> layout.Grid(3) |> Card()
+db.posts.all() |> layout.Grid(3) |> Card()
 ```
 
 TypeScript builder:
@@ -56,7 +56,7 @@ Both map to the same IR payload shown above.
 
 ## Current v1 stage support
 
-- Source: `Db.Stream("collection")`, `from("collection")`
+- Source: `db.collection.all()`, `from("collection")`
 - Transform: `layout.Grid(n)`, `grid(n)`
 - View: `Card()`, `view.Card()`, `view("CustomComponent")`
 

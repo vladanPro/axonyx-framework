@@ -13,7 +13,7 @@ Axonyx backend authoring is moving toward a framework-native shape instead of a 
 
 ```ax
 loader PostsList
-  data posts = Db.Stream("posts")
+  data posts = db.posts.all()
     where status = "published"
     order created_at desc
     limit 6
@@ -26,6 +26,24 @@ loader PostsList
 - `order`
 - `limit`
 - `offset`
+
+## Raw SQL Escape Hatch
+
+Use `db.<table>.all()` for normal reads. When Axonyx does not have the query
+shape yet, use `db.query(...)` with a SQL string and variadic parameters:
+
+```ax
+loader PublishedPosts
+  data posts = db.query("select * from posts where status = ?", "published")
+  return posts
+```
+
+Current v0 rules:
+
+- backend-only
+- SELECT/WITH statements only
+- parameters are passed separately; do not concatenate user input into SQL
+- errors still pass through the Axonyx DB error translator
 
 ## Current Mutation Steps
 
@@ -42,6 +60,7 @@ loader PostsList
 Generated backend handlers lower into runtime request types such as:
 
 - `AxQueryRequest`
+- `AxRawSqlRequest`
 - `AxInsertRequest`
 - `AxUpdateRequest`
 - `AxDeleteRequest`
