@@ -5,19 +5,19 @@ This folder defines the first beta Axonyx demo image.
 It is intended to be built as:
 
 ```bash
-docker build -t axonyx:0.1.42 -f docker/axonyx/Dockerfile .
+docker build -t axonyx:0.1.59 -f docker/axonyx/Dockerfile .
 ```
 
 Run it with:
 
 ```bash
-docker run --rm -p 3000:3000 axonyx:0.1.42
+docker run --rm -p 3000:3000 axonyx:0.1.59
 ```
 
 After publishing to Docker Hub:
 
 ```bash
-docker run --rm -p 3000:3000 vladanpro2/axonyx:0.1.42
+docker run --rm -p 3000:3000 vladanpro2/axonyx:0.1.59
 ```
 
 Then open:
@@ -29,8 +29,8 @@ http://localhost:3000
 ## What The Image Contains
 
 - Rust `1.95`
-- `create-axonyx 0.1.25`
-- `cargo-axonyx 0.1.42`
+- `create-axonyx 0.1.32`
+- `cargo-axonyx 0.1.59`
 - a generated Axonyx docs starter app
 - prebuilt Axonyx output from `cargo ax build --clean`
 - OCI image labels for registry metadata
@@ -50,24 +50,24 @@ Axonyx demo is running.
 
 Open: http://localhost:3000
 Template: docs
-CLI: cargo-axonyx 0.1.42
-Runtime: axonyx-runtime 0.1.15
+CLI: cargo-axonyx 0.1.59
+Runtime: axonyx-runtime 0.1.26
 ```
 
 If a host provides `PORT`, the image uses it:
 
 ```bash
-docker run --rm -e PORT=8080 -p 8080:8080 axonyx:0.1.42
+docker run --rm -e PORT=8080 -p 8080:8080 axonyx:0.1.59
 ```
 
 ## Build Args
 
 ```bash
 docker build \
-  --build-arg CARGO_AXONYX_VERSION=0.1.42 \
-  --build-arg CREATE_AXONYX_VERSION=0.1.25 \
-  --build-arg AXONYX_RUNTIME_VERSION=0.1.15 \
-  -t axonyx:0.1.42 \
+  --build-arg CARGO_AXONYX_VERSION=0.1.59 \
+  --build-arg CREATE_AXONYX_VERSION=0.1.32 \
+  --build-arg AXONYX_RUNTIME_VERSION=0.1.26 \
+  -t axonyx:0.1.59 \
   -f docker/axonyx/Dockerfile .
 ```
 
