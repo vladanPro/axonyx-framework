@@ -1,5 +1,5 @@
 job PublishDailyDigest
-  data posts = Db.Stream("posts")
+  data posts = db.posts.all()
     where status = "published"
     order created_at desc
     limit 5

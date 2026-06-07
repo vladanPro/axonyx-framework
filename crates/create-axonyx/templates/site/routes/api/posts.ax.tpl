@@ -1,5 +1,5 @@
 route GET "/api/posts"
-  data posts = Db.Stream("posts")
+  data posts = db.posts.all()
     order created_at desc
     limit 20
   return posts
