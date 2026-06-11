@@ -37,8 +37,9 @@ use axonyx_runtime::server_prelude::{
 };
 use axonyx_runtime::{
     backend_prelude as ax_backend_runtime, execute_preview_action_sources,
-    execute_preview_route_request_sources, preview_ax_route_with_request_context_and_imports,
-    AxPreviewActionResult, AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
+    execute_preview_route_request_sources, execute_preview_route_request_sources_with_runtime,
+    preview_ax_route_with_request_context_and_imports, AxPreviewActionResult,
+    AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::write::GzEncoder;
@@ -8730,17 +8731,38 @@ fn execute_backend_route_request(
         .iter()
         .map(|(_, source)| source.as_str())
         .collect::<Vec<_>>();
+    let uses_db_runtime = source_refs.iter().any(|source| source.contains("db."));
     let mut store = state
         .preview_store
         .lock()
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
 
-    execute_preview_route_request_sources(&source_refs, request, &mut store).with_context(|| {
-        format!(
-            "failed to execute backend route {} {}",
-            request.method, request.target
+    if uses_db_runtime {
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)
+            .with_context(|| "failed to initialize backend runtime from environment")?;
+        execute_preview_route_request_sources_with_runtime(
+            &source_refs,
+            request,
+            &runtime,
+            &mut store,
         )
-    })
+        .with_context(|| {
+            format!(
+                "failed to execute backend route {} {} with backend runtime",
+                request.method, request.target
+            )
+        })
+    } else {
+        execute_preview_route_request_sources(&source_refs, request, &mut store).with_context(
+            || {
+                format!(
+                    "failed to execute backend route {} {}",
+                    request.method, request.target
+                )
+            },
+        )
+    }
 }
 
 fn preview_response_to_http(response: AxPreviewHttpResponse) -> AxHttpResponse {
@@ -11079,6 +11101,39 @@ mod tests {
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::default(),
         }
+    }
+
+    fn seed_test_sqlite_posts(root: &Path) {
+        let db_path = root.join("posts.sqlite");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite db should open");
+        connection
+            .execute_batch(
+                r#"
+                create table posts (
+                    id integer primary key,
+                    title text not null,
+                    excerpt text not null,
+                    slug text not null,
+                    status text not null,
+                    created_at text not null
+                );
+
+                insert into posts (id, title, excerpt, slug, status, created_at) values
+                    (1, 'SQLite Alpha', 'First database-backed route row.', 'sqlite-alpha', 'published', '2026-06-11'),
+                    (2, 'SQLite Beta', 'Second database-backed route row.', 'sqlite-beta', 'published', '2026-06-10'),
+                    (3, 'SQLite Draft', 'Draft row from the real adapter.', 'sqlite-draft', 'draft', '2026-06-09');
+                "#,
+            )
+            .expect("sqlite posts should seed");
+
+        fs::write(
+            root.join(".env"),
+            format!(
+                "DATABASE_DRIVER=sqlite\nDATABASE_TRANSPORT=direct\nDATABASE_URL={}\n",
+                db_path.display()
+            ),
+        )
+        .expect("sqlite env should write");
     }
 
     fn write_test_axonyx_ui_package(root: &Path, card_title: &str, css: &str) {
@@ -15234,6 +15289,7 @@ action SetCount
     #[test]
     fn executes_backend_route_request_from_routes_directory() {
         let root = make_temp_dir("api-route");
+        seed_test_sqlite_posts(&root);
         fs::create_dir_all(root.join("routes").join("api")).expect("routes dir should exist");
         fs::write(
             root.join("routes").join("api").join("posts.ax"),
@@ -15256,9 +15312,9 @@ action SetCount
         assert_eq!(response.status, 200);
         assert_eq!(response.content_type, "application/json; charset=utf-8");
         let body = String::from_utf8(response.body).expect("json response should be utf-8");
-        assert!(body.contains("Hello Axonyx"));
-        assert!(body.contains("Docs Without Bloat"));
-        assert!(!body.contains("Draft Preview"));
+        assert!(body.contains("SQLite Alpha"));
+        assert!(body.contains("SQLite Beta"));
+        assert!(!body.contains("SQLite Draft"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -15266,6 +15322,7 @@ action SetCount
     #[test]
     fn executes_dynamic_backend_route_request_with_query_context() {
         let root = make_temp_dir("api-route-dynamic");
+        seed_test_sqlite_posts(&root);
         fs::create_dir_all(root.join("routes").join("api").join("posts"))
             .expect("routes dir should exist");
         fs::write(
@@ -15280,7 +15337,7 @@ action SetCount
         let state = test_dev_state(&root);
         let request = AxHttpRequest {
             method: "GET".to_string(),
-            target: "/api/posts/draft-preview?status=draft".to_string(),
+            target: "/api/posts/sqlite-draft?status=draft".to_string(),
             headers: std::collections::BTreeMap::new(),
             body: Vec::new(),
         };
@@ -15291,8 +15348,8 @@ action SetCount
 
         assert_eq!(response.status, 200);
         let body = String::from_utf8(response.body).expect("json response should be utf-8");
-        assert!(body.contains("Draft Preview"));
-        assert!(!body.contains("Hello Axonyx"));
+        assert!(body.contains("SQLite Draft"));
+        assert!(!body.contains("SQLite Alpha"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
