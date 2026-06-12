@@ -5715,6 +5715,7 @@ fn line_from_ax_parse_v2_error(error: &AxParseV2Error) -> Option<usize> {
         | AxParseV2Error::InvalidState { line }
         | AxParseV2Error::InvalidFunction { line }
         | AxParseV2Error::InvalidComponent { line }
+        | AxParseV2Error::InvalidReturnAsx { line }
         | AxParseV2Error::DuplicatePage { line }
         | AxParseV2Error::InvalidTag { line }
         | AxParseV2Error::UnterminatedTag { line }
