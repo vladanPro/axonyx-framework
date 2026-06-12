@@ -4586,10 +4586,8 @@ fn collect_db_surface_diagnostics_from_stmts(
 
 fn query_source_collection(source: &AxQuerySource) -> Option<&str> {
     match source {
-        AxQuerySource::Stream { collection } | AxQuerySource::ContentCollection { collection } => {
-            Some(collection)
-        }
-        AxQuerySource::RawSql { .. } => None,
+        AxQuerySource::Stream { collection } => Some(collection),
+        AxQuerySource::ContentCollection { .. } | AxQuerySource::RawSql { .. } => None,
     }
 }
 
