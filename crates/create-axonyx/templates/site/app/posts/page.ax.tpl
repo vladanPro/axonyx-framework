@@ -8,7 +8,15 @@ import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
 page Posts
 
+type Post {
+  id: String
+  title: String
+  excerpt: String
+  status: String
+}
+
 page state draftStatus: String = "ready"
+data posts: List<Post> = loadPosts()
 
 <Stack gap="xl">
   <PageHeader title="Posts demo">
@@ -52,8 +60,8 @@ page state draftStatus: String = "ready"
 
   <Copy tone="eyebrow">Featured writing</Copy>
   <ContentGrid cols={2} gap="lg">
-    <If when={load PostsList}>
-      <Each items={load PostsList} as="post">
+    <If when={posts}>
+      <Each items={posts} as="post">
         <Card title={post.title}>
           <Copy>{post.excerpt}</Copy>
         </Card>

@@ -6,19 +6,34 @@ Axonyx backend authoring is moving toward a framework-native shape instead of a 
 
 - `route`
 - `loader`
+- `query`
 - `action`
 - `job`
 
 ## Example
 
 ```ax
-loader PostsList
+query loadPosts() -> Post[]
   data posts = db.posts.all()
     where status = "published"
     order created_at desc
     limit 6
   return posts
 ```
+
+Pages can consume route-local query functions without a manual API fetch:
+
+```ax
+page Posts
+
+data posts = loadPosts()
+
+<Each items={posts} as="post">
+  <Card title={post.title} />
+</Each>
+```
+
+`loader PostsList` and `load PostsList` remain supported for compatibility, but new templates prefer `query loadPosts()` and `data posts = loadPosts()`.
 
 ## Current Query Clauses
 

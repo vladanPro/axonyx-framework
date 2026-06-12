@@ -95,7 +95,7 @@ type Post {
 
 ## Typed Data And Each
 
-Axonyx now has an early typed data path for JSX-like `.ax` files. Define a record shape, bind loader data to a typed list, and `cargo ax check` can catch wrong field access before render:
+Axonyx now has an early typed data path for JSX-like `.ax` files. Define a record shape, bind query data to a typed list, and `cargo ax check` can catch wrong field access before render:
 
 ```ax
 page Blog
@@ -107,13 +107,21 @@ type Post {
   summary?: String
 }
 
-let posts: List<Post> = load PostsList
+data posts: List<Post> = loadPosts()
 
 <Each items={posts} as="post">
   <Card title={post.title}>
     <Copy>{post.excerpt}</Copy>
   </Card>
 </Each>
+```
+
+Route-local data can live next to the page in `app/posts/loader.ax`:
+
+```ax
+query loadPosts() -> Post[]
+  data posts = db.posts.all()
+  return posts
 ```
 
 If the page uses `post.summary` instead of a declared field, `cargo ax check` reports an `axonyx-type` diagnostic. This is the first bridge between `.ax` primitives like `String` / `List<Post>` and Rust-side Axonyx types.

@@ -1,6 +1,14 @@
 page Posts
 
+type Post {
+  id: String
+  title: String
+  excerpt: String
+  status: String
+}
+
 page state draftStatus: String = "ready"
+data posts: List<Post> = loadPosts()
 
 <Container max="xl">
   <Card title="Create post" recipe="hero-card">
@@ -25,8 +33,8 @@ page state draftStatus: String = "ready"
     <strong bind:text={draftStatus}>{draftStatus}</strong>
   </Card>
   <Grid cols={3} gap="md" recipe="content-grid">
-    <If when={load PostsList}>
-      <Each items={load PostsList} as="post">
+    <If when={posts}>
+      <Each items={posts} as="post">
         <Card title={post.title}>
           <Copy>{post.excerpt}</Copy>
           <Button tone="primary">Read more</Button>

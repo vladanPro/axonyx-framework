@@ -5633,6 +5633,7 @@ fn looks_like_backend_ax(source: &str) -> bool {
         line.starts_with("route ")
             || line == "backend"
             || line.starts_with("loader ")
+            || line.starts_with("query ")
             || line.starts_with("action ")
             || line.starts_with("job ")
     })

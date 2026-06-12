@@ -708,8 +708,10 @@ mod tests {
 
         let posts_page = fs::read_to_string(target_dir.join("app/posts/page.ax"))
             .expect("posts page should read");
-        assert!(posts_page.contains("<If when={load PostsList}>"));
-        assert!(posts_page.contains("<Each items={load PostsList} as=\"post\">"));
+        assert!(posts_page.contains("type Post"));
+        assert!(posts_page.contains("data posts: List<Post> = loadPosts()"));
+        assert!(posts_page.contains("<If when={posts}>"));
+        assert!(posts_page.contains("<Each items={posts} as=\"post\">"));
         assert!(posts_page.contains("<Else>"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");

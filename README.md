@@ -177,11 +177,19 @@ type Post {
   summary?: String
 }
 
-let posts: List<Post> = load PostsList
+data posts: List<Post> = loadPosts()
 
 <Each items={posts} as="post">
   <Card title={post.title} />
 </Each>
+```
+
+Route-local query functions can live next to the page:
+
+```ax
+query loadPosts() -> Post[]
+  data posts = db.posts.all()
+  return posts
 ```
 
 `cargo ax check` reports `axonyx-type` diagnostics when a typed page accesses a missing field such as `post.summary`.
