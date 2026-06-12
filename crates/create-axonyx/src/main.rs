@@ -697,6 +697,8 @@ mod tests {
         assert!(cargo_toml.contains("axonyx-ui = \"0.0.48\""));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
+        assert!(page.contains("page Home()"));
+        assert!(page.contains("return ASX"));
         assert!(page.contains("@axonyx/ui/foundry/SectionCard.ax"));
         assert!(target_dir.join("app/not-found.ax").exists());
         assert!(target_dir.join("app/error.ax").exists());
@@ -708,11 +710,18 @@ mod tests {
 
         let posts_page = fs::read_to_string(target_dir.join("app/posts/page.ax"))
             .expect("posts page should read");
+        assert!(posts_page.contains("page Posts()"));
+        assert!(posts_page.contains("return ASX"));
         assert!(posts_page.contains("type Post"));
         assert!(posts_page.contains("data posts: List<Post> = loadPosts()"));
         assert!(posts_page.contains("<If when={posts}>"));
         assert!(posts_page.contains("<Each items={posts} as=\"post\">"));
         assert!(posts_page.contains("<Else>"));
+
+        let posts_loader = fs::read_to_string(target_dir.join("app/posts/loader.ax"))
+            .expect("posts loader should read");
+        assert!(posts_loader.contains("query loadPosts() -> Post[] {"));
+        assert!(posts_loader.contains("return posts"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
