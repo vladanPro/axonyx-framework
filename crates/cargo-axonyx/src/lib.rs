@@ -13,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use axonyx_core::ax_ast_prelude::{AxExpr, AxImport};
+use axonyx_core::ax_ast_prelude::{AxBinaryOp, AxExpr, AxImport, AxUnaryOp};
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
 };
@@ -4612,6 +4612,13 @@ fn collect_db_surface_diagnostics_from_expr(
 ) {
     match expr {
         AxExpr::String(_) | AxExpr::Number(_) | AxExpr::Bool(_) | AxExpr::Identifier(_) => {}
+        AxExpr::Unary { expr, .. } => {
+            collect_db_surface_diagnostics_from_expr(path, source, expr, resources, diagnostics)
+        }
+        AxExpr::Binary { left, right, .. } => {
+            collect_db_surface_diagnostics_from_expr(path, source, left, resources, diagnostics);
+            collect_db_surface_diagnostics_from_expr(path, source, right, resources, diagnostics);
+        }
         AxExpr::Member { object, .. } | AxExpr::OptionalMember { object, .. } => {
             collect_db_surface_diagnostics_from_expr(path, source, object, resources, diagnostics)
         }
@@ -7534,6 +7541,15 @@ fn format_ax_expr(expr: &AxExpr) -> String {
         AxExpr::Number(value) => value.to_string(),
         AxExpr::Bool(value) => value.to_string(),
         AxExpr::Identifier(value) => value.clone(),
+        AxExpr::Unary { op, expr } => {
+            format!("{}{}", format_ax_unary_op(*op), format_ax_expr(expr))
+        }
+        AxExpr::Binary { op, left, right } => format!(
+            "{} {} {}",
+            format_ax_expr(left),
+            format_ax_binary_op(*op),
+            format_ax_expr(right)
+        ),
         AxExpr::Member { object, property } => format!("{}.{}", format_ax_expr(object), property),
         AxExpr::OptionalMember { object, property } => {
             format!("{}?.{}", format_ax_expr(object), property)
@@ -7546,6 +7562,32 @@ fn format_ax_expr(expr: &AxExpr) -> String {
                 .join(", ");
             format!("{}({args})", path.join("."))
         }
+    }
+}
+
+fn format_ax_unary_op(op: AxUnaryOp) -> &'static str {
+    match op {
+        AxUnaryOp::Not => "!",
+        AxUnaryOp::Neg => "-",
+    }
+}
+
+fn format_ax_binary_op(op: AxBinaryOp) -> &'static str {
+    match op {
+        AxBinaryOp::Add => "+",
+        AxBinaryOp::Sub => "-",
+        AxBinaryOp::Mul => "*",
+        AxBinaryOp::Div => "/",
+        AxBinaryOp::Rem => "%",
+        AxBinaryOp::Eq => "==",
+        AxBinaryOp::Ne => "!=",
+        AxBinaryOp::Gt => ">",
+        AxBinaryOp::Ge => ">=",
+        AxBinaryOp::Lt => "<",
+        AxBinaryOp::Le => "<=",
+        AxBinaryOp::And => "&&",
+        AxBinaryOp::Or => "||",
+        AxBinaryOp::Fallback => "??",
     }
 }
 
@@ -16470,6 +16512,50 @@ action BadDb
 "#,
         )
         .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-db-resource");
+        assert_eq!(diagnostics[0].message, "unknown db resource `trables`");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_unknown_database_resource_inside_operator_expr() {
+        let root = make_temp_dir("unknown-database-resource-operator");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api routes dir should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            r#"
+backend
+  env DATABASE_URL: Secret<String>
+"#,
+        )
+        .expect("backend root should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Schema
+
+type Post {
+  title: String
+}
+
+<Copy>Schema</Copy>
+"#,
+        )
+        .expect("schema page should write");
+        fs::write(
+            root.join("routes/api/bad.ax"),
+            r#"
+route GET "/api/bad"
+  return db.trables.all() ?? list()
+"#,
+        )
+        .expect("route should write");
 
         let diagnostics = check_app_sources(&root).expect("check should run");
 
