@@ -7585,6 +7585,7 @@ fn format_ax_binary_op(op: AxBinaryOp) -> &'static str {
         AxBinaryOp::Ge => ">=",
         AxBinaryOp::Lt => "<",
         AxBinaryOp::Le => "<=",
+        AxBinaryOp::In => "in",
         AxBinaryOp::And => "&&",
         AxBinaryOp::Or => "||",
         AxBinaryOp::Fallback => "??",
