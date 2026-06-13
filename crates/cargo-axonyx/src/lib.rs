@@ -4630,6 +4630,10 @@ fn collect_db_surface_diagnostics_from_expr(
             collect_db_surface_diagnostics_from_expr(path, source, left, resources, diagnostics);
             collect_db_surface_diagnostics_from_expr(path, source, right, resources, diagnostics);
         }
+        AxExpr::Index { object, index } => {
+            collect_db_surface_diagnostics_from_expr(path, source, object, resources, diagnostics);
+            collect_db_surface_diagnostics_from_expr(path, source, index, resources, diagnostics);
+        }
         AxExpr::Member { object, .. } | AxExpr::OptionalMember { object, .. } => {
             collect_db_surface_diagnostics_from_expr(path, source, object, resources, diagnostics)
         }
@@ -7569,6 +7573,9 @@ fn format_ax_expr(expr: &AxExpr) -> String {
             format_ax_binary_op(*op),
             format_ax_expr(right)
         ),
+        AxExpr::Index { object, index } => {
+            format!("{}[{}]", format_ax_expr(object), format_ax_expr(index))
+        }
         AxExpr::Member { object, property } => format!("{}.{}", format_ax_expr(object), property),
         AxExpr::OptionalMember { object, property } => {
             format!("{}?.{}", format_ax_expr(object), property)
