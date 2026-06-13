@@ -4612,6 +4612,17 @@ fn collect_db_surface_diagnostics_from_expr(
 ) {
     match expr {
         AxExpr::String(_) | AxExpr::Number(_) | AxExpr::Bool(_) | AxExpr::Identifier(_) => {}
+        AxExpr::List(items) => {
+            for item in items {
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    item,
+                    resources,
+                    diagnostics,
+                );
+            }
+        }
         AxExpr::Unary { expr, .. } => {
             collect_db_surface_diagnostics_from_expr(path, source, expr, resources, diagnostics)
         }
@@ -7540,6 +7551,14 @@ fn format_ax_expr(expr: &AxExpr) -> String {
         AxExpr::String(value) => format!("{value:?}"),
         AxExpr::Number(value) => value.to_string(),
         AxExpr::Bool(value) => value.to_string(),
+        AxExpr::List(items) => {
+            let items = items
+                .iter()
+                .map(format_ax_expr)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{items}]")
+        }
         AxExpr::Identifier(value) => value.clone(),
         AxExpr::Unary { op, expr } => {
             format!("{}{}", format_ax_unary_op(*op), format_ax_expr(expr))
