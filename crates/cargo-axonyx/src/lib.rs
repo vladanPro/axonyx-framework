@@ -7573,9 +7573,11 @@ fn format_ax_expr(expr: &AxExpr) -> String {
             format_ax_binary_op(*op),
             format_ax_expr(right)
         ),
-        AxExpr::Index { object, index } => {
-            format!("{}[{}]", format_ax_expr(object), format_ax_expr(index))
-        }
+        AxExpr::Index { object, index } => format!(
+            "{}[{}]",
+            format_ax_index_object_expr(object),
+            format_ax_expr(index)
+        ),
         AxExpr::Member { object, property } => format!("{}.{}", format_ax_expr(object), property),
         AxExpr::OptionalMember { object, property } => {
             format!("{}?.{}", format_ax_expr(object), property)
@@ -7589,6 +7591,19 @@ fn format_ax_expr(expr: &AxExpr) -> String {
             format!("{}({args})", path.join("."))
         }
     }
+}
+
+fn format_ax_index_object_expr(expr: &AxExpr) -> String {
+    let value = format_ax_expr(expr);
+    if ax_index_object_needs_grouping(expr) {
+        format!("({value})")
+    } else {
+        value
+    }
+}
+
+fn ax_index_object_needs_grouping(expr: &AxExpr) -> bool {
+    matches!(expr, AxExpr::Binary { .. } | AxExpr::Unary { .. })
 }
 
 fn format_ax_unary_op(op: AxUnaryOp) -> &'static str {
@@ -11919,6 +11934,14 @@ action ClearTheme
         assert_eq!(ax_schema_type("bool"), "Bool");
         assert_eq!(ax_schema_type("i64"), "Number");
         assert_eq!(ax_schema_type("unknown"), "String");
+    }
+
+    #[test]
+    fn action_report_expr_formatter_preserves_index_grouping() {
+        let expr = AxExpr::binary(AxBinaryOp::Fallback, AxExpr::ident("a"), AxExpr::ident("b"))
+            .index(AxExpr::number(0));
+
+        assert_eq!(format_ax_expr(&expr), "(a ?? b)[0]");
     }
 
     #[test]
