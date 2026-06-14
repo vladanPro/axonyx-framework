@@ -20,19 +20,34 @@ That means:
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 import { SiteHero } from "@/components/SiteHero.ax"
 
-page Home
+page Home() {
+  data title = "Hello Axonyx"
 
-<Head>
-  <Title>Axonyx</Title>
-  <Theme>silver</Theme>
-  <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
-</Head>
+  return ASX {
+    <Head>
+      <Title>{title}</Title>
+      <Theme>silver</Theme>
+      <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
+    </Head>
 
-<SiteHero />
+    <SiteHero />
 
-<SectionCard title="Hello Axonyx">
-  <Copy>Rust-first authoring with a cleaner page shape.</Copy>
-</SectionCard>
+    <SectionCard title={title}>
+      <Copy>Rust-first authoring with a cleaner page shape.</Copy>
+    </SectionCard>
+  }
+}
+```
+
+When the page explicitly declares an ASX return type, the inner return can use
+the shorter form:
+
+```ax
+page Home() -> ASX {
+  return {
+    <SiteHero />
+  }
+}
 ```
 
 ## What This Path Already Covers
@@ -46,6 +61,8 @@ The current framework/runtime path already includes support for:
 - fragment shorthand
 - local component declarations
 - `Head` tags such as `Title`, `Theme`, `Meta`, `Link`, and `Script`
+- function-shaped pages with `page Name() { return ASX { ... } }`
+- typed ASX return shorthand with `page Name() -> ASX { return { ... } }`
 - local component imports from app code
 - package component imports from `@axonyx/ui`
 - route params and query-aware page flows
