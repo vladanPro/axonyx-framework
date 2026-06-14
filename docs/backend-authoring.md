@@ -166,6 +166,30 @@ Current Postgres behavior:
 - The printed URL is redacted before display.
 - Live Postgres table/column introspection is planned next.
 
+## Database Schema Pull
+
+Use `cargo ax db pull` to write the current database schema snapshot to:
+
+```text
+.axonyx/db/schema.json
+```
+
+Current v0 behavior:
+
+- SQLite table/column introspection is supported.
+- Postgres/Supabase schema pull is planned next.
+- Existing schema output is overwritten, so rerun the command after changing the database.
+
+Example:
+
+```bash
+cargo ax db pull
+cargo ax db pull --out .axonyx/db/schema.json
+```
+
+The schema file is intended to power future checks such as unknown tables,
+unknown columns, generated Axonyx types, and LSP autocomplete.
+
 For deeper draft details, see:
 
 - [Reactivity v1](./reactivity-v1.md)
