@@ -755,6 +755,13 @@ struct ActionItemReport {
     name: String,
     returns: Option<String>,
     inputs: Vec<ActionInputReport>,
+    invalidates: Vec<ActionInvalidationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActionInvalidationReport {
+    target: String,
+    query_key: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -855,6 +862,7 @@ struct MeltSummary {
     state_signals: usize,
     data_bindings: usize,
     query_keys: usize,
+    query_invalidations: usize,
     content_collections: usize,
     content_entries: usize,
     diagnostics: usize,
@@ -1916,13 +1924,14 @@ fn doctor_melt_graph_check(root: &Path) -> DoctorCheck {
             code: "melt-graph",
             severity: DoctorSeverity::Ok,
             message: format!(
-                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} content entr{}.",
+                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
                 report.summary.data_bindings,
                 report.summary.query_keys,
+                report.summary.query_invalidations,
                 report.summary.content_entries,
                 if report.summary.content_entries == 1 { "y" } else { "ies" }
             ),
@@ -2614,13 +2623,14 @@ fn melt_command(args: MeltArgs) -> Result<()> {
     if args.check {
         if report.diagnostics.is_empty() {
             println!(
-                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} content entr{}.",
+                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
                 report.summary.data_bindings,
                 report.summary.query_keys,
+                report.summary.query_invalidations,
                 report.summary.content_entries,
                 if report.summary.content_entries == 1 { "y" } else { "ies" }
             );
@@ -2694,6 +2704,12 @@ fn melt_summary(
     diagnostics: &[CheckDiagnostic],
 ) -> MeltSummary {
     let data_bindings = data.routes.iter().map(|route| route.bindings.len()).sum();
+    let query_invalidations = actions
+        .routes
+        .iter()
+        .flat_map(|route| &route.actions)
+        .map(|action| action.invalidates.len())
+        .sum();
     MeltSummary {
         page_routes: routes
             .routes
@@ -2706,6 +2722,7 @@ fn melt_summary(
         state_signals: state.files.iter().map(|file| file.signals.len()).sum(),
         data_bindings,
         query_keys: data_bindings,
+        query_invalidations,
         content_collections: content.collections.len(),
         content_entries: content
             .collections
@@ -2956,11 +2973,17 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
                         default: field.default.as_ref().map(format_ax_expr),
                     })
                     .collect();
+                let invalidates = action
+                    .body
+                    .iter()
+                    .filter_map(action_invalidation_report_from_statement)
+                    .collect();
 
                 Some(ActionItemReport {
                     name: action.name,
                     returns: action.returns,
                     inputs,
+                    invalidates,
                 })
             })
             .collect::<Vec<_>>();
@@ -2975,6 +2998,36 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
     }
 
     Ok(ActionReport { routes })
+}
+
+fn action_invalidation_report_from_statement(
+    statement: &AxBackendStmt,
+) -> Option<ActionInvalidationReport> {
+    let AxBackendStmt::Revalidate(target) = statement else {
+        return None;
+    };
+
+    Some(ActionInvalidationReport {
+        target: format_ax_expr(target),
+        query_key: query_key_from_invalidation_expr(target),
+    })
+}
+
+fn query_key_from_invalidation_expr(expr: &AxExpr) -> Vec<String> {
+    let target = match expr {
+        AxExpr::String(value) | AxExpr::Identifier(value) => value.clone(),
+        _ => format_ax_expr(expr),
+    };
+    vec![normalize_invalidation_target(&target)]
+}
+
+fn normalize_invalidation_target(target: &str) -> String {
+    let target = target.trim().trim_matches('"').trim_matches('/');
+    if target.is_empty() {
+        "root".to_string()
+    } else {
+        target.replace('/', ".")
+    }
 }
 
 fn content_command(args: ContentArgs) -> Result<()> {
@@ -7289,7 +7342,7 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} data_bindings={} query_keys={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
@@ -7297,6 +7350,7 @@ fn print_melt_text(report: &MeltReport) {
         report.summary.state_signals,
         report.summary.data_bindings,
         report.summary.query_keys,
+        report.summary.query_invalidations,
         report.summary.content_collections,
         report.summary.content_entries,
         report.summary.diagnostics
@@ -7359,13 +7413,14 @@ fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} data_bindings={} query_keys={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
         report.summary.state_signals,
         report.summary.data_bindings,
         report.summary.query_keys,
+        report.summary.query_invalidations,
         report.summary.diagnostics
     );
 
@@ -7425,6 +7480,29 @@ fn print_graph_text(report: &MeltReport) {
                 .collect::<Vec<_>>()
                 .join(",");
             println!("  {:<28} actions={}", route.route, action_names);
+            for action in &route.actions {
+                if action.invalidates.is_empty() {
+                    continue;
+                }
+                let labels = action
+                    .invalidates
+                    .iter()
+                    .map(|invalidation| {
+                        format!(
+                            "{}:[{}]",
+                            invalidation.target,
+                            invalidation
+                                .query_key
+                                .iter()
+                                .map(|part| format!("{part:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("    {} invalidates={}", action.name, labels);
+            }
         }
     }
 
@@ -7836,25 +7914,45 @@ fn print_actions_text(report: &ActionReport) {
             }
             if action.inputs.is_empty() {
                 println!("      inputs: none");
-                continue;
+            } else {
+                for input in &action.inputs {
+                    let required = if input.optional {
+                        "optional"
+                    } else {
+                        "required"
+                    };
+                    let default = input
+                        .default
+                        .as_ref()
+                        .map(|value| format!(" default={value}"))
+                        .unwrap_or_default();
+
+                    println!(
+                        "      {:<18} type={} {}{}",
+                        input.name, input.ty, required, default
+                    );
+                }
             }
 
-            for input in &action.inputs {
-                let required = if input.optional {
-                    "optional"
-                } else {
-                    "required"
-                };
-                let default = input
-                    .default
-                    .as_ref()
-                    .map(|value| format!(" default={value}"))
-                    .unwrap_or_default();
-
-                println!(
-                    "      {:<18} type={} {}{}",
-                    input.name, input.ty, required, default
-                );
+            if !action.invalidates.is_empty() {
+                let labels = action
+                    .invalidates
+                    .iter()
+                    .map(|invalidation| {
+                        format!(
+                            "{} key=[{}]",
+                            invalidation.target,
+                            invalidation
+                                .query_key
+                                .iter()
+                                .map(|part| format!("{part:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("      invalidates: {labels}");
             }
         }
     }
@@ -12130,7 +12228,7 @@ return {
         .expect("settings page should write");
         fs::write(
             root.join("app/settings/actions.ax"),
-            "action Save\n  return ok\n",
+            "action Save\n  invalidate posts\n  return ok\n",
         )
         .expect("actions should write");
         fs::write(
@@ -12149,6 +12247,7 @@ return {
         assert_eq!(report.summary.state_signals, 1);
         assert_eq!(report.summary.data_bindings, 1);
         assert_eq!(report.summary.query_keys, 1);
+        assert_eq!(report.summary.query_invalidations, 1);
         assert_eq!(report.summary.diagnostics, 0);
         assert_eq!(report.data.routes.len(), 1);
         assert_eq!(report.data.routes[0].route, "/");
@@ -12156,6 +12255,13 @@ return {
         assert_eq!(
             report.data.routes[0].bindings[0].query_key,
             vec!["posts".to_string(), "status".to_string()]
+        );
+        assert_eq!(
+            report.actions.routes[0].actions[0].invalidates,
+            vec![ActionInvalidationReport {
+                target: "posts".to_string(),
+                query_key: vec!["posts".to_string()],
+            }]
         );
         assert!(report
             .layers
@@ -12171,6 +12277,7 @@ return {
         assert!(json.contains("\"summary\""));
         assert!(json.contains("\"data\""));
         assert!(json.contains("\"query_key\""));
+        assert!(json.contains("\"invalidates\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -12237,6 +12344,7 @@ action SetTheme -> ThemePatch
     count: i64 = 0
 
   patch theme = input.theme
+  invalidate posts
 
 action ClearTheme
   return ok
@@ -12279,6 +12387,13 @@ action ClearTheme
             ]
         );
         assert!(report.routes[0].actions[1].inputs.is_empty());
+        assert_eq!(
+            report.routes[0].actions[0].invalidates,
+            vec![ActionInvalidationReport {
+                target: "posts".to_string(),
+                query_key: vec!["posts".to_string()],
+            }]
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -12295,11 +12410,13 @@ action ClearTheme
                             name: "SetTheme".to_string(),
                             returns: None,
                             inputs: Vec::new(),
+                            invalidates: Vec::new(),
                         },
                         ActionItemReport {
                             name: "ClearTheme".to_string(),
                             returns: None,
                             inputs: Vec::new(),
+                            invalidates: Vec::new(),
                         },
                     ],
                 },
@@ -12310,6 +12427,7 @@ action ClearTheme
                         name: "SendFeedback".to_string(),
                         returns: None,
                         inputs: Vec::new(),
+                        invalidates: Vec::new(),
                     }],
                 },
             ],
