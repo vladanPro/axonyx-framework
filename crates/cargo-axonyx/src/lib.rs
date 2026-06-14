@@ -13,7 +13,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use axonyx_core::ax_ast_prelude::{AxBinaryOp, AxExpr, AxImport, AxUnaryOp};
+use axonyx_core::ax_ast_prelude::{AxBinaryOp, AxExpr, AxImport, AxStatement, AxUnaryOp};
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
 };
@@ -755,6 +755,13 @@ struct ActionItemReport {
     name: String,
     returns: Option<String>,
     inputs: Vec<ActionInputReport>,
+    invalidates: Vec<ActionInvalidationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActionInvalidationReport {
+    target: String,
+    query_key: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -800,6 +807,25 @@ struct StateSnapshotSignal {
     value: AxStateValue,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DataReport {
+    routes: Vec<DataRouteReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DataRouteReport {
+    route: String,
+    file: String,
+    bindings: Vec<DataBindingReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DataBindingReport {
+    name: String,
+    source: String,
+    query_key: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeltReport {
     app: MeltAppReport,
@@ -808,6 +834,7 @@ struct MeltReport {
     api: ApiReport,
     actions: ActionReport,
     state: StateReport,
+    data: DataReport,
     content: ContentManifest,
     diagnostics: Vec<CheckDiagnostic>,
     summary: MeltSummary,
@@ -833,6 +860,9 @@ struct MeltSummary {
     action_routes: usize,
     actions: usize,
     state_signals: usize,
+    data_bindings: usize,
+    query_keys: usize,
+    query_invalidations: usize,
     content_collections: usize,
     content_entries: usize,
     diagnostics: usize,
@@ -1894,11 +1924,14 @@ fn doctor_melt_graph_check(root: &Path) -> DoctorCheck {
             code: "melt-graph",
             severity: DoctorSeverity::Ok,
             message: format!(
-                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} content entr{}.",
+                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.data_bindings,
+                report.summary.query_keys,
+                report.summary.query_invalidations,
                 report.summary.content_entries,
                 if report.summary.content_entries == 1 { "y" } else { "ies" }
             ),
@@ -2590,11 +2623,14 @@ fn melt_command(args: MeltArgs) -> Result<()> {
     if args.check {
         if report.diagnostics.is_empty() {
             println!(
-                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} content entr{}.",
+                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.data_bindings,
+                report.summary.query_keys,
+                report.summary.query_invalidations,
                 report.summary.content_entries,
                 if report.summary.content_entries == 1 { "y" } else { "ies" }
             );
@@ -2626,9 +2662,18 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let api = collect_api_report(root)?;
     let actions = collect_action_report(root)?;
     let state = collect_state_report(root)?;
+    let data = collect_data_report(root, &routes)?;
     let content = collect_content_manifest(root)?;
     let diagnostics = check_app_sources(root)?;
-    let summary = melt_summary(&routes, &api, &actions, &state, &content, &diagnostics);
+    let summary = melt_summary(
+        &routes,
+        &api,
+        &actions,
+        &state,
+        &data,
+        &content,
+        &diagnostics,
+    );
     let layers = melt_layer_reports(root, &summary);
 
     Ok(MeltReport {
@@ -2642,6 +2687,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         api,
         actions,
         state,
+        data,
         content,
         diagnostics,
         summary,
@@ -2653,9 +2699,17 @@ fn melt_summary(
     api: &ApiReport,
     actions: &ActionReport,
     state: &StateReport,
+    data: &DataReport,
     content: &ContentManifest,
     diagnostics: &[CheckDiagnostic],
 ) -> MeltSummary {
+    let data_bindings = data.routes.iter().map(|route| route.bindings.len()).sum();
+    let query_invalidations = actions
+        .routes
+        .iter()
+        .flat_map(|route| &route.actions)
+        .map(|action| action.invalidates.len())
+        .sum();
     MeltSummary {
         page_routes: routes
             .routes
@@ -2666,6 +2720,9 @@ fn melt_summary(
         action_routes: actions.routes.len(),
         actions: actions.routes.iter().map(|route| route.actions.len()).sum(),
         state_signals: state.files.iter().map(|file| file.signals.len()).sum(),
+        data_bindings,
+        query_keys: data_bindings,
+        query_invalidations,
         content_collections: content.collections.len(),
         content_entries: content
             .collections
@@ -2736,6 +2793,71 @@ fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport
             },
         },
     ]
+}
+
+fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport> {
+    let mut data_routes = Vec::new();
+
+    for route in routes.routes.iter().filter(|route| route.kind == "page") {
+        let file_path = root.join(&route.file);
+        if !file_path.exists() {
+            continue;
+        }
+
+        let source = fs::read_to_string(&file_path)
+            .with_context(|| format!("failed to read page source '{}'", file_path.display()))?;
+        let document = match parse_ax_auto(&source) {
+            Ok(document) => document,
+            Err(_) => continue,
+        };
+
+        let bindings = document
+            .page
+            .body
+            .iter()
+            .filter_map(data_binding_report_from_statement)
+            .collect::<Vec<_>>();
+
+        if !bindings.is_empty() {
+            data_routes.push(DataRouteReport {
+                route: route.route.clone(),
+                file: route.file.clone(),
+                bindings,
+            });
+        }
+    }
+
+    Ok(DataReport {
+        routes: data_routes,
+    })
+}
+
+fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBindingReport> {
+    let AxStatement::Data(binding) = statement else {
+        return None;
+    };
+
+    let AxExpr::Call { path, args } = &binding.value else {
+        return None;
+    };
+
+    if !is_query_function_path(path) {
+        return None;
+    }
+
+    let mut query_key = vec![binding.name.clone()];
+    query_key.extend(args.iter().map(format_ax_expr));
+
+    Some(DataBindingReport {
+        name: binding.name.clone(),
+        source: format_ax_expr(&binding.value),
+        query_key,
+    })
+}
+
+fn is_query_function_path(path: &[String]) -> bool {
+    path.first()
+        .is_some_and(|name| name.starts_with("load") || name == "Query")
 }
 
 fn routes_report(root: &Path) -> Result<RoutesReport> {
@@ -2851,11 +2973,17 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
                         default: field.default.as_ref().map(format_ax_expr),
                     })
                     .collect();
+                let invalidates = action
+                    .body
+                    .iter()
+                    .filter_map(action_invalidation_report_from_statement)
+                    .collect();
 
                 Some(ActionItemReport {
                     name: action.name,
                     returns: action.returns,
                     inputs,
+                    invalidates,
                 })
             })
             .collect::<Vec<_>>();
@@ -2870,6 +2998,36 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
     }
 
     Ok(ActionReport { routes })
+}
+
+fn action_invalidation_report_from_statement(
+    statement: &AxBackendStmt,
+) -> Option<ActionInvalidationReport> {
+    let AxBackendStmt::Revalidate(target) = statement else {
+        return None;
+    };
+
+    Some(ActionInvalidationReport {
+        target: format_ax_expr(target),
+        query_key: query_key_from_invalidation_expr(target),
+    })
+}
+
+fn query_key_from_invalidation_expr(expr: &AxExpr) -> Vec<String> {
+    let target = match expr {
+        AxExpr::String(value) | AxExpr::Identifier(value) => value.clone(),
+        _ => format_ax_expr(expr),
+    };
+    vec![normalize_invalidation_target(&target)]
+}
+
+fn normalize_invalidation_target(target: &str) -> String {
+    let target = target.trim().trim_matches('"').trim_matches('/');
+    if target.is_empty() {
+        "root".to_string()
+    } else {
+        target.replace('/', ".")
+    }
 }
 
 fn content_command(args: ContentArgs) -> Result<()> {
@@ -7184,12 +7342,15 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.data_bindings,
+        report.summary.query_keys,
+        report.summary.query_invalidations,
         report.summary.content_collections,
         report.summary.content_entries,
         report.summary.diagnostics
@@ -7214,6 +7375,11 @@ fn print_melt_text(report: &MeltReport) {
         print_state_text(&report.state);
     }
 
+    if !report.data.routes.is_empty() {
+        println!();
+        print_data_text(&report.data);
+    }
+
     if !report.diagnostics.is_empty() {
         println!();
         println!("Diagnostics:");
@@ -7223,15 +7389,38 @@ fn print_melt_text(report: &MeltReport) {
     }
 }
 
+fn print_data_text(report: &DataReport) {
+    println!("Data graph:");
+    for route in &report.routes {
+        println!("  {} ({})", route.route, route.file);
+        for binding in &route.bindings {
+            println!(
+                "    data {} = {} key=[{}]",
+                binding.name,
+                binding.source,
+                binding
+                    .query_key
+                    .iter()
+                    .map(|part| format!("{part:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+}
+
 fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.data_bindings,
+        report.summary.query_keys,
+        report.summary.query_invalidations,
         report.summary.diagnostics
     );
 
@@ -7291,6 +7480,29 @@ fn print_graph_text(report: &MeltReport) {
                 .collect::<Vec<_>>()
                 .join(",");
             println!("  {:<28} actions={}", route.route, action_names);
+            for action in &route.actions {
+                if action.invalidates.is_empty() {
+                    continue;
+                }
+                let labels = action
+                    .invalidates
+                    .iter()
+                    .map(|invalidation| {
+                        format!(
+                            "{}:[{}]",
+                            invalidation.target,
+                            invalidation
+                                .query_key
+                                .iter()
+                                .map(|part| format!("{part:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("    {} invalidates={}", action.name, labels);
+            }
         }
     }
 
@@ -7702,25 +7914,45 @@ fn print_actions_text(report: &ActionReport) {
             }
             if action.inputs.is_empty() {
                 println!("      inputs: none");
-                continue;
+            } else {
+                for input in &action.inputs {
+                    let required = if input.optional {
+                        "optional"
+                    } else {
+                        "required"
+                    };
+                    let default = input
+                        .default
+                        .as_ref()
+                        .map(|value| format!(" default={value}"))
+                        .unwrap_or_default();
+
+                    println!(
+                        "      {:<18} type={} {}{}",
+                        input.name, input.ty, required, default
+                    );
+                }
             }
 
-            for input in &action.inputs {
-                let required = if input.optional {
-                    "optional"
-                } else {
-                    "required"
-                };
-                let default = input
-                    .default
-                    .as_ref()
-                    .map(|value| format!(" default={value}"))
-                    .unwrap_or_default();
-
-                println!(
-                    "      {:<18} type={} {}{}",
-                    input.name, input.ty, required, default
-                );
+            if !action.invalidates.is_empty() {
+                let labels = action
+                    .invalidates
+                    .iter()
+                    .map(|invalidation| {
+                        format!(
+                            "{} key=[{}]",
+                            invalidation.target,
+                            invalidation
+                                .query_key
+                                .iter()
+                                .map(|part| format!("{part:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("      invalidates: {labels}");
             }
         }
     }
@@ -11960,16 +12192,35 @@ route GET "/api/posts" -> Post[]
         fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
         fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
         fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env AX_SECRET_DB_URL: Secret<String>\n",
+        )
+        .expect("backend should write");
+        fs::write(
             root.join("app/page.ax"),
             r#"
-page Home
+page Home() -> ASX {
+
+type Post {
+  title: String
+}
 
 page state theme: String = "silver"
+data status = "published"
+data posts = loadPosts(status)
 
-<Copy>Home</Copy>
+return {
+  <Copy>Home</Copy>
+}
+}
 "#,
         )
         .expect("page should write");
+        fs::write(
+            root.join("app/loader.ax"),
+            "query loadPosts() -> Post[]\n  data posts = db.posts.all()\n  return posts\n",
+        )
+        .expect("loader should write");
         fs::write(
             root.join("app/settings/page.ax"),
             "page Settings\n<Copy>Settings</Copy>\n",
@@ -11977,7 +12228,7 @@ page state theme: String = "silver"
         .expect("settings page should write");
         fs::write(
             root.join("app/settings/actions.ax"),
-            "action Save\n  return ok\n",
+            "action Save\n  invalidate posts\n  return ok\n",
         )
         .expect("actions should write");
         fs::write(
@@ -11994,7 +12245,24 @@ page state theme: String = "silver"
         assert_eq!(report.summary.action_routes, 1);
         assert_eq!(report.summary.actions, 1);
         assert_eq!(report.summary.state_signals, 1);
+        assert_eq!(report.summary.data_bindings, 1);
+        assert_eq!(report.summary.query_keys, 1);
+        assert_eq!(report.summary.query_invalidations, 1);
         assert_eq!(report.summary.diagnostics, 0);
+        assert_eq!(report.data.routes.len(), 1);
+        assert_eq!(report.data.routes[0].route, "/");
+        assert_eq!(report.data.routes[0].bindings[0].name, "posts");
+        assert_eq!(
+            report.data.routes[0].bindings[0].query_key,
+            vec!["posts".to_string(), "status".to_string()]
+        );
+        assert_eq!(
+            report.actions.routes[0].actions[0].invalidates,
+            vec![ActionInvalidationReport {
+                target: "posts".to_string(),
+                query_key: vec!["posts".to_string()],
+            }]
+        );
         assert!(report
             .layers
             .iter()
@@ -12007,6 +12275,9 @@ page state theme: String = "silver"
         let json = serde_json::to_string(&report).expect("melt report should serialize");
         assert!(json.contains("\"Axonyx Pages\""));
         assert!(json.contains("\"summary\""));
+        assert!(json.contains("\"data\""));
+        assert!(json.contains("\"query_key\""));
+        assert!(json.contains("\"invalidates\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -12073,6 +12344,7 @@ action SetTheme -> ThemePatch
     count: i64 = 0
 
   patch theme = input.theme
+  invalidate posts
 
 action ClearTheme
   return ok
@@ -12115,6 +12387,13 @@ action ClearTheme
             ]
         );
         assert!(report.routes[0].actions[1].inputs.is_empty());
+        assert_eq!(
+            report.routes[0].actions[0].invalidates,
+            vec![ActionInvalidationReport {
+                target: "posts".to_string(),
+                query_key: vec!["posts".to_string()],
+            }]
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -12131,11 +12410,13 @@ action ClearTheme
                             name: "SetTheme".to_string(),
                             returns: None,
                             inputs: Vec::new(),
+                            invalidates: Vec::new(),
                         },
                         ActionItemReport {
                             name: "ClearTheme".to_string(),
                             returns: None,
                             inputs: Vec::new(),
+                            invalidates: Vec::new(),
                         },
                     ],
                 },
@@ -12146,6 +12427,7 @@ action ClearTheme
                         name: "SendFeedback".to_string(),
                         returns: None,
                         inputs: Vec::new(),
+                        invalidates: Vec::new(),
                     }],
                 },
             ],
