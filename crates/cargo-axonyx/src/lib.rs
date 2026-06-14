@@ -9980,6 +9980,7 @@ fn action_patch_response(
         "redirect": redirect_to,
         "value": ax_value_to_json(&result.value),
         "patches": patches.iter().map(state_patch_to_json).collect::<Vec<_>>(),
+        "invalidations": result.invalidations.iter().map(action_invalidation_to_json).collect::<Vec<_>>(),
     }))
     .context("failed to serialize action patch response")?;
 
@@ -10003,6 +10004,7 @@ fn action_error_response(
             "value": ax_value_to_json(&error.value),
         },
         "patches": [],
+        "invalidations": [],
     }))
     .context("failed to serialize action error response")?;
 
@@ -10131,6 +10133,15 @@ fn state_patch_to_json(patch: &AxPreviewStatePatch) -> serde_json::Value {
         "signal": patch.signal,
         "value": ax_value_to_json(&patch.value),
         "source": patch.source,
+    })
+}
+
+fn action_invalidation_to_json(
+    invalidation: &axonyx_runtime::AxPreviewInvalidation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "target": invalidation.target,
+        "queryKey": invalidation.query_key,
     })
 }
 
@@ -15693,6 +15704,7 @@ action SetTheme
     theme: string
 
   patch theme = input.theme
+  invalidate posts
   return ok
 "#,
         )
@@ -15741,6 +15753,9 @@ action SetTheme
         );
         assert!(raw.contains("\"value\":\"gold\""));
         assert!(raw.contains("\"source\":\"action\""));
+        assert!(raw.contains("\"invalidations\":["));
+        assert!(raw.contains("\"target\":\"posts\""));
+        assert!(raw.contains("\"queryKey\":[\"posts\"]"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -15809,6 +15824,7 @@ action SetTheme
         assert!(raw.contains("\"ok\":false"));
         assert!(raw.contains("\"message\":\"Theme is not supported.\""));
         assert!(raw.contains("\"patches\":[]"));
+        assert!(raw.contains("\"invalidations\":[]"));
         assert!(!raw.contains("page:root:theme:1"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
@@ -15841,6 +15857,7 @@ page state count: Number = 0
                 "root:count:1",
                 AxValue::String("not-a-number".to_string()),
             )],
+            invalidations: Vec::new(),
             error: None,
         };
 
