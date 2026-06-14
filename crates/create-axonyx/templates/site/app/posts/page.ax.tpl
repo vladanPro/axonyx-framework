@@ -6,7 +6,7 @@ import { Copy } from "@axonyx/ui/foundry/Copy.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page Posts() {
+page Posts() -> ASX {
 
 type Post {
   id: String
@@ -18,7 +18,7 @@ type Post {
 page state draftStatus: String = "ready"
 data posts: List<Post> = loadPosts()
 
-return ASX {
+return {
   <Stack gap="xl">
     <PageHeader title="Posts demo">
       <Copy slot="eyebrow">Action + Loader</Copy>
