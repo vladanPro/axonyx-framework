@@ -11,9 +11,9 @@ import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page Home() {
+page Home() -> ASX {
 
-return ASX {
+return {
   <Head>
     <Title>{{APP_NAME}} | Axonyx site starter</Title>
   </Head>
@@ -130,7 +130,7 @@ return ASX {
       </CommandList>
       <DocsCodeBlock title="Home Route Shape">
         <Copy slot="eyebrow">app/page.ax</Copy>
-        {"page Home() {\n  return ASX {\n    <HeroCard title=\"{{APP_NAME}}\">\n      <Copy tone=\"lead\">A polished Axonyx starter.</Copy>\n      <Button href=\"/posts\" variant=\"primary\">Open posts demo</Button>\n    </HeroCard>\n  }\n}"}
+        {"page Home() -> ASX {\n  return {\n    <HeroCard title=\"{{APP_NAME}}\">\n      <Copy tone=\"lead\">A polished Axonyx starter.</Copy>\n      <Button href=\"/posts\" variant=\"primary\">Open posts demo</Button>\n    </HeroCard>\n  }\n}"}
       </DocsCodeBlock>
     </ContentGrid>
   </Stack>
