@@ -48,6 +48,24 @@ try {
     throw "Expected static output was not generated: $index"
   }
 
+  if ($Template -eq "site") {
+    $posts = Join-Path $appRoot "dist/posts/index.html"
+    if (!(Test-Path -LiteralPath $posts)) {
+      throw "Expected posts route output was not generated: $posts"
+    }
+
+    $postsHtml = Get-Content -LiteralPath $posts -Raw
+    if (!$postsHtml.Contains("Hello Axonyx")) {
+      throw "Expected posts route to render loader data: Hello Axonyx"
+    }
+    if (!$postsHtml.Contains("Docs Without Bloat")) {
+      throw "Expected posts route to render loader data: Docs Without Bloat"
+    }
+    if ($postsHtml.Contains("Draft Preview")) {
+      throw "Expected posts route to filter unpublished loader data"
+    }
+  }
+
   Write-Host "Axonyx core loop smoke passed."
   Write-Host "  output: $index"
 } finally {
