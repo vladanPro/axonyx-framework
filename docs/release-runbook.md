@@ -166,6 +166,45 @@ Expected result:
 - Tokio production server logs the shutdown grace period
 - `dist/index.html` is generated
 
+## Git Tags And GitHub Releases
+
+Create tags only after the matching crates.io publish and smoke verification pass.
+
+Use package-scoped tags because the framework repository can publish multiple packages with different versions:
+
+```bash
+git tag create-axonyx-v0.1.33
+git push origin create-axonyx-v0.1.33
+
+git tag cargo-axonyx-v0.1.62
+git push origin cargo-axonyx-v0.1.62
+```
+
+For runtime releases, tag from the standalone runtime repository:
+
+```bash
+cd H:/CODE/axonyx/axonyx-framework/vendor/axonyx-runtime
+git tag axonyx-runtime-v0.1.28
+git push origin axonyx-runtime-v0.1.28
+```
+
+For UI releases, tag from the UI repository:
+
+```bash
+cd H:/CODE/axonyx/axonyx-ui
+git tag axonyx-ui-v0.0.0
+git push origin axonyx-ui-v0.0.0
+```
+
+Then create a GitHub release for the tag with:
+
+- the crates.io package name and version
+- the Docker image tag, when relevant
+- the most important user-facing changes
+- upgrade notes such as `cargo ax upgrade && cargo ax build --clean`
+
+Do not move published release tags. If a publish is wrong, ship a new patch version and tag the new version.
+
 ## Stop Conditions
 
 Stop the release if:
