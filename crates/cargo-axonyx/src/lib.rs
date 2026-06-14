@@ -191,6 +191,7 @@ struct DbArgs {
 #[derive(Debug, Subcommand)]
 enum DbCommands {
     Check(DbCheckArgs),
+    Pull(DbPullArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -202,6 +203,21 @@ struct DbCheckArgs {
     /// Temporarily override DATABASE_URL / DB_URL for this check.
     #[arg(long)]
     url: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct DbPullArgs {
+    /// Output format for the database pull report.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+
+    /// Temporarily override DATABASE_URL / DB_URL for this pull.
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Schema output path.
+    #[arg(long, default_value = ".axonyx/db/schema.json")]
+    out: PathBuf,
 }
 
 #[derive(Debug, Parser)]
@@ -879,6 +895,38 @@ struct DbCheckReport {
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbPullReport {
+    ok: bool,
+    path: String,
+    schema: DbSchemaManifest,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbSchemaManifest {
+    version: u32,
+    driver: String,
+    transport: String,
+    url: Option<String>,
+    tables: Vec<DbSchemaTable>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbSchemaTable {
+    name: String,
+    columns: Vec<DbSchemaColumn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbSchemaColumn {
+    name: String,
+    ty: String,
+    nullable: bool,
+    primary_key: bool,
+    default: Option<String>,
+}
+
 pub fn main_entry() {
     if let Err(error) = run() {
         print_cli_error(&error);
@@ -1020,6 +1068,7 @@ fn check_command(args: CheckArgs) -> Result<()> {
 fn db_command(args: DbArgs) -> Result<()> {
     match args.command {
         DbCommands::Check(args) => db_check_command(args),
+        DbCommands::Pull(args) => db_pull_command(args),
     }
 }
 
@@ -1029,6 +1078,22 @@ fn db_check_command(args: DbCheckArgs) -> Result<()> {
 
     match args.format {
         CheckFormat::Text => print_db_check_text(&report),
+        CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+    }
+
+    if report.ok {
+        Ok(())
+    } else {
+        bail!("{}", report.message)
+    }
+}
+
+fn db_pull_command(args: DbPullArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_db_pull_report(&root, args.url.as_deref(), &args.out)?;
+
+    match args.format {
+        CheckFormat::Text => print_db_pull_text(&report),
         CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
     }
 
@@ -1111,6 +1176,148 @@ fn print_db_check_text(report: &DbCheckReport) {
             println!("  - {table}");
         }
     }
+}
+
+fn collect_db_pull_report(
+    root: &Path,
+    url_override: Option<&str>,
+    out: &Path,
+) -> Result<DbPullReport> {
+    let env = db_env_for_root(root, url_override)?;
+    let config = env
+        .database_config()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    config
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    if config.driver != ax_backend_runtime::AxDatabaseDriver::Sqlite {
+        bail!(
+            "cargo ax db pull supports SQLite schema pulls first; configured driver is {}",
+            config.driver.as_str()
+        );
+    }
+
+    let Some(url) = config.url.clone() else {
+        bail!("missing AX_SECRET_DB_URL for SQLite schema pull");
+    };
+
+    let schema = pull_sqlite_schema(&config, &url)?;
+    let out_path = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        root.join(out)
+    };
+
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create schema output directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    fs::write(&out_path, serde_json::to_string_pretty(&schema)?)
+        .with_context(|| format!("failed to write database schema to {}", out_path.display()))?;
+
+    Ok(DbPullReport {
+        ok: true,
+        path: out_path.display().to_string(),
+        message: format!(
+            "Pulled SQLite schema with {} table(s).",
+            schema.tables.len()
+        ),
+        schema,
+    })
+}
+
+fn print_db_pull_text(report: &DbPullReport) {
+    println!("Database pull: {}", if report.ok { "ok" } else { "error" });
+    println!("Driver: {}", report.schema.driver);
+    println!("Transport: {}", report.schema.transport);
+    if let Some(url) = &report.schema.url {
+        println!("URL: {url}");
+    }
+    println!("Schema: {}", report.path);
+    println!("{}", report.message);
+    if report.schema.tables.is_empty() {
+        println!("Tables: none");
+    } else {
+        println!("Tables:");
+        for table in &report.schema.tables {
+            println!("  - {} ({} column(s))", table.name, table.columns.len());
+        }
+    }
+}
+
+fn pull_sqlite_schema(
+    config: &ax_backend_runtime::AxDatabaseConfig,
+    url: &str,
+) -> Result<DbSchemaManifest> {
+    let connection = rusqlite::Connection::open(sqlite_database_path(url))
+        .with_context(|| "failed to open SQLite database for schema pull")?;
+    let tables = sqlite_schema_tables(&connection)?;
+
+    Ok(DbSchemaManifest {
+        version: 1,
+        driver: config.driver.as_str().to_string(),
+        transport: config.transport.as_str().to_string(),
+        url: config.url.clone().map(|url| redact_db_url(&url)),
+        tables,
+    })
+}
+
+fn sqlite_schema_tables(connection: &rusqlite::Connection) -> Result<Vec<DbSchemaTable>> {
+    let mut statement = connection.prepare(
+        "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name",
+    )?;
+    let table_names = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    table_names
+        .into_iter()
+        .map(|name| {
+            let columns = sqlite_schema_columns(connection, &name)?;
+            Ok(DbSchemaTable { name, columns })
+        })
+        .collect()
+}
+
+fn sqlite_schema_columns(
+    connection: &rusqlite::Connection,
+    table: &str,
+) -> Result<Vec<DbSchemaColumn>> {
+    let mut statement =
+        connection.prepare(&format!("pragma table_info({})", sqlite_quote_ident(table)))?;
+    let columns = statement
+        .query_map([], |row| {
+            let not_null = row.get::<_, i64>(3)? != 0;
+            let primary_key = row.get::<_, i64>(5)? != 0;
+            Ok(DbSchemaColumn {
+                name: row.get(1)?,
+                ty: row.get::<_, String>(2)?,
+                nullable: !not_null && !primary_key,
+                default: row.get(4)?,
+                primary_key,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(columns)
+}
+
+fn sqlite_database_path(url: &str) -> String {
+    let trimmed = url.trim();
+    trimmed
+        .strip_prefix("sqlite://")
+        .or_else(|| trimmed.strip_prefix("sqlite:"))
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn sqlite_quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn sqlite_master_tables_from_value(value: &serde_json::Value) -> Vec<String> {
@@ -13186,6 +13393,51 @@ page Home
     }
 
     #[test]
+    fn db_pull_report_writes_sqlite_schema_file() {
+        let root = make_temp_dir("db-pull-sqlite-schema");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute(
+                "create table posts (
+                    id integer primary key,
+                    title text not null,
+                    summary text default '',
+                    published integer not null default 0
+                )",
+                [],
+            )
+            .expect("table should create");
+        drop(connection);
+
+        let report = collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+        )
+        .expect("db pull should write schema");
+
+        let schema_path = root.join(".axonyx/db/schema.json");
+        assert!(report.ok);
+        assert_eq!(report.schema.version, 1);
+        assert_eq!(report.schema.driver, "sqlite");
+        assert_eq!(report.schema.tables.len(), 1);
+        assert_eq!(report.schema.tables[0].name, "posts");
+        assert!(report.schema.tables[0]
+            .columns
+            .iter()
+            .any(|column| column.name == "title" && column.ty == "TEXT" && !column.nullable));
+        assert!(schema_path.exists());
+        let written = fs::read_to_string(schema_path).expect("schema should read");
+        assert!(written.contains("\"posts\""));
+        assert!(written.contains("\"published\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn strips_cargo_subcommand_prefix_for_ax() {
         let args = vec![
             OsString::from("cargo-ax.exe"),
@@ -13227,9 +13479,37 @@ page Home
         let Commands::Db(args) = cli.command else {
             panic!("expected db command");
         };
-        let DbCommands::Check(args) = args.command;
+        let DbCommands::Check(args) = args.command else {
+            panic!("expected db check command");
+        };
         assert_eq!(args.format, CheckFormat::Json);
         assert_eq!(args.url.as_deref(), Some("sqlite://app.db"));
+    }
+
+    #[test]
+    fn parses_db_pull_command() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "db",
+            "pull",
+            "--format",
+            "json",
+            "--url",
+            "sqlite://app.db",
+            "--out",
+            ".axonyx/db/schema.json",
+        ])
+        .expect("db pull command should parse");
+
+        let Commands::Db(args) = cli.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Pull(args) = args.command else {
+            panic!("expected db pull command");
+        };
+        assert_eq!(args.format, CheckFormat::Json);
+        assert_eq!(args.url.as_deref(), Some("sqlite://app.db"));
+        assert_eq!(args.out, PathBuf::from(".axonyx/db/schema.json"));
     }
 
     #[test]
