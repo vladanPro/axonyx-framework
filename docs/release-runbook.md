@@ -176,8 +176,8 @@ Use package-scoped tags because the framework repository can publish multiple pa
 git tag create-axonyx-v0.1.33
 git push origin create-axonyx-v0.1.33
 
-git tag cargo-axonyx-v0.1.62
-git push origin cargo-axonyx-v0.1.62
+git tag cargo-axonyx-v0.1.63
+git push origin cargo-axonyx-v0.1.63
 ```
 
 For runtime releases, tag from the standalone runtime repository:
