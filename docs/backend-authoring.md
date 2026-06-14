@@ -138,6 +138,34 @@ Examples:
 - `Runtime.Env.secret.db_dialect` -> `AX_SECRET_DB_DIALECT`
 - `Runtime.Env.secret.db_transport` -> `AX_SECRET_DB_TRANSPORT`
 
+## Database Check
+
+Use `cargo ax db check` to verify the active database contract from `.env`,
+`.env.local`, and the shell environment.
+
+SQLite introspection is available first:
+
+```env
+AX_SECRET_DB_URL=sqlite://data/app.db
+AX_SECRET_DB_DIALECT=sqlite
+AX_SECRET_DB_TRANSPORT=direct
+```
+
+For Supabase/Postgres, use the database connection string, not the Supabase
+dashboard URL:
+
+```env
+AX_SECRET_DB_URL=postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres
+AX_SECRET_DB_DIALECT=postgres
+AX_SECRET_DB_TRANSPORT=direct
+```
+
+Current Postgres behavior:
+
+- `cargo ax db check` validates the Axonyx env/config contract.
+- The printed URL is redacted before display.
+- Live Postgres table/column introspection is planned next.
+
 For deeper draft details, see:
 
 - [Reactivity v1](./reactivity-v1.md)

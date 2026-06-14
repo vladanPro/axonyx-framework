@@ -1049,10 +1049,18 @@ fn collect_db_check_report(root: &Path, url_override: Option<&str>) -> Result<Db
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
     if config.driver != ax_backend_runtime::AxDatabaseDriver::Sqlite {
-        bail!(
-            "cargo ax db check supports SQLite introspection first; configured driver is {}",
-            config.driver.as_str()
-        );
+        return Ok(DbCheckReport {
+            ok: true,
+            driver: config.driver.as_str().to_string(),
+            transport: config.transport.as_str().to_string(),
+            url: config.url.map(|url| redact_db_url(&url)),
+            message: format!(
+                "{} database config is valid. Live table introspection is available for SQLite first; {} introspection is planned next.",
+                display_database_driver(config.driver.as_str()),
+                config.driver.as_str()
+            ),
+            tables: Vec::new(),
+        });
     }
 
     let runtime = ax_backend_runtime::runtime_from_env(env)
@@ -1125,19 +1133,19 @@ fn db_env_for_root(root: &Path, url_override: Option<&str>) -> Result<ax_backend
     for (key, value) in std::env::vars() {
         set_ax_env_key(&mut env, &key, &value);
     }
-    infer_sqlite_driver_from_env_url(&mut env);
+    infer_database_driver_from_env_url(&mut env);
     if let Some(url) = url_override {
         env.secret
             .insert("database_url".to_string(), url.to_string());
-        if looks_like_sqlite_url(url) {
+        if let Some(driver) = database_driver_from_url(url) {
             env.secret
-                .insert("database_driver".to_string(), "sqlite".to_string());
+                .insert("database_driver".to_string(), driver.to_string());
         }
     }
     Ok(env)
 }
 
-fn infer_sqlite_driver_from_env_url(env: &mut ax_backend_runtime::AxEnv) {
+fn infer_database_driver_from_env_url(env: &mut ax_backend_runtime::AxEnv) {
     if env.secret.contains_key("database_driver") || env.secret.contains_key("db_driver") {
         return;
     }
@@ -1150,9 +1158,31 @@ fn infer_sqlite_driver_from_env_url(env: &mut ax_backend_runtime::AxEnv) {
         return;
     };
 
-    if looks_like_sqlite_url(url) {
+    if let Some(driver) = database_driver_from_url(url) {
         env.secret
-            .insert("database_driver".to_string(), "sqlite".to_string());
+            .insert("database_driver".to_string(), driver.to_string());
+    }
+}
+
+fn database_driver_from_url(url: &str) -> Option<&'static str> {
+    let normalized = url.trim().to_ascii_lowercase();
+    if looks_like_sqlite_url(&normalized) {
+        Some("sqlite")
+    } else if normalized.starts_with("postgres://") || normalized.starts_with("postgresql://") {
+        Some("postgres")
+    } else if normalized.starts_with("mysql://") {
+        Some("mysql")
+    } else {
+        None
+    }
+}
+
+fn display_database_driver(driver: &str) -> String {
+    match driver {
+        "postgres" => "Postgres".to_string(),
+        "mysql" => "MySQL".to_string(),
+        "sqlite" => "SQLite".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -13103,6 +13133,54 @@ page Home
         assert_eq!(report.driver, "sqlite");
         assert!(report.tables.is_empty());
         assert!(db_path.exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn db_check_report_accepts_postgres_url_without_live_introspection() {
+        let root = make_temp_dir("db-check-postgres-url");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+
+        let report = collect_db_check_report(
+            &root,
+            Some("postgresql://postgres:secret@db.example.supabase.co:5432/postgres"),
+        )
+        .expect("postgres config should validate");
+
+        assert!(report.ok);
+        assert_eq!(report.driver, "postgres");
+        assert_eq!(report.transport, "direct");
+        assert!(report.tables.is_empty());
+        assert!(report
+            .url
+            .as_deref()
+            .expect("url should be reported")
+            .contains("<redacted>"));
+        assert!(report.message.contains("config is valid"));
+        assert!(report.message.contains("introspection is planned next"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn db_check_report_infers_postgres_driver_from_env_url() {
+        let root = make_temp_dir("db-check-postgres-env");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join(".env"),
+            "AX_SECRET_DB_URL=postgres://postgres:secret@db.example.supabase.co:5432/postgres\n",
+        )
+        .expect("env should write");
+
+        let report =
+            collect_db_check_report(&root, None).expect("postgres env config should validate");
+
+        assert!(report.ok);
+        assert_eq!(report.driver, "postgres");
+        assert_eq!(report.transport, "direct");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
