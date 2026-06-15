@@ -2973,11 +2973,7 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
                         default: field.default.as_ref().map(format_ax_expr),
                     })
                     .collect();
-                let invalidates = action
-                    .body
-                    .iter()
-                    .filter_map(action_invalidation_report_from_statement)
-                    .collect();
+                let invalidates = collect_action_invalidations_from_body(&action.body);
 
                 Some(ActionItemReport {
                     name: action.name,
@@ -3000,17 +2996,38 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
     Ok(ActionReport { routes })
 }
 
-fn action_invalidation_report_from_statement(
-    statement: &AxBackendStmt,
-) -> Option<ActionInvalidationReport> {
-    let AxBackendStmt::Revalidate(target) = statement else {
-        return None;
-    };
+fn collect_action_invalidations_from_body(body: &[AxBackendStmt]) -> Vec<ActionInvalidationReport> {
+    let mut invalidations = Vec::new();
+    for statement in body {
+        let invalidation = match statement {
+            AxBackendStmt::Insert(mutation)
+            | AxBackendStmt::Update(mutation)
+            | AxBackendStmt::Delete(mutation) => ActionInvalidationReport {
+                target: mutation.collection.clone(),
+                query_key: vec![normalize_invalidation_target(&mutation.collection)],
+            },
+            AxBackendStmt::Revalidate(target) => ActionInvalidationReport {
+                target: format_ax_expr(target),
+                query_key: query_key_from_invalidation_expr(target),
+            },
+            _ => continue,
+        };
+        push_action_invalidation(&mut invalidations, invalidation);
+    }
+    invalidations
+}
 
-    Some(ActionInvalidationReport {
-        target: format_ax_expr(target),
-        query_key: query_key_from_invalidation_expr(target),
-    })
+fn push_action_invalidation(
+    invalidations: &mut Vec<ActionInvalidationReport>,
+    invalidation: ActionInvalidationReport,
+) {
+    if invalidations
+        .iter()
+        .any(|existing| existing.query_key == invalidation.query_key)
+    {
+        return;
+    }
+    invalidations.push(invalidation);
 }
 
 fn query_key_from_invalidation_expr(expr: &AxExpr) -> Vec<String> {
@@ -12239,7 +12256,7 @@ return {
         .expect("settings page should write");
         fs::write(
             root.join("app/settings/actions.ax"),
-            "action Save\n  invalidate posts\n  return ok\n",
+            "action Save\n  insert posts\n    title: \"Hello\"\n  return ok\n",
         )
         .expect("actions should write");
         fs::write(
@@ -12361,6 +12378,9 @@ action ClearTheme
   return ok
 
 action saveProfile(email: string, public?: bool = true) -> ProfilePatch {
+  insert profiles
+    email: input.email
+  invalidate profiles
   return ok
 }
 "#,
@@ -12423,6 +12443,13 @@ action saveProfile(email: string, public?: bool = true) -> ProfilePatch {
                     default: Some("true".to_string()),
                 },
             ]
+        );
+        assert_eq!(
+            report.routes[0].actions[2].invalidates,
+            vec![ActionInvalidationReport {
+                target: "profiles".to_string(),
+                query_key: vec!["profiles".to_string()],
+            }]
         );
         assert_eq!(
             report.routes[0].actions[0].invalidates,
@@ -15730,7 +15757,8 @@ action SetTheme
     theme: string
 
   patch theme = input.theme
-  invalidate posts
+  insert posts
+    title: input.theme
   return ok
 "#,
         )
