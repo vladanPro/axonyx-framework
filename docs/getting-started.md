@@ -47,10 +47,11 @@ cargo ax run dev
 Route loaders can now read configured content collections:
 
 ```ax
-loader DocsList
+query loadDocs() -> Doc[] {
   data docs = Content.Collection("docs")
     order slug asc
   return docs
+}
 ```
 
 Each markdown entry exposes manifest fields plus content fields: `path`, `slug`,
@@ -98,7 +99,7 @@ type Post {
 Axonyx now has an early typed data path for JSX-like `.ax` files. Define a record shape, bind query data to a typed list, and `cargo ax check` can catch wrong field access before render:
 
 ```ax
-page Blog
+page Blog() -> ASX {
 
 type Post {
   title: String
@@ -109,19 +110,23 @@ type Post {
 
 data posts: List<Post> = loadPosts()
 
+return {
 <Each items={posts} as="post">
   <Card title={post.title}>
     <Copy>{post.excerpt}</Copy>
   </Card>
 </Each>
+}
+}
 ```
 
 Route-local data can live next to the page in `app/posts/loader.ax`:
 
 ```ax
-query loadPosts() -> Post[]
+query loadPosts() -> Post[] {
   data posts = db.posts.all()
   return posts
+}
 ```
 
 If the page uses `post.summary` instead of a declared field, `cargo ax check` reports an `axonyx-type` diagnostic. This is the first bridge between `.ax` primitives like `String` / `List<Post>` and Rust-side Axonyx types.

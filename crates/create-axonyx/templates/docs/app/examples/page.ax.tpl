@@ -1,8 +1,9 @@
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
-page Examples
+page Examples() -> ASX {
 
+return {
 <Head>
   <Title>Examples | {{APP_NAME}}</Title>
 </Head>
@@ -29,3 +30,5 @@ page Examples
     </SectionCard>
   </ContentGrid>
 </Container>
+}
+}
