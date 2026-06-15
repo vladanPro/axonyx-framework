@@ -3,8 +3,9 @@ import { DocsSection } from "@axonyx/ui/foundry/DocsSection.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
-page Reference
+page Reference() -> ASX {
 
+return {
 <Head>
   <Title>Reference | {{APP_NAME}}</Title>
 </Head>
@@ -45,3 +46,5 @@ page Reference
     </SectionCard>
   </ContentGrid>
 </Container>
+}
+}

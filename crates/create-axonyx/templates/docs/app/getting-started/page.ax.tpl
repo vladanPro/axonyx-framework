@@ -5,8 +5,9 @@ import { DocsCodeBlock } from "@axonyx/ui/foundry/DocsCodeBlock.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
-page GettingStarted
+page GettingStarted() -> ASX {
 
+return {
 <Head>
   <Title>Getting Started | {{APP_NAME}}</Title>
 </Head>
@@ -97,3 +98,5 @@ page GettingStarted
     </DocsCodeBlock>
   </ContentGrid>
 </Container>
+}
+}

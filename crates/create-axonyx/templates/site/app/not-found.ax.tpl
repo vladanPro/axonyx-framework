@@ -1,8 +1,9 @@
 import { Button } from "@axonyx/ui/foundry/Button.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 
-page NotFound
+page NotFound() -> ASX {
 
+return {
 <Head>
   <Title>{{APP_NAME}} | Page not found</Title>
 </Head>
@@ -20,3 +21,5 @@ page NotFound
     <Button slot="actions" href="/posts" variant="ghost">Open posts</Button>
   </PageHeader>
 </Container>
+}
+}

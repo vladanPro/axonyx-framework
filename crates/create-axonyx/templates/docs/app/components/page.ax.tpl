@@ -8,8 +8,9 @@ import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { Progress } from "@axonyx/ui/foundry/Progress.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page ComponentsShowcase
+page ComponentsShowcase() -> ASX {
 
+return {
 <Head>
   <Title>{{APP_NAME}} | Components</Title>
 </Head>
@@ -127,3 +128,5 @@ page ComponentsShowcase
     </div>
   </div>
 </Container>
+}
+}

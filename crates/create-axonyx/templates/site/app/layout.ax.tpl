@@ -5,8 +5,9 @@ import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
 import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
 import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
 
-page RootLayout
+page RootLayout() -> ASX {
 
+return {
 <Head>
   <Title>{{APP_NAME}}</Title>
   <Theme storageKey="axonyx-site-theme" default="silver" preflight="true" />
@@ -35,3 +36,5 @@ page RootLayout
   </Header>
   <Slot />
 </SiteShell>
+}
+}

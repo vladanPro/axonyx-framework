@@ -1,8 +1,9 @@
 import { Button } from "@axonyx/ui/foundry/Button.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 
-page Error
+page Error() -> ASX {
 
+return {
 <Head>
   <Title>{{APP_NAME}} | Application error</Title>
 </Head>
@@ -19,3 +20,5 @@ page Error
     <Button slot="actions" href="/" variant="primary">Back to home</Button>
   </PageHeader>
 </Container>
+}
+}

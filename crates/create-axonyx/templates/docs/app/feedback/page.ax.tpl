@@ -3,10 +3,11 @@ import { DocsCodeBlock } from "@axonyx/ui/foundry/DocsCodeBlock.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
-page Feedback
+page Feedback() -> ASX {
 
 page state feedbackStatus: String = "ready"
 
+return {
 <Head>
   <Title>Feedback | {{APP_NAME}}</Title>
 </Head>
@@ -48,3 +49,5 @@ page state feedbackStatus: String = "ready"
     </DocsCodeBlock>
   </ContentGrid>
 </Container>
+}
+}
