@@ -12359,6 +12359,10 @@ action SetTheme -> ThemePatch
 
 action ClearTheme
   return ok
+
+action saveProfile(email: string, public?: bool = true) -> ProfilePatch {
+  return ok
+}
 "#,
         )
         .expect("actions should write");
@@ -12368,7 +12372,7 @@ action ClearTheme
         assert_eq!(report.routes.len(), 1);
         assert_eq!(report.routes[0].route, "/settings");
         assert_eq!(report.routes[0].file, "app/settings/actions.ax");
-        assert_eq!(report.routes[0].actions.len(), 2);
+        assert_eq!(report.routes[0].actions.len(), 3);
         assert_eq!(report.routes[0].actions[0].name, "SetTheme");
         assert_eq!(
             report.routes[0].actions[0].returns.as_deref(),
@@ -12398,6 +12402,28 @@ action ClearTheme
             ]
         );
         assert!(report.routes[0].actions[1].inputs.is_empty());
+        assert_eq!(report.routes[0].actions[2].name, "saveProfile");
+        assert_eq!(
+            report.routes[0].actions[2].returns.as_deref(),
+            Some("ProfilePatch")
+        );
+        assert_eq!(
+            report.routes[0].actions[2].inputs,
+            vec![
+                ActionInputReport {
+                    name: "email".to_string(),
+                    ty: "string".to_string(),
+                    optional: false,
+                    default: None,
+                },
+                ActionInputReport {
+                    name: "public".to_string(),
+                    ty: "bool".to_string(),
+                    optional: true,
+                    default: Some("true".to_string()),
+                },
+            ]
+        );
         assert_eq!(
             report.routes[0].actions[0].invalidates,
             vec![ActionInvalidationReport {
