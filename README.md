@@ -169,7 +169,7 @@ Legacy indentation-first `.ax` syntax still exists for compatibility and referen
 Typed data is available in the JSX-like path:
 
 ```ax
-page Blog
+page Blog() -> ASX {
 
 type Post {
   title: String
@@ -179,17 +179,21 @@ type Post {
 
 data posts: List<Post> = loadPosts()
 
+return {
 <Each items={posts} as="post">
   <Card title={post.title} />
 </Each>
+}
+}
 ```
 
 Route-local query functions can live next to the page:
 
 ```ax
-query loadPosts() -> Post[]
+query loadPosts() -> Post[] {
   data posts = db.posts.all()
   return posts
+}
 ```
 
 `cargo ax check` reports `axonyx-type` diagnostics when a typed page accesses a missing field such as `post.summary`.
@@ -199,11 +203,12 @@ Use `summary?: String` in the type when the field is part of the schema but opti
 Early UI state authoring is also available in JSX-like `.ax`:
 
 ```ax
-page Settings
+page Settings() -> ASX {
 
 state theme = "silver"
 state count: Number = 0
 
+return {
 <select bind:value={theme}>
   <option value="silver">Silver</option>
   <option value="bronze">Bronze</option>
@@ -212,6 +217,8 @@ state count: Number = 0
 
 <span bind:text={theme}>{theme}</span>
 <input bind:value={count} />
+}
+}
 ```
 
 Axonyx lowers this into stable `data-ax-signal` / `data-ax-bind` metadata and injects the small state bridge only when a page uses signal bindings. The browser bridge exposes `window.__axonyx.state` with `get`, `set`, `subscribe`, `applyPatch`, and `snapshot`.
@@ -432,10 +439,11 @@ dist/_ax/content/manifest.json
 Route loaders can read configured content collections in preview/build:
 
 ```ax
-loader DocsList
+query loadDocs() -> Doc[] {
   data docs = Content.Collection("docs")
     order slug asc
   return docs
+}
 ```
 
 Markdown entries expose `path`, `slug`, `extension`, `bytes`, `body`, and simple

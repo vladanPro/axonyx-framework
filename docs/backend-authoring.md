@@ -13,24 +13,28 @@ Axonyx backend authoring is moving toward a framework-native shape instead of a 
 ## Example
 
 ```ax
-query loadPosts() -> Post[]
+query loadPosts() -> Post[] {
   data posts = db.posts.all()
     where status = "published"
     order created_at desc
     limit 6
   return posts
+}
 ```
 
 Pages can consume route-local query functions without a manual API fetch:
 
 ```ax
-page Posts
+page Posts() -> ASX {
 
 data posts = loadPosts()
 
+return {
 <Each items={posts} as="post">
   <Card title={post.title} />
 </Each>
+}
+}
 ```
 
 `loader PostsList` and `load PostsList` remain supported for compatibility, but new templates prefer `query loadPosts()` and `data posts = loadPosts()`.
@@ -48,9 +52,10 @@ Use `db.<table>.all()` for normal reads. When Axonyx does not have the query
 shape yet, use `db.query(...)` with a SQL string and variadic parameters:
 
 ```ax
-loader PublishedPosts
+query loadPublishedPosts() -> Post[] {
   data posts = db.query("select * from posts where status = ?", "published")
   return posts
+}
 ```
 
 Current v0 rules:

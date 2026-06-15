@@ -235,11 +235,12 @@ The rendered HTML contract is intentionally small:
 The JSX-like `.ax` authoring shape can now produce that metadata:
 
 ```ax
-page Settings
+page Settings() -> ASX {
 
 state theme = "silver"
 state count: Number = 0
 
+return {
 <select bind:value={theme}>
   <option value="silver">Silver</option>
   <option value="bronze">Bronze</option>
@@ -248,6 +249,8 @@ state count: Number = 0
 
 <span bind:text={theme}>{theme}</span>
 <input bind:value={count} />
+}
+}
 ```
 
 When a page contains `data-ax-signal`, `axonyx-runtime` injects a tiny state bridge script.
