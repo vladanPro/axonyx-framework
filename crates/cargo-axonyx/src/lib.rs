@@ -12495,6 +12495,95 @@ action saveProfile(email: string, public?: bool = true) -> ProfilePatch {
     }
 
     #[test]
+    fn action_invalidation_semantics_match_report_and_preview_runtime() {
+        let root = make_temp_dir("action-invalidation-semantics");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("home page should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            "page Posts\n<Copy>Posts</Copy>\n",
+        )
+        .expect("posts page should write");
+        fs::write(
+            root.join("app/posts/actions.ax"),
+            r#"
+action RefreshPosts
+  data posts = db.posts.all()
+  invalidate posts
+  return ok
+
+action SavePost
+  data target = "/posts"
+  insert posts
+    title: "Hello"
+  revalidate target
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let report = collect_action_report(&root).expect("action report should collect");
+        let actions = &report.routes[0].actions;
+        assert_eq!(actions[0].name, "RefreshPosts");
+        assert_eq!(
+            actions[0].invalidates,
+            vec![ActionInvalidationReport {
+                target: "posts".to_string(),
+                query_key: vec!["posts".to_string()],
+            }]
+        );
+        assert_eq!(actions[1].name, "SavePost");
+        assert_eq!(
+            actions[1].invalidates,
+            vec![
+                ActionInvalidationReport {
+                    target: "posts".to_string(),
+                    query_key: vec!["posts".to_string()],
+                },
+                ActionInvalidationReport {
+                    target: "target".to_string(),
+                    query_key: vec!["target".to_string()],
+                }
+            ]
+        );
+
+        let action_source = fs::read_to_string(root.join("app/posts/actions.ax"))
+            .expect("actions source should read");
+        let action_sources = [action_source.as_str()];
+        let mut store = AxPreviewStore::default();
+
+        let refresh = execute_preview_action_sources(
+            &action_sources,
+            "RefreshPosts",
+            &std::collections::BTreeMap::new(),
+            &mut store,
+        )
+        .expect("refresh action should execute");
+        assert_eq!(refresh.redirect_to, None);
+        assert_eq!(refresh.invalidations.len(), 1);
+        assert_eq!(refresh.invalidations[0].target, "posts");
+        assert_eq!(
+            refresh.invalidations[0].query_key,
+            vec!["posts".to_string()]
+        );
+
+        let save = execute_preview_action_sources(
+            &action_sources,
+            "SavePost",
+            &std::collections::BTreeMap::new(),
+            &mut store,
+        )
+        .expect("save action should execute");
+        assert_eq!(save.redirect_to.as_deref(), Some("/posts"));
+        assert_eq!(save.invalidations.len(), 1);
+        assert_eq!(save.invalidations[0].target, "/posts");
+        assert_eq!(save.invalidations[0].query_key, vec!["posts".to_string()]);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn action_report_filters_by_route_and_name() {
         let report = ActionReport {
             routes: vec![
