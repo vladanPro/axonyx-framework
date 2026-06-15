@@ -2999,25 +2999,30 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
 fn collect_action_invalidations_from_body(body: &[AxBackendStmt]) -> Vec<ActionInvalidationReport> {
     let mut invalidations = Vec::new();
     for statement in body {
-        let invalidation = match statement {
+        match statement {
             AxBackendStmt::Insert(mutation)
             | AxBackendStmt::Update(mutation)
-            | AxBackendStmt::Delete(mutation) => ActionInvalidationReport {
-                target: mutation.collection.clone(),
-                query_key: vec![normalize_invalidation_target(&mutation.collection)],
-            },
-            AxBackendStmt::Revalidate(target) => ActionInvalidationReport {
-                target: format_ax_expr(target),
-                query_key: query_key_from_invalidation_expr(target),
-            },
+            | AxBackendStmt::Delete(mutation) => {
+                let invalidation = ActionInvalidationReport {
+                    target: mutation.collection.clone(),
+                    query_key: vec![normalize_invalidation_target(&mutation.collection)],
+                };
+                push_auto_action_invalidation(&mut invalidations, invalidation);
+            }
+            AxBackendStmt::Revalidate(revalidate) => {
+                let invalidation = ActionInvalidationReport {
+                    target: format_action_invalidation_target(&revalidate.target),
+                    query_key: query_key_from_invalidation_expr(&revalidate.target),
+                };
+                push_explicit_action_invalidation(&mut invalidations, invalidation);
+            }
             _ => continue,
-        };
-        push_action_invalidation(&mut invalidations, invalidation);
+        }
     }
     invalidations
 }
 
-fn push_action_invalidation(
+fn push_auto_action_invalidation(
     invalidations: &mut Vec<ActionInvalidationReport>,
     invalidation: ActionInvalidationReport,
 ) {
@@ -3030,11 +3035,29 @@ fn push_action_invalidation(
     invalidations.push(invalidation);
 }
 
-fn query_key_from_invalidation_expr(expr: &AxExpr) -> Vec<String> {
-    let target = match expr {
+fn push_explicit_action_invalidation(
+    invalidations: &mut Vec<ActionInvalidationReport>,
+    invalidation: ActionInvalidationReport,
+) {
+    if let Some(existing) = invalidations
+        .iter_mut()
+        .find(|existing| existing.query_key == invalidation.query_key)
+    {
+        *existing = invalidation;
+        return;
+    }
+    invalidations.push(invalidation);
+}
+
+fn format_action_invalidation_target(expr: &AxExpr) -> String {
+    match expr {
         AxExpr::String(value) | AxExpr::Identifier(value) => value.clone(),
         _ => format_ax_expr(expr),
-    };
+    }
+}
+
+fn query_key_from_invalidation_expr(expr: &AxExpr) -> Vec<String> {
+    let target = format_action_invalidation_target(expr);
     vec![normalize_invalidation_target(&target)]
 }
 
@@ -4957,9 +4980,16 @@ fn collect_db_surface_diagnostics_from_stmts(
                     diagnostics,
                 );
             }
-            AxBackendStmt::ClearCookie(expr) | AxBackendStmt::Revalidate(expr) => {
+            AxBackendStmt::ClearCookie(expr) => {
                 collect_db_surface_diagnostics_from_expr(path, source, expr, resources, diagnostics)
             }
+            AxBackendStmt::Revalidate(revalidate) => collect_db_surface_diagnostics_from_expr(
+                path,
+                source,
+                &revalidate.target,
+                resources,
+                diagnostics,
+            ),
             AxBackendStmt::Require(requirement) => {
                 collect_db_surface_diagnostics_from_expr(
                     path,
@@ -5518,7 +5548,7 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
         }
         AxStepPlan::Hook { value, .. } => expr_uses_input_scope(value),
         AxStepPlan::ClearCookie { name } => expr_uses_input_scope(name),
-        AxStepPlan::Revalidate { target } => expr_uses_input_scope(target),
+        AxStepPlan::Revalidate { target, .. } => expr_uses_input_scope(target),
         AxStepPlan::Insert { fields, .. } => fields
             .iter()
             .any(|field| expr_uses_input_scope(&field.value)),
@@ -5568,7 +5598,9 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             | AxStepPlan::Cookie { value: expr, .. }
             | AxStepPlan::Hook { value: expr, .. }
             | AxStepPlan::ClearCookie { name: expr }
-            | AxStepPlan::Revalidate { target: expr } => expr.code.contains("Auth.signedSession"),
+            | AxStepPlan::Revalidate { target: expr, .. } => {
+                expr.code.contains("Auth.signedSession")
+            }
             AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => fields
                 .iter()
                 .any(|field| field.value.code.contains("Auth.signedSession")),
@@ -5687,7 +5719,7 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
         }
         AxStepPlan::Hook { value, .. } => collect_env_refs_from_expr(value, refs),
         AxStepPlan::ClearCookie { name } => collect_env_refs_from_expr(name, refs),
-        AxStepPlan::Revalidate { target } => collect_env_refs_from_expr(target, refs),
+        AxStepPlan::Revalidate { target, .. } => collect_env_refs_from_expr(target, refs),
         AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => {
             for field in fields {
                 collect_env_refs_from_expr(&field.value, refs);
@@ -12380,7 +12412,7 @@ action ClearTheme
 action saveProfile(email: string, public?: bool = true) -> ProfilePatch {
   insert profiles
     email: input.email
-  invalidate profiles
+  revalidate "/profiles"
   return ok
 }
 "#,
@@ -12447,7 +12479,7 @@ action saveProfile(email: string, public?: bool = true) -> ProfilePatch {
         assert_eq!(
             report.routes[0].actions[2].invalidates,
             vec![ActionInvalidationReport {
-                target: "profiles".to_string(),
+                target: "/profiles".to_string(),
                 query_key: vec!["profiles".to_string()],
             }]
         );
