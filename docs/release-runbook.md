@@ -173,11 +173,11 @@ Create tags only after the matching crates.io publish and smoke verification pas
 Use package-scoped tags because the framework repository can publish multiple packages with different versions:
 
 ```bash
-git tag create-axonyx-v0.1.33
-git push origin create-axonyx-v0.1.33
+git tag create-axonyx-v0.1.34
+git push origin create-axonyx-v0.1.34
 
-git tag cargo-axonyx-v0.1.63
-git push origin cargo-axonyx-v0.1.63
+git tag cargo-axonyx-v0.1.64
+git push origin cargo-axonyx-v0.1.64
 ```
 
 For runtime releases, tag from the standalone runtime repository:
