@@ -10024,12 +10024,14 @@ fn action_patch_response(
         .redirect_to
         .clone()
         .unwrap_or_else(|| route.request_path.clone());
+    let refreshes = collect_route_data_refreshes(route, &result.invalidations)?;
     let body = serde_json::to_vec(&serde_json::json!({
         "ok": true,
         "redirect": redirect_to,
         "value": ax_value_to_json(&result.value),
         "patches": patches.iter().map(state_patch_to_json).collect::<Vec<_>>(),
         "invalidations": result.invalidations.iter().map(action_invalidation_to_json).collect::<Vec<_>>(),
+        "refreshes": refreshes.iter().map(data_refresh_to_json).collect::<Vec<_>>(),
     }))
     .context("failed to serialize action patch response")?;
 
@@ -10054,6 +10056,7 @@ fn action_error_response(
         },
         "patches": [],
         "invalidations": [],
+        "refreshes": [],
     }))
     .context("failed to serialize action error response")?;
 
@@ -10113,6 +10116,47 @@ fn validate_action_patches(route: &ResolvedRoute, patches: &[AxPreviewStatePatch
     }
 
     Ok(())
+}
+
+fn collect_route_data_refreshes(
+    route: &ResolvedRoute,
+    invalidations: &[axonyx_runtime::AxPreviewInvalidation],
+) -> Result<Vec<DataBindingReport>> {
+    if invalidations.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let source = fs::read_to_string(&route.page_path)
+        .with_context(|| format!("failed to read page source '{}'", route.page_path.display()))?;
+    let document = match parse_ax_auto(&source) {
+        Ok(document) => document,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut refreshes = Vec::new();
+    for binding in document
+        .page
+        .body
+        .iter()
+        .filter_map(data_binding_report_from_statement)
+    {
+        if invalidations.iter().any(|invalidation| {
+            query_key_invalidates_binding(&invalidation.query_key, &binding.query_key)
+        }) {
+            refreshes.push(binding);
+        }
+    }
+
+    Ok(refreshes)
+}
+
+fn query_key_invalidates_binding(invalidation: &[String], binding: &[String]) -> bool {
+    !invalidation.is_empty()
+        && invalidation.len() <= binding.len()
+        && invalidation
+            .iter()
+            .zip(binding.iter())
+            .all(|(left, right)| left == right)
 }
 
 fn collect_route_state_manifest(route: &ResolvedRoute) -> Result<RouteStateManifest> {
@@ -10191,6 +10235,14 @@ fn action_invalidation_to_json(
     serde_json::json!({
         "target": invalidation.target,
         "queryKey": invalidation.query_key,
+    })
+}
+
+fn data_refresh_to_json(binding: &DataBindingReport) -> serde_json::Value {
+    serde_json::json!({
+        "name": binding.name,
+        "source": binding.source,
+        "queryKey": binding.query_key,
     })
 }
 
@@ -15867,9 +15919,14 @@ axonyx-runtime = "0.1.0"
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
         fs::write(
             root.join("app/page.ax"),
-            "page Home\npage state theme: String = \"silver\"\n<Copy>Home</Copy>\n",
+            "page Home\npage state theme: String = \"silver\"\ndata status = \"published\"\ndata posts = loadPosts(status)\n<Copy>Home</Copy>\n",
         )
         .expect("page should write");
+        fs::write(
+            root.join("app/loader.ax"),
+            "query loadPosts() -> Post[] {\n  data posts = db.posts.all()\n  return posts\n}\n",
+        )
+        .expect("loader should write");
         fs::write(
             root.join("app/actions.ax"),
             r#"
@@ -15931,6 +15988,10 @@ action SetTheme
         assert!(raw.contains("\"invalidations\":["));
         assert!(raw.contains("\"target\":\"posts\""));
         assert!(raw.contains("\"queryKey\":[\"posts\"]"));
+        assert!(raw.contains("\"refreshes\":["));
+        assert!(raw.contains("\"name\":\"posts\""));
+        assert!(raw.contains("\"source\":\"loadPosts(status)\""));
+        assert!(raw.contains("\"queryKey\":[\"posts\",\"status\"]"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -16000,6 +16061,7 @@ action SetTheme
         assert!(raw.contains("\"message\":\"Theme is not supported.\""));
         assert!(raw.contains("\"patches\":[]"));
         assert!(raw.contains("\"invalidations\":[]"));
+        assert!(raw.contains("\"refreshes\":[]"));
         assert!(!raw.contains("page:root:theme:1"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
