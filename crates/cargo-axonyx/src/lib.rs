@@ -13,7 +13,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use axonyx_core::ax_ast_prelude::{AxBinaryOp, AxExpr, AxImport, AxStatement, AxUnaryOp};
+use axonyx_core::ax_ast_prelude::{
+    AxBinaryOp, AxDocument, AxExpr, AxImport, AxStatement, AxUnaryOp,
+};
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
 };
@@ -8942,6 +8944,10 @@ fn handle_http_request(
         return handle_action_request(state, &request);
     }
 
+    if request.method == "GET" && request.target.starts_with("/__axonyx/data") {
+        return handle_data_request(state, &request);
+    }
+
     if request.method == "GET" && request.target == "/favicon.ico" {
         return Ok(AxHttpResponse::text(204, "").with_no_store());
     }
@@ -10068,6 +10074,39 @@ fn action_error_response(
     .with_no_store())
 }
 
+fn handle_data_request(state: &DevServerState, request: &AxHttpRequest) -> Result<AxHttpResponse> {
+    let request_path =
+        extract_action_query_param(&request.target, "path").unwrap_or_else(|| "/".to_string());
+    let binding_name = extract_action_query_param(&request.target, "name").unwrap_or_default();
+    if binding_name.is_empty() {
+        return Ok(AxHttpResponse::text(400, "missing data binding name").with_no_store());
+    }
+
+    let Some(route) = resolve_route(&state.root, &request_path)? else {
+        return Ok(AxHttpResponse::text(404, "route not found").with_no_store());
+    };
+
+    let Some(binding) = collect_route_data_bindings(&route)?
+        .into_iter()
+        .find(|binding| binding.name == binding_name)
+    else {
+        return Ok(AxHttpResponse::text(404, "data binding not found").with_no_store());
+    };
+
+    let version = route_version(&state.root, &route)?;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "ok": true,
+        "route": route.request_path,
+        "version": version,
+        "binding": data_refresh_to_json(&binding),
+        "value": serde_json::Value::Null,
+        "html": serde_json::Value::Null,
+    }))
+    .context("failed to serialize data refresh response")?;
+
+    Ok(AxHttpResponse::bytes(200, "application/ax-data+json; charset=utf-8", body).with_no_store())
+}
+
 fn normalize_action_patches(
     route: &ResolvedRoute,
     patches: &[AxPreviewStatePatch],
@@ -10134,12 +10173,7 @@ fn collect_route_data_refreshes(
     };
 
     let mut refreshes = Vec::new();
-    for binding in document
-        .page
-        .body
-        .iter()
-        .filter_map(data_binding_report_from_statement)
-    {
+    for binding in data_bindings_from_document(&document) {
         if invalidations.iter().any(|invalidation| {
             query_key_invalidates_binding(&invalidation.query_key, &binding.query_key)
         }) {
@@ -10148,6 +10182,26 @@ fn collect_route_data_refreshes(
     }
 
     Ok(refreshes)
+}
+
+fn collect_route_data_bindings(route: &ResolvedRoute) -> Result<Vec<DataBindingReport>> {
+    let source = fs::read_to_string(&route.page_path)
+        .with_context(|| format!("failed to read page source '{}'", route.page_path.display()))?;
+    let document = match parse_ax_auto(&source) {
+        Ok(document) => document,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    Ok(data_bindings_from_document(&document))
+}
+
+fn data_bindings_from_document(document: &AxDocument) -> Vec<DataBindingReport> {
+    document
+        .page
+        .body
+        .iter()
+        .filter_map(data_binding_report_from_statement)
+        .collect()
 }
 
 fn query_key_invalidates_binding(invalidation: &[String], binding: &[String]) -> bool {
@@ -15992,6 +16046,60 @@ action SetTheme
         assert!(raw.contains("\"name\":\"posts\""));
         assert!(raw.contains("\"source\":\"loadPosts(status)\""));
         assert!(raw.contains("\"queryKey\":[\"posts\",\"status\"]"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn data_request_can_return_route_binding_metadata() {
+        let root = make_temp_dir("data-refresh-response");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\npage state status: String = \"published\"\ndata posts = loadPosts(status)\n<Copy>Home</Copy>\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/loader.ax"),
+            "query loadPosts() -> Post[] {\n  data posts = db.posts.all()\n  return posts\n}\n",
+        )
+        .expect("loader should write");
+        let state = test_dev_state(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Dev).expect("request should handle");
+        });
+
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(
+                b"GET /__axonyx/data?path=%2F&name=posts HTTP/1.1\r\nHost: localhost\r\nAccept: application/ax-data+json\r\n\r\n",
+            )
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 200 OK"));
+        assert!(raw.contains("Content-Type: application/ax-data+json; charset=utf-8"));
+        assert!(raw.contains("\"ok\":true"));
+        assert!(raw.contains("\"route\":\"/\""));
+        assert!(raw.contains("\"version\":\""));
+        assert!(raw.contains("\"binding\":{"));
+        assert!(raw.contains("\"name\":\"posts\""));
+        assert!(raw.contains("\"source\":\"loadPosts(status)\""));
+        assert!(raw.contains("\"queryKey\":[\"posts\",\"status\"]"));
+        assert!(raw.contains("\"value\":null"));
+        assert!(raw.contains("\"html\":null"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
