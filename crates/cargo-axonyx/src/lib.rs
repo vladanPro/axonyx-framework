@@ -4211,8 +4211,102 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     diagnostics.extend(check_axonyx_config(root)?);
     diagnostics.extend(check_route_manifest(root)?);
     diagnostics.extend(check_action_patch_contracts(root)?);
+    diagnostics.extend(check_query_function_call_contracts(root)?);
 
     Ok(diagnostics)
+}
+
+fn check_query_function_call_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let mut diagnostics = Vec::new();
+
+    for route in collect_page_route_manifest(root)? {
+        let Some(loader_file) = &route.loader else {
+            continue;
+        };
+
+        let page_path = root.join(&route.file);
+        let loader_path = root.join(loader_file);
+        if !page_path.exists() || !loader_path.exists() {
+            continue;
+        }
+
+        let page_source = fs::read_to_string(&page_path)
+            .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
+        let loader_source = fs::read_to_string(&loader_path)
+            .with_context(|| format!("failed to read loader source '{}'", loader_path.display()))?;
+
+        let page_document = match parse_ax_auto(&page_source) {
+            Ok(document) => document,
+            Err(_) => continue,
+        };
+        let loader_document = match parse_backend_ax(&loader_source) {
+            Ok(document) => document,
+            Err(_) => continue,
+        };
+        let loaders = loader_contracts_from_document(&loader_document);
+        if loaders.is_empty() {
+            continue;
+        }
+
+        for statement in &page_document.page.body {
+            let AxStatement::Data(binding) = statement else {
+                continue;
+            };
+            let AxExpr::Call { path, args } = &binding.value else {
+                continue;
+            };
+            let Some(name) = path.first() else {
+                continue;
+            };
+            let Some((min_args, max_args)) = loaders.get(name.as_str()).copied() else {
+                continue;
+            };
+
+            if args.len() >= min_args && args.len() <= max_args {
+                continue;
+            }
+
+            let expected = if min_args == max_args {
+                min_args.to_string()
+            } else {
+                format!("{min_args}-{max_args}")
+            };
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&page_path),
+                line: line_for_source_pattern(&page_source, &format!("{name}(")),
+                column: 1,
+                severity: "error",
+                code: "axonyx-query-call-args",
+                message: format!(
+                    "query function `{name}` expects {expected} argument(s), but this page passed {}.",
+                    args.len()
+                ),
+            });
+        }
+    }
+
+    Ok(diagnostics)
+}
+
+fn loader_contracts_from_document(
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<&str, (usize, usize)> {
+    let mut loaders = std::collections::BTreeMap::new();
+
+    for block in &document.blocks {
+        let AxBackendBlock::Loader(loader) = block else {
+            continue;
+        };
+
+        let min_args = loader
+            .input
+            .iter()
+            .filter(|field| !field.optional && field.default.is_none() && field.ty != "bool")
+            .count();
+        loaders.insert(loader.name.as_str(), (min_args, loader.input.len()));
+    }
+
+    loaders
 }
 
 fn check_action_patch_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
@@ -12457,7 +12551,7 @@ return {
         .expect("page should write");
         fs::write(
             root.join("app/loader.ax"),
-            "query loadPosts() -> Post[]\n  data posts = db.posts.all()\n  return posts\n",
+            "query loadPosts(status: String) -> Post[]\n  data posts = db.posts.all()\n    where status = input.status\n  return posts\n",
         )
         .expect("loader should write");
         fs::write(
@@ -16394,6 +16488,91 @@ action SetCount
         assert_eq!(diagnostics[0].line, 6);
         assert!(diagnostics[0].message.contains("String"));
         assert!(diagnostics[0].message.contains("Number"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_accepts_query_function_default_argument() {
+        let root = make_temp_dir("query-function-default-argument");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts
+  data posts = loadPosts()
+  Copy -> "Posts"
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+query loadPosts(status: String = "published") -> Post[]
+  data posts = db.posts.all()
+    where status = input.status
+  return posts
+"#,
+        )
+        .expect("loader should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "axonyx-query-call-args"),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_query_function_argument_count_mismatch() {
+        let root = make_temp_dir("query-function-argument-mismatch");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts
+  data posts = loadPosts()
+  data featured = loadFeatured("published", true)
+  Copy -> "Posts"
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+query loadPosts(status: String) -> Post[]
+  data posts = db.posts.all()
+  return posts
+
+query loadFeatured(status: String) -> Post[]
+  data posts = db.posts.all()
+  return posts
+"#,
+        )
+        .expect("loader should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        let query_diagnostics = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "axonyx-query-call-args")
+            .collect::<Vec<_>>();
+
+        assert_eq!(query_diagnostics.len(), 2, "diagnostics: {diagnostics:?}");
+        assert!(query_diagnostics[0]
+            .message
+            .contains("query function `loadPosts` expects 1 argument(s), but this page passed 0"));
+        assert!(query_diagnostics[1].message.contains(
+            "query function `loadFeatured` expects 1 argument(s), but this page passed 2"
+        ));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
