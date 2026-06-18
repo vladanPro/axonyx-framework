@@ -10094,17 +10094,43 @@ fn handle_data_request(state: &DevServerState, request: &AxHttpRequest) -> Resul
     };
 
     let version = route_version(&state.root, &route)?;
+    let rendered_html = render_route_html(state, &route)?;
+    let page_fragment = extract_page_root_fragment(&rendered_html);
     let body = serde_json::to_vec(&serde_json::json!({
         "ok": true,
         "route": route.request_path,
         "version": version,
         "binding": data_refresh_to_json(&binding),
         "value": serde_json::Value::Null,
-        "html": serde_json::Value::Null,
+        "html": page_fragment,
     }))
     .context("failed to serialize data refresh response")?;
 
     Ok(AxHttpResponse::bytes(200, "application/ax-data+json; charset=utf-8", body).with_no_store())
+}
+
+fn extract_page_root_fragment(html: &str) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(relative_start) = html[search_from..].find("<main") {
+        let start = search_from + relative_start;
+        let Some(open_end_relative) = html[start..].find('>') else {
+            return None;
+        };
+        let open_end = start + open_end_relative + 1;
+        let open_tag = &html[start..open_end];
+        if !open_tag.contains("data-ax-root=\"page\"") {
+            search_from = open_end;
+            continue;
+        }
+
+        let Some(close_relative) = html[open_end..].find("</main>") else {
+            return None;
+        };
+        let end = open_end + close_relative + "</main>".len();
+        return Some(html[start..end].to_string());
+    }
+
+    None
 }
 
 fn normalize_action_patches(
@@ -16058,7 +16084,7 @@ action SetTheme
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
         fs::write(
             root.join("app/page.ax"),
-            "page Home\npage state status: String = \"published\"\ndata posts = loadPosts(status)\n<Copy>Home</Copy>\n",
+            "page Home\ndata posts = loadPosts()\n<Copy>Home</Copy>\n",
         )
         .expect("page should write");
         fs::write(
@@ -16096,10 +16122,12 @@ action SetTheme
         assert!(raw.contains("\"version\":\""));
         assert!(raw.contains("\"binding\":{"));
         assert!(raw.contains("\"name\":\"posts\""));
-        assert!(raw.contains("\"source\":\"loadPosts(status)\""));
-        assert!(raw.contains("\"queryKey\":[\"posts\",\"status\"]"));
+        assert!(raw.contains("\"source\":\"loadPosts()\""));
+        assert!(raw.contains("\"queryKey\":[\"posts\"]"));
         assert!(raw.contains("\"value\":null"));
-        assert!(raw.contains("\"html\":null"));
+        assert!(raw.contains("\"html\":\"<main"));
+        assert!(raw.contains("data-ax-root=\\\"page\\\""));
+        assert!(raw.contains("<p class=\\\"ax-copy\\\">Home</p>"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
