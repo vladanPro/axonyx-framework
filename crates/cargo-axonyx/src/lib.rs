@@ -5308,7 +5308,7 @@ fn check_backend_return_contracts(
     for handler in &plan.handlers {
         let returns = match &handler.kind {
             AxHandlerKind::Route { returns, .. }
-            | AxHandlerKind::Loader { returns }
+            | AxHandlerKind::Loader { returns, .. }
             | AxHandlerKind::Action { returns, .. } => returns,
             AxHandlerKind::Job => continue,
         };
