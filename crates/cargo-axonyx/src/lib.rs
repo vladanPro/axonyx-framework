@@ -10111,7 +10111,7 @@ fn handle_data_request(state: &DevServerState, request: &AxHttpRequest) -> Resul
 
 fn extract_page_root_fragment(html: &str) -> Option<String> {
     let mut search_from = 0;
-    while let Some(relative_start) = html[search_from..].find("<main") {
+    while let Some(relative_start) = find_main_open(html, search_from) {
         let start = search_from + relative_start;
         let Some(open_end_relative) = html[start..].find('>') else {
             return None;
@@ -10123,14 +10123,61 @@ fn extract_page_root_fragment(html: &str) -> Option<String> {
             continue;
         }
 
-        let Some(close_relative) = html[open_end..].find("</main>") else {
-            return None;
-        };
-        let end = open_end + close_relative + "</main>".len();
+        let end = find_matching_main_close(html, open_end)?;
         return Some(html[start..end].to_string());
     }
 
     None
+}
+
+fn find_matching_main_close(html: &str, content_start: usize) -> Option<usize> {
+    let mut cursor = content_start;
+    let mut depth = 1usize;
+
+    while cursor < html.len() {
+        let next_open = find_main_open(html, cursor).map(|relative| cursor + relative);
+        let next_close = find_main_close(html, cursor).map(|relative| cursor + relative);
+
+        match (next_open, next_close) {
+            (Some(open), Some(close)) if open < close => {
+                let open_end = html[open..].find('>').map(|relative| open + relative + 1)?;
+                depth += 1;
+                cursor = open_end;
+            }
+            (_, Some(close)) => {
+                depth -= 1;
+                cursor = close + "</main>".len();
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    None
+}
+
+fn find_main_open(html: &str, from: usize) -> Option<usize> {
+    find_ascii_case_insensitive(&html[from..], "<main").and_then(|relative| {
+        let absolute = from + relative + "<main".len();
+        html.as_bytes()
+            .get(absolute)
+            .is_some_and(|byte| matches!(byte, b'>' | b' ' | b'\t' | b'\r' | b'\n' | b'/'))
+            .then_some(relative)
+    })
+}
+
+fn find_main_close(html: &str, from: usize) -> Option<usize> {
+    find_ascii_case_insensitive(&html[from..], "</main>")
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    let needle = needle.as_bytes();
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn normalize_action_patches(
@@ -16130,6 +16177,32 @@ action SetTheme
         assert!(raw.contains("<p class=\\\"ax-copy\\\">Home</p>"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn page_root_fragment_handles_nested_main_markup() {
+        let html = r#"
+<!DOCTYPE html>
+<html>
+  <body>
+    <main data-ax-page="Home" data-ax-root="page">
+      <section>
+        <main class="nested">Nested content</main>
+      </section>
+      <p>After nested main</p>
+    </main>
+  </body>
+</html>
+"#;
+
+        let fragment = extract_page_root_fragment(html).expect("page root should extract");
+
+        assert!(fragment.starts_with("<main data-ax-page=\"Home\" data-ax-root=\"page\">"));
+        assert!(fragment.contains("<main class=\"nested\">Nested content</main>"));
+        assert!(fragment.contains("<p>After nested main</p>"));
+        assert!(fragment.ends_with("</main>"));
+        assert_eq!(fragment.matches("<main").count(), 2);
+        assert_eq!(fragment.matches("</main>").count(), 2);
     }
 
     #[test]
