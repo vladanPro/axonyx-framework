@@ -4947,6 +4947,13 @@ fn check_backend_database_surface(
                 &resources,
                 &mut diagnostics,
             ),
+            AxBackendBlock::Function(function) => collect_db_surface_diagnostics_from_stmts(
+                path,
+                source,
+                &function.body,
+                &resources,
+                &mut diagnostics,
+            ),
             AxBackendBlock::Job(job) => collect_db_surface_diagnostics_from_stmts(
                 path,
                 source,
