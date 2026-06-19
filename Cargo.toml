@@ -15,7 +15,7 @@ repository = "https://github.com/vladanPro/axonyx-framework"
 homepage = "https://github.com/vladanPro/axonyx-framework"
 documentation = "https://github.com/vladanPro/axonyx-framework"
 rust-version = "1.82"
-version = "0.1.67"
+version = "0.1.68"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
@@ -29,8 +29,8 @@ flate2 = "1.0.35"
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
 syn = { version = "2.0.117", features = ["full"] }
-axonyx-core = { version = "0.1.33", path = "vendor/axonyx-runtime/crates/axonyx-core" }
-axonyx-runtime = { version = "0.1.33", path = "vendor/axonyx-runtime/crates/axonyx-runtime", features = ["axum"] }
+axonyx-core = { version = "0.1.34", path = "vendor/axonyx-runtime/crates/axonyx-core" }
+axonyx-runtime = { version = "0.1.34", path = "vendor/axonyx-runtime/crates/axonyx-runtime", features = ["axum"] }
 
 [profile.release]
 lto = "fat"
