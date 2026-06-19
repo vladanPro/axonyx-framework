@@ -8748,12 +8748,7 @@ fn collect_backend_sources(root: &Path, out: &mut Vec<(String, String)>) -> Resu
 
     collect_backend_sources_in_dir(&routes_root, &routes_root, out, true)?;
     collect_backend_sources_in_dir(&jobs_root, &jobs_root, out, true)?;
-    collect_named_backend_files(
-        &app_root,
-        &app_root,
-        out,
-        &["backend.ax", "loader.ax", "actions.ax"],
-    )?;
+    collect_backend_like_sources_in_dir(&app_root, &app_root, out)?;
     Ok(())
 }
 
@@ -8797,11 +8792,10 @@ fn collect_backend_sources_in_dir(
     Ok(())
 }
 
-fn collect_named_backend_files(
+fn collect_backend_like_sources_in_dir(
     root: &Path,
     dir: &Path,
     out: &mut Vec<(String, String)>,
-    names: &[&str],
 ) -> Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -8818,20 +8812,20 @@ fn collect_named_backend_files(
             .with_context(|| format!("failed to inspect '{}'", path.display()))?;
 
         if file_type.is_dir() {
-            collect_named_backend_files(root, &path, out, names)?;
+            collect_backend_like_sources_in_dir(root, &path, out)?;
             continue;
         }
 
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-
-        if !names.contains(&file_name) {
+        if !file_type.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("ax") {
             continue;
         }
 
         let source = fs::read_to_string(&path)
             .with_context(|| format!("failed to read backend source '{}'", path.display()))?;
+        if !looks_like_backend_ax(&source) {
+            continue;
+        }
+
         let name = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -13792,6 +13786,54 @@ axonyx-ui = {{ path = "{ui_path}" }}
                 let module =
                     fs::read_to_string(output_path).expect("generated backend should be readable");
                 assert!(module.contains("pub fn route_get_api_posts"));
+            }
+            BackendBuildStatus::NoSources { .. } => panic!("backend sources should be found"),
+        }
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_command_includes_app_domain_backend_sources() {
+        let root = make_temp_dir("build-domain");
+        fs::create_dir_all(root.join("app").join("posts")).expect("posts dir should exist");
+        fs::create_dir_all(root.join("src").join("generated")).expect("generated dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app").join("posts").join("domain.ax"),
+            r#"
+export fn normalizeStatus(status: String) -> String {
+  return status
+}
+"#,
+        )
+        .expect("domain should write");
+        fs::write(
+            root.join("app").join("posts").join("loader.ax"),
+            r#"
+import { normalizeStatus } from "./domain.ax"
+
+loader PostsList
+  data status = normalizeStatus("published")
+  return status
+"#,
+        )
+        .expect("loader should write");
+
+        let status = compile_backend_from_app_root(&root).expect("build should succeed");
+
+        match status {
+            BackendBuildStatus::Generated {
+                source_count,
+                output_path,
+            } => {
+                assert_eq!(source_count, 2);
+                let module =
+                    fs::read_to_string(output_path).expect("generated backend should be readable");
+                assert!(module.contains("pub fn normalizeStatus(status: String) -> String"));
+                assert!(module
+                    .contains(r#"let status = json!(&normalizeStatus("published".to_string()));"#));
             }
             BackendBuildStatus::NoSources { .. } => panic!("backend sources should be found"),
         }
