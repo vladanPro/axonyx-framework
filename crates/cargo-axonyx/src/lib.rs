@@ -4805,6 +4805,9 @@ fn check_backend_requirements(
     root: Option<&Path>,
     document: &AxBackendDocument,
 ) -> Vec<CheckDiagnostic> {
+    let mut diagnostics = root
+        .map(|root| check_backend_imports(root, path, source, document))
+        .unwrap_or_default();
     let plan = match lower_backend_document(document) {
         Ok(plan) => plan,
         Err(error) => {
@@ -4820,7 +4823,7 @@ fn check_backend_requirements(
     };
 
     let type_names = root.and_then(|root| collect_project_type_names(root).ok());
-    let mut diagnostics = check_backend_route_inputs(path, source, document, &plan);
+    diagnostics.extend(check_backend_route_inputs(path, source, document, &plan));
     diagnostics.extend(check_backend_database_surface(path, source, root, document));
     diagnostics.extend(check_backend_return_contracts(
         path,
@@ -6027,6 +6030,236 @@ fn check_imports(
         .collect()
 }
 
+fn check_backend_imports(
+    root: &Path,
+    path: &Path,
+    source: &str,
+    document: &AxBackendDocument,
+) -> Vec<CheckDiagnostic> {
+    document
+        .imports
+        .iter()
+        .filter_map(|import_decl| {
+            let resolved = resolve_backend_import_path(root, path, &import_decl.source);
+            let line = import_source_line(source, &import_decl.source);
+
+            if let Some(import_path) = resolved.as_ref().filter(|path| path.exists()) {
+                return validate_backend_import_target(
+                    root,
+                    path,
+                    line,
+                    &import_decl.source,
+                    import_path,
+                    &import_decl.bindings,
+                );
+            }
+
+            let detail = resolved
+                .as_ref()
+                .map(|path| format!(" expected '{}'", display_path(path)))
+                .unwrap_or_default();
+
+            Some(CheckDiagnostic {
+                file: display_path(path),
+                line,
+                column: 1,
+                severity: "error",
+                code: "axonyx-backend-import",
+                message: format!(
+                    "unable to resolve backend import `{}`{}",
+                    import_decl.source, detail
+                ),
+            })
+        })
+        .collect()
+}
+
+fn validate_backend_import_target(
+    root: &Path,
+    importing_path: &Path,
+    import_line: usize,
+    import_source: &str,
+    import_path: &Path,
+    bindings: &[axonyx_core::ax_backend_ast_prelude::AxBackendImportBinding],
+) -> Option<CheckDiagnostic> {
+    let mut stack = vec![canonical_path(importing_path)];
+    let error =
+        validate_backend_import_path_recursive(root, import_path, bindings, &mut stack).err()?;
+
+    let (code, message) = match error {
+        BackendImportValidationError::Parse {
+            path,
+            line,
+            message,
+        } if same_path(&path, import_path) => (
+            "axonyx-backend-import-parse",
+            format!(
+                "backend import `{}` resolved to '{}' but that file is not valid backend .ax (line {}: {})",
+                import_source,
+                display_path(import_path),
+                line,
+                message
+            ),
+        ),
+        BackendImportValidationError::Parse {
+            path,
+            line,
+            message,
+        } => (
+            "axonyx-backend-import-chain",
+            format!(
+                "backend import `{}` resolved to '{}' but its import chain is broken: '{}' is not valid backend .ax (line {}: {})",
+                import_source,
+                display_path(import_path),
+                display_path(&path),
+                line,
+                message
+            ),
+        ),
+        BackendImportValidationError::Missing {
+            from_path,
+            import_source: nested_source,
+            expected,
+        } => {
+            let detail = expected
+                .as_ref()
+                .map(|path| format!(" expected '{}'", display_path(path)))
+                .unwrap_or_default();
+            (
+                "axonyx-backend-import-chain",
+                format!(
+                    "backend import `{}` resolved to '{}' but its import chain is broken: '{}' imports `{}`{}",
+                    import_source,
+                    display_path(import_path),
+                    display_path(&from_path),
+                    nested_source,
+                    detail
+                ),
+            )
+        }
+        BackendImportValidationError::MissingExport { path, name } => (
+            "axonyx-backend-import-export",
+            format!(
+                "backend import `{}` resolved to '{}' but `{}` is not exported by that file",
+                import_source,
+                display_path(&path),
+                name
+            ),
+        ),
+        BackendImportValidationError::Cycle { chain } => (
+            "axonyx-backend-import-cycle",
+            format!(
+                "backend import `{}` resolved to '{}' but its import chain contains a cycle: {}",
+                import_source,
+                display_path(import_path),
+                chain
+                    .iter()
+                    .map(|path| format!("'{}'", display_path(path)))
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            ),
+        ),
+    };
+
+    Some(CheckDiagnostic {
+        file: display_path(importing_path),
+        line: import_line,
+        column: 1,
+        severity: "error",
+        code,
+        message,
+    })
+}
+
+#[derive(Debug)]
+enum BackendImportValidationError {
+    Missing {
+        from_path: PathBuf,
+        import_source: String,
+        expected: Option<PathBuf>,
+    },
+    Parse {
+        path: PathBuf,
+        line: usize,
+        message: String,
+    },
+    MissingExport {
+        path: PathBuf,
+        name: String,
+    },
+    Cycle {
+        chain: Vec<PathBuf>,
+    },
+}
+
+fn validate_backend_import_path_recursive(
+    root: &Path,
+    path: &Path,
+    bindings: &[axonyx_core::ax_backend_ast_prelude::AxBackendImportBinding],
+    stack: &mut Vec<PathBuf>,
+) -> Result<(), BackendImportValidationError> {
+    let canonical = canonical_path(path);
+    if let Some(index) = stack.iter().position(|entry| same_path(entry, &canonical)) {
+        let mut chain = stack[index..].to_vec();
+        chain.push(canonical);
+        return Err(BackendImportValidationError::Cycle { chain });
+    }
+
+    let source = fs::read_to_string(path).map_err(|_| BackendImportValidationError::Missing {
+        from_path: path.to_path_buf(),
+        import_source: String::new(),
+        expected: Some(path.to_path_buf()),
+    })?;
+    let document =
+        parse_backend_ax(&source).map_err(|error| BackendImportValidationError::Parse {
+            path: path.to_path_buf(),
+            line: line_from_backend_parse_error(&error).unwrap_or(1),
+            message: error.to_string(),
+        })?;
+
+    for binding in bindings {
+        if !backend_document_exports_symbol(&document, &binding.imported) {
+            return Err(BackendImportValidationError::MissingExport {
+                path: path.to_path_buf(),
+                name: binding.imported.clone(),
+            });
+        }
+    }
+
+    stack.push(canonical);
+
+    for import_decl in &document.imports {
+        let resolved = resolve_backend_import_path(root, path, &import_decl.source);
+        let Some(import_path) = resolved.as_ref().filter(|path| path.exists()) else {
+            stack.pop();
+            return Err(BackendImportValidationError::Missing {
+                from_path: path.to_path_buf(),
+                import_source: import_decl.source.clone(),
+                expected: resolved,
+            });
+        };
+
+        if let Err(error) =
+            validate_backend_import_path_recursive(root, import_path, &import_decl.bindings, stack)
+        {
+            stack.pop();
+            return Err(error);
+        }
+    }
+
+    stack.pop();
+    Ok(())
+}
+
+fn backend_document_exports_symbol(document: &AxBackendDocument, name: &str) -> bool {
+    document.blocks.iter().any(|block| match block {
+        AxBackendBlock::Loader(loader) => loader.exported && loader.name == name,
+        AxBackendBlock::Action(action) => action.exported && action.name == name,
+        AxBackendBlock::Function(function) => function.exported && function.name == name,
+        AxBackendBlock::Backend(_) | AxBackendBlock::Route(_) | AxBackendBlock::Job(_) => false,
+    })
+}
+
 fn validate_import_target(
     root: &Path,
     importing_path: &Path,
@@ -6334,6 +6567,9 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
     match error {
         AxBackendParseError::EmptyDocument => Some(1),
         AxBackendParseError::TabsNotSupported { line }
+        | AxBackendParseError::InvalidImport { line }
+        | AxBackendParseError::MissingImportFrom { line }
+        | AxBackendParseError::EmptyImportList { line }
         | AxBackendParseError::InvalidIndentation { line }
         | AxBackendParseError::UnexpectedIndentation { line }
         | AxBackendParseError::InvalidBlock { line }
@@ -11375,6 +11611,28 @@ fn resolve_preview_import_path(root: &Path, source: &str) -> Option<PathBuf> {
         .or_else(|| resolve_axonyx_ui_app_import_path(root, source))
         .or_else(|| resolve_cargo_package_import_path(root, source))
         .or_else(|| resolve_axonyx_ui_workspace_import_path(root, source))
+}
+
+fn resolve_backend_import_path(
+    root: &Path,
+    importing_path: &Path,
+    source: &str,
+) -> Option<PathBuf> {
+    let path = if source.starts_with("./") || source.starts_with("../") {
+        let mut path = importing_path.parent()?.join(source);
+        if path.extension().is_none() {
+            path.set_extension("ax");
+        }
+        path
+    } else {
+        resolve_app_import_path(root, source)?
+    };
+
+    let normalized = normalize_content_path(&path).ok()?;
+    let normalized_root = normalize_content_path(root).ok()?;
+    normalized
+        .starts_with(&normalized_root)
+        .then_some(normalized)
 }
 
 fn resolve_app_import_path(root: &Path, source: &str) -> Option<PathBuf> {
@@ -18502,6 +18760,116 @@ page Home
         assert!(diagnostics[0].message.contains("SiteCard.ax"));
         assert!(diagnostics[0].message.contains("InnerCard.ax"));
         assert!(diagnostics[0].message.contains("cycle"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_route_local_backend_import() {
+        let root = make_temp_dir("check-backend-import");
+        let loader_path = root.join("app/posts/loader.ax");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/domain.ax"),
+            r#"
+export fn normalizeStatus(status?: String) -> String {
+  return status
+}
+"#,
+        )
+        .expect("domain should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &loader_path,
+            r#"
+import { normalizeStatus } from "./domain.ax"
+
+export fn pageTitle() -> String {
+  return normalizeStatus("published")
+}
+"#,
+            Some(&root),
+        );
+
+        assert!(diagnostics.is_empty());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_reports_missing_backend_import_export() {
+        let root = make_temp_dir("check-backend-import-export");
+        let loader_path = root.join("app/posts/loader.ax");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/domain.ax"),
+            r#"
+fn normalizeStatus(status?: String) -> String {
+  return status
+}
+"#,
+        )
+        .expect("domain should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &loader_path,
+            r#"
+import { normalizeStatus } from "./domain.ax"
+
+export fn pageTitle() -> String {
+  return normalizeStatus("draft")
+}
+"#,
+            Some(&root),
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-backend-import-export");
+        assert!(diagnostics[0].message.contains("normalizeStatus"));
+        assert!(diagnostics[0].message.contains("domain.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_reports_backend_import_cycle() {
+        let root = make_temp_dir("check-backend-import-cycle");
+        let loader_path = root.join("app/posts/loader.ax");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/domain.ax"),
+            r#"
+import { PagePosts } from "./loader.ax"
+
+export fn normalizeStatus(status?: String) -> String {
+  return status
+}
+"#,
+        )
+        .expect("domain should write");
+        let loader_source = r#"
+import { normalizeStatus } from "./domain.ax"
+
+export fn PagePosts() -> String {
+  return normalizeStatus("published")
+}
+"#;
+        fs::write(&loader_path, loader_source).expect("loader should write");
+
+        let diagnostics = check_ax_source_with_root(&loader_path, loader_source, Some(&root));
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-backend-import-cycle");
+        assert!(diagnostics[0].message.contains("domain.ax"));
+        assert!(diagnostics[0].message.contains("loader.ax"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
