@@ -4947,6 +4947,13 @@ fn check_backend_database_surface(
                 &resources,
                 &mut diagnostics,
             ),
+            AxBackendBlock::Function(function) => collect_db_surface_diagnostics_from_stmts(
+                path,
+                source,
+                &function.body,
+                &resources,
+                &mut diagnostics,
+            ),
             AxBackendBlock::Job(job) => collect_db_surface_diagnostics_from_stmts(
                 path,
                 source,
@@ -6190,11 +6197,13 @@ fn import_source_line(source: &str, import_source: &str) -> usize {
 
 fn looks_like_backend_ax(source: &str) -> bool {
     source.lines().map(str::trim_start).any(|line| {
+        let line = line.strip_prefix("export ").unwrap_or(line);
         line.starts_with("route ")
             || line == "backend"
             || line.starts_with("loader ")
             || line.starts_with("query ")
             || line.starts_with("action ")
+            || line.starts_with("fn ")
             || line.starts_with("job ")
     })
 }
@@ -17628,6 +17637,22 @@ type Post {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 2);
         assert_eq!(diagnostics[0].code, "axonyx-backend-parse");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_function_only_backend_file() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/posts/domain.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+export fn normalizeStatus(status?: String) -> String {
+  return status
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
     }
 
     #[test]
