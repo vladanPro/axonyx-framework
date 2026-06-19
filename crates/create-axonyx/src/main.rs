@@ -335,7 +335,7 @@ fn collect_backend_sources(target_dir: &PathBuf, out: &mut Vec<(String, String)>
 
     collect_backend_sources_in_dir(&routes_root, &routes_root, out, true)?;
     collect_backend_sources_in_dir(&jobs_root, &jobs_root, out, true)?;
-    collect_named_backend_files(&app_root, &app_root, out, &["loader.ax", "actions.ax"])?;
+    collect_backend_like_sources_in_dir(&app_root, &app_root, out)?;
     Ok(())
 }
 
@@ -379,11 +379,10 @@ fn collect_backend_sources_in_dir(
     Ok(())
 }
 
-fn collect_named_backend_files(
+fn collect_backend_like_sources_in_dir(
     root: &PathBuf,
     dir: &PathBuf,
     out: &mut Vec<(String, String)>,
-    names: &[&str],
 ) -> Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -400,20 +399,20 @@ fn collect_named_backend_files(
             .with_context(|| format!("failed to inspect '{}'", path.display()))?;
 
         if file_type.is_dir() {
-            collect_named_backend_files(root, &path, out, names)?;
+            collect_backend_like_sources_in_dir(root, &path, out)?;
             continue;
         }
 
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-
-        if !names.contains(&file_name) {
+        if !file_type.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("ax") {
             continue;
         }
 
         let source = fs::read_to_string(&path)
             .with_context(|| format!("failed to read backend source '{}'", path.display()))?;
+        if !looks_like_backend_ax(&source) {
+            continue;
+        }
+
         let name = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -423,6 +422,19 @@ fn collect_named_backend_files(
     }
 
     Ok(())
+}
+
+fn looks_like_backend_ax(source: &str) -> bool {
+    source.lines().map(str::trim_start).any(|line| {
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        line == "backend"
+            || line.starts_with("route ")
+            || line.starts_with("loader ")
+            || line.starts_with("query ")
+            || line.starts_with("action ")
+            || line.starts_with("fn ")
+            || line.starts_with("job ")
+    })
 }
 
 fn init_git(target_dir: &PathBuf) -> Result<()> {
