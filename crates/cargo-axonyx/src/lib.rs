@@ -10300,7 +10300,7 @@ fn handle_action_request(
         return Ok(AxHttpResponse::text(404, "actions.ax not found for route").with_no_store());
     };
 
-    let action_sources = collect_app_backend_like_source_strings(&state.root)?;
+    let action_sources = collect_route_action_source_strings(&state.root, actions_path)?;
     let action_source_refs = action_sources
         .iter()
         .map(String::as_str)
@@ -11297,6 +11297,28 @@ fn collect_app_backend_like_source_strings(root: &Path) -> Result<Vec<String>> {
     let mut sources = Vec::new();
     collect_backend_like_sources_in_dir(&app_root, &app_root, &mut sources)?;
     Ok(sources.into_iter().map(|(_, source)| source).collect())
+}
+
+fn collect_route_action_source_strings(root: &Path, actions_path: &Path) -> Result<Vec<String>> {
+    let app_root = root.join("app");
+    let route_actions = actions_path
+        .strip_prefix(&app_root)
+        .unwrap_or(actions_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut sources = Vec::new();
+    collect_backend_like_sources_in_dir(&app_root, &app_root, &mut sources)?;
+
+    Ok(sources
+        .into_iter()
+        .filter_map(|(name, source)| {
+            let is_route_local_action = name.ends_with("actions.ax");
+            if is_route_local_action && name != route_actions {
+                return None;
+            }
+            Some(source)
+        })
+        .collect())
 }
 
 fn axonyx_ui_asset_hrefs(root: &Path) -> (String, String) {
@@ -16592,6 +16614,81 @@ action SetTheme(theme: string) {
         assert!(raw.contains("Content-Type: application/ax-patch+json; charset=utf-8"));
         assert!(raw.contains("\"signal\":\"page:root:theme:1\""));
         assert!(raw.contains("\"value\":\"gold\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn action_request_executes_only_resolved_route_actions() {
+        let root = make_temp_dir("action-route-scope");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::create_dir_all(root.join("app/profile")).expect("profile dir should exist");
+        fs::write(
+            root.join("app/settings/page.ax"),
+            "page Settings\n<Copy>Settings</Copy>\n",
+        )
+        .expect("settings page should write");
+        fs::write(
+            root.join("app/settings/actions.ax"),
+            r#"
+action Save() {
+  revalidate "/settings/saved"
+  return ok
+}
+"#,
+        )
+        .expect("settings actions should write");
+        fs::write(
+            root.join("app/profile/page.ax"),
+            "page Profile\n<Copy>Profile</Copy>\n",
+        )
+        .expect("profile page should write");
+        fs::write(
+            root.join("app/profile/actions.ax"),
+            r#"
+action Save() {
+  revalidate "/profile/saved"
+  return ok
+}
+"#,
+        )
+        .expect("profile actions should write");
+
+        let state = test_dev_state(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Dev).expect("request should handle");
+        });
+
+        let body = "";
+        let request = format!(
+            "POST /__axonyx/action?path=%2Fsettings&name=Save HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(request.as_bytes())
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(raw.starts_with("HTTP/1.1 303 See Other"));
+        assert!(
+            raw.contains("Location: /settings/saved"),
+            "raw response was: {raw}"
+        );
+        assert!(!raw.contains("Location: /profile/saved"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
