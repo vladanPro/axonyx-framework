@@ -17129,6 +17129,39 @@ query loadFeatured(status: String) -> Post[]
     }
 
     #[test]
+    fn render_route_html_resolves_shared_query_domain_helpers() {
+        let root = make_temp_dir("shared-query-domain-render");
+        fs::create_dir_all(root.join("app/posts")).expect("posts app dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared app dir should exist");
+        fs::write(
+            root.join("app/shared/domain.ax"),
+            "export fn normalizeStatus(status: String) -> String\n  return status\n",
+        )
+        .expect("shared domain helper should write");
+        fs::write(
+            root.join("app/shared/queries.ax"),
+            "import { normalizeStatus } from \"./domain.ax\"\n\nexport query loadPosts(status: String) -> Post[]\n  data resolved = normalizeStatus(input.status)\n  data posts = db.posts.all()\n    where status = resolved\n  return posts\n",
+        )
+        .expect("shared query should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            "page Posts\n  data posts = loadPosts(\"draft\")\n  each post in posts\n    Copy -> post.title\n",
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/posts")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = test_dev_state(&root);
+        let html = render_route_html(&state, &route).expect("domain helper route should render");
+
+        assert!(html.contains("Draft Preview"));
+        assert!(!html.contains("Hello Axonyx"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn render_route_html_injects_action_runtime_for_action_forms() {
         let root = make_temp_dir("action-runtime-render");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
