@@ -10300,10 +10300,7 @@ fn handle_action_request(
         return Ok(AxHttpResponse::text(404, "actions.ax not found for route").with_no_store());
     };
 
-    let action_source = fs::read_to_string(actions_path)
-        .with_context(|| format!("failed to read '{}'", actions_path.display()))?;
-    let mut action_sources = read_app_backend_sources(&state.root)?;
-    action_sources.push(action_source);
+    let action_sources = collect_app_backend_like_source_strings(&state.root)?;
     let action_source_refs = action_sources
         .iter()
         .map(String::as_str)
@@ -16523,6 +16520,78 @@ action SetTheme
         assert!(raw.contains("\"name\":\"posts\""));
         assert!(raw.contains("\"source\":\"loadPosts(status)\""));
         assert!(raw.contains("\"queryKey\":[\"posts\",\"status\"]"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn action_request_can_use_shared_app_domain_helpers() {
+        let root = make_temp_dir("action-shared-domain-helper");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/shared")).expect("shared app dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\npage state theme: String = \"silver\"\n<Copy>Home</Copy>\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/shared/domain.ax"),
+            r#"
+export fn isSupportedTheme(theme: String) -> bool
+  data themes = ["silver", "bronze", "gold"]
+  return contains(themes, theme)
+"#,
+        )
+        .expect("domain helper should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+import { isSupportedTheme } from "./shared/domain.ax"
+
+action SetTheme(theme: string) {
+  require isSupportedTheme(input.theme) else error "Theme is not supported."
+  patch theme = input.theme
+  return ok
+}
+"#,
+        )
+        .expect("actions should write");
+
+        let state = test_dev_state(&root);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener address should resolve");
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("test client should connect");
+            handle_connection(stream, &state, AxServerMode::Dev).expect("request should handle");
+        });
+
+        let body = "__ax_patch=1&theme=gold";
+        let request = format!(
+            "POST /__axonyx/action?path=%2F&name=SetTheme HTTP/1.1\r\nHost: localhost\r\nAccept: application/ax-patch+json\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut client = TcpStream::connect(address).expect("client should connect");
+        client
+            .write_all(request.as_bytes())
+            .expect("client request should write");
+        let mut raw = String::new();
+        client
+            .read_to_string(&mut raw)
+            .expect("client should read response");
+        server.join().expect("server thread should join");
+
+        assert!(
+            raw.starts_with("HTTP/1.1 200 OK"),
+            "raw response was: {raw}"
+        );
+        assert!(raw.contains("Content-Type: application/ax-patch+json; charset=utf-8"));
+        assert!(raw.contains("\"signal\":\"page:root:theme:1\""));
+        assert!(raw.contains("\"value\":\"gold\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
