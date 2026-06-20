@@ -11222,13 +11222,7 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let loader_sources = route
-        .loader_path
-        .iter()
-        .map(|path| {
-            fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let loader_sources = collect_app_backend_like_source_strings(&state.root)?;
     let loader_refs = loader_sources
         .iter()
         .map(String::as_str)
@@ -11299,6 +11293,13 @@ fn apply_package_use_assets(
     let (stylesheet_href, script_href) = axonyx_ui_asset_hrefs(root);
     let html = ensure_head_stylesheet(&html, &stylesheet_href);
     ensure_head_script(&html, &script_href)
+}
+
+fn collect_app_backend_like_source_strings(root: &Path) -> Result<Vec<String>> {
+    let app_root = root.join("app");
+    let mut sources = Vec::new();
+    collect_backend_like_sources_in_dir(&app_root, &app_root, &mut sources)?;
+    Ok(sources.into_iter().map(|(_, source)| source).collect())
 }
 
 fn axonyx_ui_asset_hrefs(root: &Path) -> (String, String) {
@@ -17095,6 +17096,34 @@ query loadFeatured(status: String) -> Post[]
 
         assert!(html.contains("Draft Preview"));
         assert!(!html.contains("Hello Axonyx"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn render_route_html_resolves_shared_app_query_functions() {
+        let root = make_temp_dir("shared-app-query-render");
+        fs::create_dir_all(root.join("app/posts")).expect("posts app dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared app dir should exist");
+        fs::write(
+            root.join("app/shared/queries.ax"),
+            "query loadPosts() -> Post[]\n  data posts = db.posts.all()\n    where status = \"published\"\n    limit 1\n  return posts\n",
+        )
+        .expect("shared query should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            "page Posts\n  data posts = loadPosts()\n  each post in posts\n    Copy -> post.title\n",
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/posts")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = test_dev_state(&root);
+        let html = render_route_html(&state, &route).expect("shared query route should render");
+
+        assert!(html.contains("Hello Axonyx"));
+        assert!(!html.contains("Draft Preview"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
