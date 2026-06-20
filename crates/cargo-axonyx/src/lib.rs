@@ -4964,6 +4964,7 @@ fn check_backend_database_surface(
                 &resources,
                 &mut diagnostics,
             ),
+            AxBackendBlock::Scope(_) => {}
         }
     }
 
@@ -6256,7 +6257,10 @@ fn backend_document_exports_symbol(document: &AxBackendDocument, name: &str) -> 
         AxBackendBlock::Loader(loader) => loader.exported && loader.name == name,
         AxBackendBlock::Action(action) => action.exported && action.name == name,
         AxBackendBlock::Function(function) => function.exported && function.name == name,
-        AxBackendBlock::Backend(_) | AxBackendBlock::Route(_) | AxBackendBlock::Job(_) => false,
+        AxBackendBlock::Backend(_)
+        | AxBackendBlock::Route(_)
+        | AxBackendBlock::Job(_)
+        | AxBackendBlock::Scope(_) => false,
     })
 }
 
@@ -6437,6 +6441,7 @@ fn looks_like_backend_ax(source: &str) -> bool {
             || line.starts_with("query ")
             || line.starts_with("action ")
             || line.starts_with("fn ")
+            || line.starts_with("scope ")
             || line.starts_with("job ")
     })
 }
@@ -6585,6 +6590,10 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidRequirement { line }
         | AxBackendParseError::InvalidReturn { line }
         | AxBackendParseError::InvalidSend { line }
+        | AxBackendParseError::InvalidScope { line }
+        | AxBackendParseError::InvalidScopeMember { line }
+        | AxBackendParseError::InvalidScopeState { line }
+        | AxBackendParseError::InvalidScopeRender { line }
         | AxBackendParseError::InvalidQuerySource { line }
         | AxBackendParseError::InvalidQueryClause { line }
         | AxBackendParseError::InvalidQueryNumber { line }
@@ -18175,6 +18184,23 @@ type Post {
             r#"
 export fn normalizeStatus(status?: String) -> String {
   return status
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_scope_only_backend_file() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout {
+  state theme: String = "silver"
+  render RenderLayout()
 }
 "#,
             None,
