@@ -844,8 +844,17 @@ struct ScopeFileReport {
 struct ScopeItemReport {
     name: String,
     members: Vec<String>,
+    member_details: Vec<ScopeMemberReport>,
     states: Vec<ScopeStateReport>,
     render: Option<ScopeRenderReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeMemberReport {
+    name: String,
+    kind: String,
+    origin: String,
+    source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2901,6 +2910,7 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
     for (file, source) in sources {
         let document = parse_backend_ax(&source)
             .with_context(|| format!("failed to parse backend source '{file}'"))?;
+        let member_symbols = scope_member_symbol_reports(&document);
         let scopes = document
             .blocks
             .iter()
@@ -2930,6 +2940,20 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
                 Some(ScopeItemReport {
                     name: scope.name.clone(),
                     members: scope.members.clone(),
+                    member_details: scope
+                        .members
+                        .iter()
+                        .map(|member| {
+                            member_symbols.get(member).cloned().unwrap_or_else(|| {
+                                ScopeMemberReport {
+                                    name: member.clone(),
+                                    kind: "unknown".to_string(),
+                                    origin: "unresolved-v0".to_string(),
+                                    source: None,
+                                }
+                            })
+                        })
+                        .collect(),
                     states,
                     render,
                 })
@@ -2942,6 +2966,73 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
     }
 
     Ok(ScopeReport { files })
+}
+
+fn scope_member_symbol_reports(
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for import_decl in &document.imports {
+        for binding in &import_decl.bindings {
+            symbols.insert(
+                binding.local.clone(),
+                ScopeMemberReport {
+                    name: binding.local.clone(),
+                    kind: "import".to_string(),
+                    origin: "import".to_string(),
+                    source: Some(import_decl.source.clone()),
+                },
+            );
+        }
+    }
+
+    for block in &document.blocks {
+        match block {
+            AxBackendBlock::Loader(loader) if loader.exported => {
+                symbols.insert(
+                    loader.name.clone(),
+                    ScopeMemberReport {
+                        name: loader.name.clone(),
+                        kind: "query".to_string(),
+                        origin: "local-export".to_string(),
+                        source: None,
+                    },
+                );
+            }
+            AxBackendBlock::Action(action) if action.exported => {
+                symbols.insert(
+                    action.name.clone(),
+                    ScopeMemberReport {
+                        name: action.name.clone(),
+                        kind: "action".to_string(),
+                        origin: "local-export".to_string(),
+                        source: None,
+                    },
+                );
+            }
+            AxBackendBlock::Function(function) if function.exported => {
+                symbols.insert(
+                    function.name.clone(),
+                    ScopeMemberReport {
+                        name: function.name.clone(),
+                        kind: "helper".to_string(),
+                        origin: "local-export".to_string(),
+                        source: None,
+                    },
+                );
+            }
+            AxBackendBlock::Backend(_)
+            | AxBackendBlock::Route(_)
+            | AxBackendBlock::Job(_)
+            | AxBackendBlock::Scope(_)
+            | AxBackendBlock::Loader(_)
+            | AxBackendBlock::Action(_)
+            | AxBackendBlock::Function(_) => {}
+        }
+    }
+
+    symbols
 }
 
 fn scope_render_name(call: &AxExpr) -> String {
@@ -8085,6 +8176,17 @@ fn print_scope_text(report: &ScopeReport) {
                 .map(|render| format!("render={}", render.call))
                 .unwrap_or_else(|| "render=none".to_string());
             println!("    scope {} {} {}", scope.name, members, render);
+            for member in &scope.member_details {
+                let source = member
+                    .source
+                    .as_ref()
+                    .map(|source| format!(" source={source}"))
+                    .unwrap_or_default();
+                println!(
+                    "      member {} kind={} origin={}{}",
+                    member.name, member.kind, member.origin, source
+                );
+            }
             for state in &scope.states {
                 let default = state
                     .default
@@ -13205,6 +13307,15 @@ scope Layout <RenderLayout, setTheme> {
             report.scopes.files[0].scopes[0].members,
             vec!["RenderLayout".to_string(), "setTheme".to_string()]
         );
+        assert_eq!(report.scopes.files[0].scopes[0].member_details.len(), 2);
+        assert_eq!(
+            report.scopes.files[0].scopes[0].member_details[0].name,
+            "RenderLayout"
+        );
+        assert_eq!(
+            report.scopes.files[0].scopes[0].member_details[0].origin,
+            "unresolved-v0"
+        );
         assert_eq!(report.scopes.files[0].scopes[0].states[0].name, "theme");
         assert_eq!(
             report.scopes.files[0].scopes[0]
@@ -13231,6 +13342,8 @@ scope Layout <RenderLayout, setTheme> {
         assert!(json.contains("\"summary\""));
         assert!(json.contains("\"data\""));
         assert!(json.contains("\"scopes\""));
+        assert!(json.contains("\"member_details\""));
+        assert!(json.contains("\"unresolved-v0\""));
         assert!(json.contains("\"scope_states\":1"));
         assert!(json.contains("\"query_key\""));
         assert!(json.contains("\"invalidates\""));
@@ -18613,6 +18726,57 @@ scope Layout {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "axonyx-scope-duplicate");
         assert!(diagnostics[0].message.contains("Layout"));
+    }
+
+    #[test]
+    fn scope_member_symbol_reports_classifies_v0_member_origins() {
+        let document = parse_backend_ax(
+            r#"
+import { RenderLayout } from "./page.ax"
+
+export action setTheme(theme: String)
+  return ok
+
+export query loadPosts() -> Post[]
+  return posts
+
+export fn isTheme(value: String) -> bool
+  return true
+
+scope Layout <RenderLayout, setTheme, loadPosts, isTheme, MissingMember> {
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope document should parse");
+
+        let symbols = scope_member_symbol_reports(&document);
+
+        assert_eq!(
+            symbols
+                .get("RenderLayout")
+                .map(|member| member.origin.as_str()),
+            Some("import")
+        );
+        assert_eq!(
+            symbols
+                .get("RenderLayout")
+                .and_then(|member| member.source.as_deref()),
+            Some("./page.ax")
+        );
+        assert_eq!(
+            symbols.get("setTheme").map(|member| member.kind.as_str()),
+            Some("action")
+        );
+        assert_eq!(
+            symbols.get("loadPosts").map(|member| member.kind.as_str()),
+            Some("query")
+        );
+        assert_eq!(
+            symbols.get("isTheme").map(|member| member.kind.as_str()),
+            Some("helper")
+        );
+        assert!(!symbols.contains_key("MissingMember"));
     }
 
     #[test]
