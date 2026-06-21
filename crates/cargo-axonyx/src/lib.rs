@@ -18,6 +18,7 @@ use axonyx_core::ax_ast_prelude::{
 };
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
+    AxScopeStmt,
 };
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
@@ -828,6 +829,38 @@ struct DataBindingReport {
     query_key: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeReport {
+    files: Vec<ScopeFileReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeFileReport {
+    file: String,
+    scopes: Vec<ScopeItemReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeItemReport {
+    name: String,
+    members: Vec<String>,
+    states: Vec<ScopeStateReport>,
+    render: Option<ScopeRenderReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeStateReport {
+    name: String,
+    ty: String,
+    default: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeRenderReport {
+    name: String,
+    call: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeltReport {
     app: MeltAppReport,
@@ -837,6 +870,7 @@ struct MeltReport {
     actions: ActionReport,
     state: StateReport,
     data: DataReport,
+    scopes: ScopeReport,
     content: ContentManifest,
     diagnostics: Vec<CheckDiagnostic>,
     summary: MeltSummary,
@@ -863,6 +897,8 @@ struct MeltSummary {
     actions: usize,
     state_signals: usize,
     data_bindings: usize,
+    scopes: usize,
+    scope_states: usize,
     query_keys: usize,
     query_invalidations: usize,
     content_collections: usize,
@@ -1926,11 +1962,12 @@ fn doctor_melt_graph_check(root: &Path) -> DoctorCheck {
             code: "melt-graph",
             severity: DoctorSeverity::Ok,
             message: format!(
-                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
+                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.scopes,
                 report.summary.data_bindings,
                 report.summary.query_keys,
                 report.summary.query_invalidations,
@@ -2625,11 +2662,12 @@ fn melt_command(args: MeltArgs) -> Result<()> {
     if args.check {
         if report.diagnostics.is_empty() {
             println!(
-                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
+                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.scopes,
                 report.summary.data_bindings,
                 report.summary.query_keys,
                 report.summary.query_invalidations,
@@ -2665,6 +2703,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let actions = collect_action_report(root)?;
     let state = collect_state_report(root)?;
     let data = collect_data_report(root, &routes)?;
+    let scopes = collect_scope_report(root)?;
     let content = collect_content_manifest(root)?;
     let diagnostics = check_app_sources(root)?;
     let summary = melt_summary(
@@ -2673,6 +2712,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         &actions,
         &state,
         &data,
+        &scopes,
         &content,
         &diagnostics,
     );
@@ -2690,6 +2730,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         actions,
         state,
         data,
+        scopes,
         content,
         diagnostics,
         summary,
@@ -2702,10 +2743,18 @@ fn melt_summary(
     actions: &ActionReport,
     state: &StateReport,
     data: &DataReport,
+    scopes: &ScopeReport,
     content: &ContentManifest,
     diagnostics: &[CheckDiagnostic],
 ) -> MeltSummary {
     let data_bindings = data.routes.iter().map(|route| route.bindings.len()).sum();
+    let scope_count = scopes.files.iter().map(|file| file.scopes.len()).sum();
+    let scope_states = scopes
+        .files
+        .iter()
+        .flat_map(|file| &file.scopes)
+        .map(|scope| scope.states.len())
+        .sum();
     let query_invalidations = actions
         .routes
         .iter()
@@ -2723,6 +2772,8 @@ fn melt_summary(
         actions: actions.routes.iter().map(|route| route.actions.len()).sum(),
         state_signals: state.files.iter().map(|file| file.signals.len()).sum(),
         data_bindings,
+        scopes: scope_count,
+        scope_states,
         query_keys: data_bindings,
         query_invalidations,
         content_collections: content.collections.len(),
@@ -2762,12 +2813,20 @@ fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport
         },
         MeltLayerReport {
             name: "Axonyx State",
-            status: if summary.state_signals > 0 {
+            status: if summary.state_signals > 0 || summary.scope_states > 0 {
                 "ready"
             } else {
                 "empty"
             },
-            detail: format!("{} state signal(s) declared.", summary.state_signals),
+            detail: format!(
+                "{} state signal(s), {} scope state(s) declared.",
+                summary.state_signals, summary.scope_states
+            ),
+        },
+        MeltLayerReport {
+            name: "Axonyx Scope",
+            status: if summary.scopes > 0 { "ready" } else { "empty" },
+            detail: format!("{} scope container(s) discovered.", summary.scopes),
         },
         MeltLayerReport {
             name: "Axonyx Foundry",
@@ -2832,6 +2891,64 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
     Ok(DataReport {
         routes: data_routes,
     })
+}
+
+fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
+    let mut sources = Vec::new();
+    collect_backend_sources(root, &mut sources)?;
+
+    let mut files = Vec::new();
+    for (file, source) in sources {
+        let document = parse_backend_ax(&source)
+            .with_context(|| format!("failed to parse backend source '{file}'"))?;
+        let scopes = document
+            .blocks
+            .iter()
+            .filter_map(|block| {
+                let AxBackendBlock::Scope(scope) = block else {
+                    return None;
+                };
+
+                let mut states = Vec::new();
+                let mut render = None;
+                for stmt in &scope.body {
+                    match stmt {
+                        AxScopeStmt::State(state) => states.push(ScopeStateReport {
+                            name: state.name.clone(),
+                            ty: state.ty.clone(),
+                            default: state.default.as_ref().map(format_ax_expr),
+                        }),
+                        AxScopeStmt::Render(scope_render) => {
+                            render = Some(ScopeRenderReport {
+                                name: scope_render_name(&scope_render.call),
+                                call: format_ax_expr(&scope_render.call),
+                            });
+                        }
+                    }
+                }
+
+                Some(ScopeItemReport {
+                    name: scope.name.clone(),
+                    members: scope.members.clone(),
+                    states,
+                    render,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if !scopes.is_empty() {
+            files.push(ScopeFileReport { file, scopes });
+        }
+    }
+
+    Ok(ScopeReport { files })
+}
+
+fn scope_render_name(call: &AxExpr) -> String {
+    match call {
+        AxExpr::Call { path, .. } => path.join("."),
+        _ => format_ax_expr(call),
+    }
 }
 
 fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBindingReport> {
@@ -7741,12 +7858,14 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.scopes,
+        report.summary.scope_states,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -7779,6 +7898,11 @@ fn print_melt_text(report: &MeltReport) {
         print_data_text(&report.data);
     }
 
+    if !report.scopes.files.is_empty() {
+        println!();
+        print_scope_text(&report.scopes);
+    }
+
     if !report.diagnostics.is_empty() {
         println!();
         println!("Diagnostics:");
@@ -7808,15 +7932,45 @@ fn print_data_text(report: &DataReport) {
     }
 }
 
+fn print_scope_text(report: &ScopeReport) {
+    println!("Scope graph:");
+    for file in &report.files {
+        println!("  {}", file.file);
+        for scope in &file.scopes {
+            let members = if scope.members.is_empty() {
+                "members=none".to_string()
+            } else {
+                format!("members={}", scope.members.join(","))
+            };
+            let render = scope
+                .render
+                .as_ref()
+                .map(|render| format!("render={}", render.call))
+                .unwrap_or_else(|| "render=none".to_string());
+            println!("    scope {} {} {}", scope.name, members, render);
+            for state in &scope.states {
+                let default = state
+                    .default
+                    .as_ref()
+                    .map(|value| format!(" default={value}"))
+                    .unwrap_or_default();
+                println!("      state {}: {}{}", state.name, state.ty, default);
+            }
+        }
+    }
+}
+
 fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.scopes,
+        report.summary.scope_states,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -7903,6 +8057,11 @@ fn print_graph_text(report: &MeltReport) {
                 println!("    {} invalidates={}", action.name, labels);
             }
         }
+    }
+
+    if !report.scopes.files.is_empty() {
+        println!();
+        print_scope_text(&report.scopes);
     }
 
     if !report.diagnostics.is_empty() {
@@ -8510,6 +8669,9 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
     for path in paths {
         let source = fs::read_to_string(&path)
             .with_context(|| format!("failed to read '{}'", path.display()))?;
+        if looks_like_backend_ax(&source) {
+            continue;
+        }
         if !source_has_state_declaration(&source) {
             continue;
         }
@@ -12813,6 +12975,7 @@ route GET "/api/posts" -> Post[]
         )
         .expect("config should write");
         fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::create_dir_all(root.join("app/layout")).expect("layout dir should exist");
         fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
         fs::write(
             root.join("app/backend.ax"),
@@ -12845,6 +13008,16 @@ return {
         )
         .expect("loader should write");
         fs::write(
+            root.join("app/layout/scope.ax"),
+            r#"
+scope Layout <RenderLayout, setTheme> {
+  state theme: String = "silver"
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope should write");
+        fs::write(
             root.join("app/settings/page.ax"),
             "page Settings\n<Copy>Settings</Copy>\n",
         )
@@ -12868,6 +13041,8 @@ return {
         assert_eq!(report.summary.action_routes, 1);
         assert_eq!(report.summary.actions, 1);
         assert_eq!(report.summary.state_signals, 1);
+        assert_eq!(report.summary.scopes, 1);
+        assert_eq!(report.summary.scope_states, 1);
         assert_eq!(report.summary.data_bindings, 1);
         assert_eq!(report.summary.query_keys, 1);
         assert_eq!(report.summary.query_invalidations, 1);
@@ -12886,10 +13061,29 @@ return {
                 query_key: vec!["posts".to_string()],
             }]
         );
+        assert_eq!(report.scopes.files.len(), 1);
+        assert_eq!(report.scopes.files[0].file, "layout/scope.ax");
+        assert_eq!(report.scopes.files[0].scopes[0].name, "Layout");
+        assert_eq!(
+            report.scopes.files[0].scopes[0].members,
+            vec!["RenderLayout".to_string(), "setTheme".to_string()]
+        );
+        assert_eq!(report.scopes.files[0].scopes[0].states[0].name, "theme");
+        assert_eq!(
+            report.scopes.files[0].scopes[0]
+                .render
+                .as_ref()
+                .map(|render| render.call.as_str()),
+            Some("RenderLayout()")
+        );
         assert!(report
             .layers
             .iter()
             .any(|layer| layer.name == "Axonyx Pages" && layer.status == "ready"));
+        assert!(report
+            .layers
+            .iter()
+            .any(|layer| layer.name == "Axonyx Scope" && layer.status == "ready"));
         assert!(report
             .layers
             .iter()
@@ -12899,6 +13093,8 @@ return {
         assert!(json.contains("\"Axonyx Pages\""));
         assert!(json.contains("\"summary\""));
         assert!(json.contains("\"data\""));
+        assert!(json.contains("\"scopes\""));
+        assert!(json.contains("\"scope_states\":1"));
         assert!(json.contains("\"query_key\""));
         assert!(json.contains("\"invalidates\""));
 
