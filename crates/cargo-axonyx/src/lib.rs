@@ -4925,6 +4925,7 @@ fn check_backend_requirements(
     let mut diagnostics = root
         .map(|root| check_backend_imports(root, path, source, document))
         .unwrap_or_default();
+    diagnostics.extend(check_backend_scope_contracts(path, source, document));
     let plan = match lower_backend_document(document) {
         Ok(plan) => plan,
         Err(error) => {
@@ -4965,6 +4966,111 @@ fn check_backend_requirements(
         code: "axonyx-auth-secret",
         message: "Auth.signedSession requires AX_SECRET_SESSION_KEY. Set it in the environment or local .env file.".to_string(),
     });
+
+    diagnostics
+}
+
+fn check_backend_scope_contracts(
+    path: &Path,
+    source: &str,
+    document: &AxBackendDocument,
+) -> Vec<CheckDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut scope_names = std::collections::BTreeSet::new();
+
+    for block in &document.blocks {
+        let AxBackendBlock::Scope(scope) = block else {
+            continue;
+        };
+
+        if !scope_names.insert(scope.name.clone()) {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_scope_header(source, &scope.name),
+                column: 1,
+                severity: "error",
+                code: "axonyx-scope-duplicate",
+                message: format!(
+                    "scope `{}` is declared more than once in this file.",
+                    scope.name
+                ),
+            });
+        }
+
+        let mut members = std::collections::BTreeSet::new();
+        for member in &scope.members {
+            if members.insert(member.clone()) {
+                continue;
+            }
+
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_scope_header(source, &scope.name),
+                column: 1,
+                severity: "error",
+                code: "axonyx-scope-member-duplicate",
+                message: format!(
+                    "scope `{}` lists member `{member}` more than once.",
+                    scope.name
+                ),
+            });
+        }
+
+        let mut state_names = std::collections::BTreeSet::new();
+        let mut render_count = 0usize;
+        for statement in &scope.body {
+            match statement {
+                AxScopeStmt::State(state) => {
+                    if state_names.insert(state.name.clone()) {
+                        continue;
+                    }
+
+                    diagnostics.push(CheckDiagnostic {
+                        file: display_path(path),
+                        line: line_for_scope_state(source, &state.name, 2),
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-scope-state-duplicate",
+                        message: format!(
+                            "scope `{}` declares state `{}` more than once.",
+                            scope.name, state.name
+                        ),
+                    });
+                }
+                AxScopeStmt::Render(render) => {
+                    render_count += 1;
+                    if render_count > 1 {
+                        diagnostics.push(CheckDiagnostic {
+                            file: display_path(path),
+                            line: line_for_scope_render(source, render_count),
+                            column: 1,
+                            severity: "error",
+                            code: "axonyx-scope-render-duplicate",
+                            message: format!(
+                                "scope `{}` declares more than one render entry.",
+                                scope.name
+                            ),
+                        });
+                    }
+
+                    let render_name = scope_render_name(&render.call);
+                    if !scope.members.is_empty() && !scope.members.contains(&render_name) {
+                        diagnostics.push(CheckDiagnostic {
+                            file: display_path(path),
+                            line: line_for_scope_render(source, render_count),
+                            column: 1,
+                            severity: "error",
+                            code: "axonyx-scope-render-member",
+                            message: format!(
+                                "scope `{}` renders `{render_name}` but that symbol is not listed in the scope member header.",
+                                scope.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     diagnostics
 }
@@ -6033,6 +6139,37 @@ fn line_for_repeated_source_pattern(source: &str, pattern: &str, occurrence: usi
         .nth(occurrence.saturating_sub(1))
         .map(|(index, _)| index + 1)
         .unwrap_or_else(|| line_for_source_pattern(source, pattern))
+}
+
+fn line_for_scope_header(source: &str, scope: &str) -> usize {
+    let prefix = format!("scope {scope}");
+    source
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.trim_start().starts_with(&prefix))
+        .map(|(index, _)| index + 1)
+        .unwrap_or_else(|| line_for_source_pattern(source, scope))
+}
+
+fn line_for_scope_state(source: &str, state: &str, occurrence: usize) -> usize {
+    let prefix = format!("state {state}:");
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with(&prefix))
+        .nth(occurrence.saturating_sub(1))
+        .map(|(index, _)| index + 1)
+        .unwrap_or_else(|| line_for_source_pattern(source, state))
+}
+
+fn line_for_scope_render(source: &str, occurrence: usize) -> usize {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("render "))
+        .nth(occurrence.saturating_sub(1))
+        .map(|(index, _)| index + 1)
+        .unwrap_or_else(|| line_for_source_pattern(source, "render "))
 }
 
 fn check_type_annotations(
@@ -18403,6 +18540,79 @@ scope Layout {
         );
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_reports_scope_contract_errors() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout <RenderLayout, RenderLayout, RenderHeader> {
+  state theme: String = "silver"
+  state theme: String = "gold"
+  render RenderLayout()
+  render RenderHeader()
+}
+"#,
+            None,
+        );
+
+        let codes = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            vec![
+                "axonyx-scope-member-duplicate",
+                "axonyx-scope-state-duplicate",
+                "axonyx-scope-render-duplicate"
+            ]
+        );
+        assert!(diagnostics[0].message.contains("RenderLayout"));
+        assert!(diagnostics[1].message.contains("theme"));
+        assert!(diagnostics[2].message.contains("more than one render"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_scope_render_outside_member_header() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout <RenderLayout> {
+  render OtherLayout()
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-scope-render-member");
+        assert!(diagnostics[0].message.contains("OtherLayout"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_duplicate_scope_names() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout {
+  render RenderLayout()
+}
+
+scope Layout {
+  render RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-scope-duplicate");
+        assert!(diagnostics[0].message.contains("Layout"));
     }
 
     #[test]
