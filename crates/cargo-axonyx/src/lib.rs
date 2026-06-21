@@ -2923,6 +2923,11 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
                 &source_path,
                 &document,
             ));
+            member_symbols.extend(scope_namespace_import_symbol_reports(
+                root,
+                &source_path,
+                &document,
+            ));
         }
         let scopes = document
             .blocks
@@ -2953,20 +2958,7 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
                 Some(ScopeItemReport {
                     name: scope.name.clone(),
                     members: scope.members.clone(),
-                    member_details: scope
-                        .members
-                        .iter()
-                        .map(|member| {
-                            member_symbols.get(member).cloned().unwrap_or_else(|| {
-                                ScopeMemberReport {
-                                    name: member.clone(),
-                                    kind: "unknown".to_string(),
-                                    origin: "unresolved-v0".to_string(),
-                                    source: None,
-                                }
-                            })
-                        })
-                        .collect(),
+                    member_details: scope_member_details(&scope.members, &member_symbols),
                     states,
                     render,
                 })
@@ -3011,6 +3003,73 @@ fn collect_project_scope_member_symbol_reports(
     symbols
 }
 
+fn scope_namespace_import_symbol_reports(
+    root: &Path,
+    importing_path: &Path,
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for import_decl in &document.imports {
+        let namespace_bindings = import_decl
+            .bindings
+            .iter()
+            .filter(|binding| binding.is_namespace())
+            .collect::<Vec<_>>();
+        if namespace_bindings.is_empty() {
+            continue;
+        }
+
+        let Some(import_path) =
+            resolve_scope_asx_import_path(root, importing_path, &import_decl.source)
+        else {
+            continue;
+        };
+        let Ok(source) = fs::read_to_string(&import_path) else {
+            continue;
+        };
+
+        for binding in namespace_bindings {
+            symbols.insert(
+                binding.local.clone(),
+                ScopeMemberReport {
+                    name: binding.local.clone(),
+                    kind: "namespace".to_string(),
+                    origin: "namespace-import".to_string(),
+                    source: Some(import_decl.source.clone()),
+                },
+            );
+
+            if let Ok(document) = parse_backend_ax(&source) {
+                for (_, mut member) in scope_export_symbol_reports(&document) {
+                    member.name = format!("{}.{}", binding.local, member.name);
+                    member.origin = "namespace-import".to_string();
+                    member.source = Some(import_decl.source.clone());
+                    symbols.insert(member.name.clone(), member);
+                }
+                continue;
+            }
+
+            if let Ok(file) = parse_ax_v2(&source) {
+                for member in asx_export_symbol_reports(&file) {
+                    let name = format!("{}.{}", binding.local, member.name);
+                    symbols.insert(
+                        name.clone(),
+                        ScopeMemberReport {
+                            name,
+                            kind: member.kind,
+                            origin: "namespace-import".to_string(),
+                            source: Some(import_decl.source.clone()),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    symbols
+}
+
 fn scope_asx_import_symbol_reports(
     root: &Path,
     importing_path: &Path,
@@ -3032,6 +3091,9 @@ fn scope_asx_import_symbol_reports(
         };
 
         for binding in &import_decl.bindings {
+            if binding.is_namespace() {
+                continue;
+            }
             let Some(kind) = asx_export_kind_for_binding(&file, &binding.imported) else {
                 continue;
             };
@@ -3049,6 +3111,37 @@ fn scope_asx_import_symbol_reports(
     }
 
     symbols
+}
+
+fn scope_member_details(
+    members: &[String],
+    member_symbols: &std::collections::BTreeMap<String, ScopeMemberReport>,
+) -> Vec<ScopeMemberReport> {
+    let mut details = Vec::new();
+
+    for member in members {
+        details.push(
+            member_symbols
+                .get(member)
+                .cloned()
+                .unwrap_or_else(|| ScopeMemberReport {
+                    name: member.clone(),
+                    kind: "unknown".to_string(),
+                    origin: "unresolved-v0".to_string(),
+                    source: None,
+                }),
+        );
+
+        let namespace_prefix = format!("{member}.");
+        for (name, detail) in member_symbols.range(namespace_prefix.clone()..) {
+            if !name.starts_with(&namespace_prefix) {
+                break;
+            }
+            details.push(detail.clone());
+        }
+    }
+
+    details
 }
 
 fn resolve_scope_asx_import_path(
@@ -3085,6 +3178,31 @@ fn asx_export_kind_for_binding(
         .then(|| "component".to_string())
 }
 
+struct AsxExportSymbolReport {
+    name: String,
+    kind: String,
+}
+
+fn asx_export_symbol_reports(
+    file: &axonyx_core::ax_ast_v2_prelude::AxFileV2,
+) -> Vec<AsxExportSymbolReport> {
+    let mut symbols = vec![AsxExportSymbolReport {
+        name: file.page.name.clone(),
+        kind: "render".to_string(),
+    }];
+
+    symbols.extend(
+        file.components
+            .iter()
+            .map(|component| AsxExportSymbolReport {
+                name: component.name.clone(),
+                kind: "component".to_string(),
+            }),
+    );
+
+    symbols
+}
+
 fn scope_member_symbol_reports(
     document: &AxBackendDocument,
 ) -> std::collections::BTreeMap<String, ScopeMemberReport> {
@@ -3096,7 +3214,11 @@ fn scope_member_symbol_reports(
                 binding.local.clone(),
                 ScopeMemberReport {
                     name: binding.local.clone(),
-                    kind: "import".to_string(),
+                    kind: if binding.is_namespace() {
+                        "namespace".to_string()
+                    } else {
+                        "import".to_string()
+                    },
                     origin: "import".to_string(),
                     source: Some(import_decl.source.clone()),
                 },
@@ -6701,6 +6823,9 @@ fn validate_backend_import_path_recursive(
         })?;
 
     for binding in bindings {
+        if binding.is_namespace() {
+            continue;
+        }
         if !backend_document_exports_symbol(&document, &binding.imported) {
             return Err(BackendImportValidationError::MissingExport {
                 path: path.to_path_buf(),
@@ -13484,6 +13609,70 @@ scope Layout <RenderLayout, setTheme> {
         assert!(json.contains("\"scope_states\":1"));
         assert!(json.contains("\"query_key\""));
         assert!(json.contains("\"invalidates\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn scope_report_expands_namespace_import_members() {
+        let root = make_temp_dir("scope-namespace-import");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/blog")).expect("blog dir should exist");
+        fs::write(
+            root.join("app/blog/domain.ax"),
+            r#"
+export query loadPosts() -> Post[] {
+  data posts = db.posts.all()
+  return posts
+}
+
+export action createPost
+  insert posts
+    title: "Hello"
+  return ok
+
+export fn isPublished(status: String) -> Bool {
+  return status == "published"
+}
+"#,
+        )
+        .expect("domain should write");
+        fs::write(
+            root.join("app/blog/scope.ax"),
+            r#"
+import * as Domain from "./domain.ax"
+
+scope Blog <Domain> {
+  state filter: String = "published"
+  render BlogPage()
+}
+"#,
+        )
+        .expect("scope should write");
+
+        let report = collect_scope_report(&root).expect("scope report should collect");
+        let scope = &report.files[0].scopes[0];
+
+        assert_eq!(scope.name, "Blog");
+        assert_eq!(scope.members, vec!["Domain".to_string()]);
+        assert_eq!(
+            scope
+                .member_details
+                .iter()
+                .map(|member| (
+                    member.name.as_str(),
+                    member.kind.as_str(),
+                    member.origin.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Domain", "namespace", "namespace-import"),
+                ("Domain.createPost", "action", "namespace-import"),
+                ("Domain.isPublished", "helper", "namespace-import"),
+                ("Domain.loadPosts", "query", "namespace-import"),
+            ]
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
