@@ -2906,11 +2906,17 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
     let mut sources = Vec::new();
     collect_backend_sources(root, &mut sources)?;
 
+    let project_member_symbols = collect_project_scope_member_symbol_reports(&sources);
     let mut files = Vec::new();
     for (file, source) in sources {
+        if !source_has_scope_declaration(&source) {
+            continue;
+        }
+
         let document = parse_backend_ax(&source)
             .with_context(|| format!("failed to parse backend source '{file}'"))?;
-        let member_symbols = scope_member_symbol_reports(&document);
+        let mut member_symbols = project_member_symbols.clone();
+        member_symbols.extend(scope_member_symbol_reports(&document));
         let scopes = document
             .blocks
             .iter()
@@ -2968,6 +2974,26 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
     Ok(ScopeReport { files })
 }
 
+fn collect_project_scope_member_symbol_reports(
+    sources: &[(String, String)],
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for (file, source) in sources {
+        let Ok(document) = parse_backend_ax(source) else {
+            continue;
+        };
+
+        for (name, mut member) in scope_export_symbol_reports(&document) {
+            member.origin = "project-export".to_string();
+            member.source = Some(file.clone());
+            symbols.entry(name).or_insert(member);
+        }
+    }
+
+    symbols
+}
+
 fn scope_member_symbol_reports(
     document: &AxBackendDocument,
 ) -> std::collections::BTreeMap<String, ScopeMemberReport> {
@@ -2986,6 +3012,15 @@ fn scope_member_symbol_reports(
             );
         }
     }
+
+    symbols.extend(scope_export_symbol_reports(document));
+    symbols
+}
+
+fn scope_export_symbol_reports(
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
 
     for block in &document.blocks {
         match block {
@@ -3033,6 +3068,12 @@ fn scope_member_symbol_reports(
     }
 
     symbols
+}
+
+fn source_has_scope_declaration(source: &str) -> bool {
+    source
+        .lines()
+        .any(|line| line.trim_start().starts_with("scope "))
 }
 
 fn scope_render_name(call: &AxExpr) -> String {
@@ -5068,6 +5109,8 @@ fn check_backend_scope_contracts(
 ) -> Vec<CheckDiagnostic> {
     let mut diagnostics = Vec::new();
     let mut scope_names = std::collections::BTreeSet::new();
+    let mut state_occurrences = std::collections::BTreeMap::<String, usize>::new();
+    let mut render_occurrence = 0usize;
 
     for block in &document.blocks {
         let AxBackendBlock::Scope(scope) = block else {
@@ -5112,13 +5155,15 @@ fn check_backend_scope_contracts(
         for statement in &scope.body {
             match statement {
                 AxScopeStmt::State(state) => {
+                    let occurrence = state_occurrences.entry(state.name.clone()).or_default();
+                    *occurrence += 1;
                     if state_names.insert(state.name.clone()) {
                         continue;
                     }
 
                     diagnostics.push(CheckDiagnostic {
                         file: display_path(path),
-                        line: line_for_scope_state(source, &state.name, 2),
+                        line: line_for_scope_state(source, &state.name, *occurrence),
                         column: 1,
                         severity: "error",
                         code: "axonyx-scope-state-duplicate",
@@ -5129,11 +5174,12 @@ fn check_backend_scope_contracts(
                     });
                 }
                 AxScopeStmt::Render(render) => {
+                    render_occurrence += 1;
                     render_count += 1;
                     if render_count > 1 {
                         diagnostics.push(CheckDiagnostic {
                             file: display_path(path),
-                            line: line_for_scope_render(source, render_count),
+                            line: line_for_scope_render(source, render_occurrence),
                             column: 1,
                             severity: "error",
                             code: "axonyx-scope-render-duplicate",
@@ -5148,7 +5194,7 @@ fn check_backend_scope_contracts(
                     if !scope.members.is_empty() && !scope.members.contains(&render_name) {
                         diagnostics.push(CheckDiagnostic {
                             file: display_path(path),
-                            line: line_for_scope_render(source, render_count),
+                            line: line_for_scope_render(source, render_occurrence),
                             column: 1,
                             severity: "error",
                             code: "axonyx-scope-render-member",
@@ -18729,6 +18775,31 @@ scope Layout {
     }
 
     #[test]
+    fn check_ax_source_reports_scope_render_errors_on_current_scope_lines() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Header <RenderHeader> {
+  render RenderHeader()
+}
+
+scope Layout <RenderLayout> {
+  render OtherLayout()
+  render RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].code, "axonyx-scope-render-member");
+        assert_eq!(diagnostics[0].line, 7);
+        assert_eq!(diagnostics[1].code, "axonyx-scope-render-duplicate");
+        assert_eq!(diagnostics[1].line, 8);
+    }
+
+    #[test]
     fn scope_member_symbol_reports_classifies_v0_member_origins() {
         let document = parse_backend_ax(
             r#"
@@ -18777,6 +18848,68 @@ scope Layout <RenderLayout, setTheme, loadPosts, isTheme, MissingMember> {
             Some("helper")
         );
         assert!(!symbols.contains_key("MissingMember"));
+    }
+
+    #[test]
+    fn collect_scope_report_classifies_project_level_backend_exports() {
+        let root = make_temp_dir("scope-project-level-exports");
+        fs::create_dir_all(root.join("app/layout")).expect("layout dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared dir should exist");
+        fs::write(
+            root.join("app/layout/scope.ax"),
+            r#"
+scope Layout <setTheme> {
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope should write");
+        fs::write(
+            root.join("app/shared/actions.ax"),
+            r#"
+export action setTheme(theme: String)
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let report = collect_scope_report(&root).expect("scope report should collect");
+        let member = &report.files[0].scopes[0].member_details[0];
+
+        assert_eq!(member.name, "setTheme");
+        assert_eq!(member.kind, "action");
+        assert_eq!(member.origin, "project-export");
+        assert_eq!(member.source.as_deref(), Some("shared/actions.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn collect_scope_report_skips_malformed_backend_files_without_scope() {
+        let root = make_temp_dir("scope-skips-malformed-non-scope-backend");
+        fs::create_dir_all(root.join("app/layout")).expect("layout dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared dir should exist");
+        fs::write(
+            root.join("app/layout/scope.ax"),
+            r#"
+scope Layout <RenderLayout> {
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope should write");
+        fs::write(
+            root.join("app/shared/actions.ax"),
+            "action Broken\n    return ok\n",
+        )
+        .expect("malformed backend should write");
+
+        let report = collect_scope_report(&root).expect("scope report should still collect");
+
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].scopes[0].name, "Layout");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
