@@ -5404,7 +5404,9 @@ fn check_backend_scope_contracts(
                     }
 
                     let render_name = scope_render_name(&render.call);
-                    if !scope.members.is_empty() && !scope.members.contains(&render_name) {
+                    if !scope.members.is_empty()
+                        && !scope_members_include_symbol(&scope.members, &render_name)
+                    {
                         diagnostics.push(CheckDiagnostic {
                             file: display_path(path),
                             line: line_for_scope_render(source, render_occurrence),
@@ -5423,6 +5425,15 @@ fn check_backend_scope_contracts(
     }
 
     diagnostics
+}
+
+fn scope_members_include_symbol(members: &[String], symbol: &str) -> bool {
+    members.iter().any(|member| {
+        member == symbol
+            || symbol
+                .strip_prefix(member)
+                .is_some_and(|remaining| remaining.starts_with('.'))
+    })
 }
 
 fn check_backend_env_contracts(
@@ -19030,6 +19041,40 @@ scope Layout <RenderLayout> {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "axonyx-scope-render-member");
         assert!(diagnostics[0].message.contains("OtherLayout"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_scope_render_inside_namespace_member() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout <Domain> {
+  render Domain.RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_keeps_bare_render_outside_namespace_member() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout <Domain> {
+  render RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-scope-render-member");
+        assert!(diagnostics[0].message.contains("RenderLayout"));
     }
 
     #[test]
