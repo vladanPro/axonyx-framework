@@ -2917,6 +2917,13 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
             .with_context(|| format!("failed to parse backend source '{file}'"))?;
         let mut member_symbols = project_member_symbols.clone();
         member_symbols.extend(scope_member_symbol_reports(&document));
+        if let Some(source_path) = backend_source_path_for_report_file(root, &file) {
+            member_symbols.extend(scope_asx_import_symbol_reports(
+                root,
+                &source_path,
+                &document,
+            ));
+        }
         let scopes = document
             .blocks
             .iter()
@@ -2974,6 +2981,16 @@ fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
     Ok(ScopeReport { files })
 }
 
+fn backend_source_path_for_report_file(root: &Path, file: &str) -> Option<PathBuf> {
+    [
+        root.join("app").join(file),
+        root.join("routes").join(file),
+        root.join("jobs").join(file),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+}
+
 fn collect_project_scope_member_symbol_reports(
     sources: &[(String, String)],
 ) -> std::collections::BTreeMap<String, ScopeMemberReport> {
@@ -2992,6 +3009,80 @@ fn collect_project_scope_member_symbol_reports(
     }
 
     symbols
+}
+
+fn scope_asx_import_symbol_reports(
+    root: &Path,
+    importing_path: &Path,
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for import_decl in &document.imports {
+        let Some(import_path) =
+            resolve_scope_asx_import_path(root, importing_path, &import_decl.source)
+        else {
+            continue;
+        };
+        let Ok(source) = fs::read_to_string(&import_path) else {
+            continue;
+        };
+        let Ok(file) = parse_ax_v2(&source) else {
+            continue;
+        };
+
+        for binding in &import_decl.bindings {
+            let Some(kind) = asx_export_kind_for_binding(&file, &binding.imported) else {
+                continue;
+            };
+
+            symbols.insert(
+                binding.local.clone(),
+                ScopeMemberReport {
+                    name: binding.local.clone(),
+                    kind,
+                    origin: "asx-import".to_string(),
+                    source: Some(import_decl.source.clone()),
+                },
+            );
+        }
+    }
+
+    symbols
+}
+
+fn resolve_scope_asx_import_path(
+    root: &Path,
+    importing_path: &Path,
+    source: &str,
+) -> Option<PathBuf> {
+    if source.starts_with("./") || source.starts_with("../") {
+        let mut path = importing_path.parent()?.join(source);
+        if path.extension().is_none() {
+            path.set_extension("ax");
+        }
+        let normalized = normalize_content_path(&path).ok()?;
+        let normalized_root = normalize_content_path(root).ok()?;
+        return normalized
+            .starts_with(&normalized_root)
+            .then_some(normalized);
+    }
+
+    resolve_preview_import_path(root, source)
+}
+
+fn asx_export_kind_for_binding(
+    file: &axonyx_core::ax_ast_v2_prelude::AxFileV2,
+    imported: &str,
+) -> Option<String> {
+    if file.page.name == imported {
+        return Some("render".to_string());
+    }
+
+    file.components
+        .iter()
+        .any(|component| component.name == imported)
+        .then(|| "component".to_string())
 }
 
 fn scope_member_symbol_reports(
@@ -18880,6 +18971,42 @@ export action setTheme(theme: String)
         assert_eq!(member.kind, "action");
         assert_eq!(member.origin, "project-export");
         assert_eq!(member.source.as_deref(), Some("shared/actions.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn collect_scope_report_classifies_asx_page_imports_as_render_members() {
+        let root = make_temp_dir("scope-asx-page-imports");
+        fs::create_dir_all(root.join("app/layout")).expect("layout dir should exist");
+        fs::write(
+            root.join("app/layout/scope.ax"),
+            r#"
+import { RenderLayout } from "./page.ax"
+
+scope Layout <RenderLayout> {
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope should write");
+        fs::write(
+            root.join("app/layout/page.ax"),
+            r#"
+page RenderLayout()
+
+<Slot />
+"#,
+        )
+        .expect("page should write");
+
+        let report = collect_scope_report(&root).expect("scope report should collect");
+        let member = &report.files[0].scopes[0].member_details[0];
+
+        assert_eq!(member.name, "RenderLayout");
+        assert_eq!(member.kind, "render");
+        assert_eq!(member.origin, "asx-import");
+        assert_eq!(member.source.as_deref(), Some("./page.ax"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
