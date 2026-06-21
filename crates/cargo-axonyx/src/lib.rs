@@ -18,6 +18,7 @@ use axonyx_core::ax_ast_prelude::{
 };
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
+    AxScopeStmt,
 };
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
@@ -57,7 +58,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.38";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.39";
 const AXONYX_UI_VERSION: &str = "0.0.48";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -828,6 +829,47 @@ struct DataBindingReport {
     query_key: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeReport {
+    files: Vec<ScopeFileReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeFileReport {
+    file: String,
+    scopes: Vec<ScopeItemReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeItemReport {
+    name: String,
+    members: Vec<String>,
+    member_details: Vec<ScopeMemberReport>,
+    states: Vec<ScopeStateReport>,
+    render: Option<ScopeRenderReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeMemberReport {
+    name: String,
+    kind: String,
+    origin: String,
+    source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeStateReport {
+    name: String,
+    ty: String,
+    default: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ScopeRenderReport {
+    name: String,
+    call: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeltReport {
     app: MeltAppReport,
@@ -837,6 +879,7 @@ struct MeltReport {
     actions: ActionReport,
     state: StateReport,
     data: DataReport,
+    scopes: ScopeReport,
     content: ContentManifest,
     diagnostics: Vec<CheckDiagnostic>,
     summary: MeltSummary,
@@ -863,6 +906,8 @@ struct MeltSummary {
     actions: usize,
     state_signals: usize,
     data_bindings: usize,
+    scopes: usize,
+    scope_states: usize,
     query_keys: usize,
     query_invalidations: usize,
     content_collections: usize,
@@ -1926,11 +1971,12 @@ fn doctor_melt_graph_check(root: &Path) -> DoctorCheck {
             code: "melt-graph",
             severity: DoctorSeverity::Ok,
             message: format!(
-                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
+                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.scopes,
                 report.summary.data_bindings,
                 report.summary.query_keys,
                 report.summary.query_invalidations,
@@ -2625,11 +2671,12 @@ fn melt_command(args: MeltArgs) -> Result<()> {
     if args.check {
         if report.diagnostics.is_empty() {
             println!(
-                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
+                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.scopes,
                 report.summary.data_bindings,
                 report.summary.query_keys,
                 report.summary.query_invalidations,
@@ -2665,6 +2712,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let actions = collect_action_report(root)?;
     let state = collect_state_report(root)?;
     let data = collect_data_report(root, &routes)?;
+    let scopes = collect_scope_report(root)?;
     let content = collect_content_manifest(root)?;
     let diagnostics = check_app_sources(root)?;
     let summary = melt_summary(
@@ -2673,6 +2721,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         &actions,
         &state,
         &data,
+        &scopes,
         &content,
         &diagnostics,
     );
@@ -2690,6 +2739,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         actions,
         state,
         data,
+        scopes,
         content,
         diagnostics,
         summary,
@@ -2702,10 +2752,18 @@ fn melt_summary(
     actions: &ActionReport,
     state: &StateReport,
     data: &DataReport,
+    scopes: &ScopeReport,
     content: &ContentManifest,
     diagnostics: &[CheckDiagnostic],
 ) -> MeltSummary {
     let data_bindings = data.routes.iter().map(|route| route.bindings.len()).sum();
+    let scope_count = scopes.files.iter().map(|file| file.scopes.len()).sum();
+    let scope_states = scopes
+        .files
+        .iter()
+        .flat_map(|file| &file.scopes)
+        .map(|scope| scope.states.len())
+        .sum();
     let query_invalidations = actions
         .routes
         .iter()
@@ -2723,6 +2781,8 @@ fn melt_summary(
         actions: actions.routes.iter().map(|route| route.actions.len()).sum(),
         state_signals: state.files.iter().map(|file| file.signals.len()).sum(),
         data_bindings,
+        scopes: scope_count,
+        scope_states,
         query_keys: data_bindings,
         query_invalidations,
         content_collections: content.collections.len(),
@@ -2762,12 +2822,20 @@ fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport
         },
         MeltLayerReport {
             name: "Axonyx State",
-            status: if summary.state_signals > 0 {
+            status: if summary.state_signals > 0 || summary.scope_states > 0 {
                 "ready"
             } else {
                 "empty"
             },
-            detail: format!("{} state signal(s) declared.", summary.state_signals),
+            detail: format!(
+                "{} state signal(s), {} scope state(s) declared.",
+                summary.state_signals, summary.scope_states
+            ),
+        },
+        MeltLayerReport {
+            name: "Axonyx Scope",
+            status: if summary.scopes > 0 { "ready" } else { "empty" },
+            detail: format!("{} scope container(s) discovered.", summary.scopes),
         },
         MeltLayerReport {
             name: "Axonyx Foundry",
@@ -2832,6 +2900,400 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
     Ok(DataReport {
         routes: data_routes,
     })
+}
+
+fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
+    let mut sources = Vec::new();
+    collect_backend_sources(root, &mut sources)?;
+
+    let project_member_symbols = collect_project_scope_member_symbol_reports(&sources);
+    let mut files = Vec::new();
+    for (file, source) in sources {
+        if !source_has_scope_declaration(&source) {
+            continue;
+        }
+
+        let document = parse_backend_ax(&source)
+            .with_context(|| format!("failed to parse backend source '{file}'"))?;
+        let mut member_symbols = project_member_symbols.clone();
+        member_symbols.extend(scope_member_symbol_reports(&document));
+        if let Some(source_path) = backend_source_path_for_report_file(root, &file) {
+            member_symbols.extend(scope_asx_import_symbol_reports(
+                root,
+                &source_path,
+                &document,
+            ));
+            member_symbols.extend(scope_namespace_import_symbol_reports(
+                root,
+                &source_path,
+                &document,
+            ));
+        }
+        let scopes = document
+            .blocks
+            .iter()
+            .filter_map(|block| {
+                let AxBackendBlock::Scope(scope) = block else {
+                    return None;
+                };
+
+                let mut states = Vec::new();
+                let mut render = None;
+                for stmt in &scope.body {
+                    match stmt {
+                        AxScopeStmt::State(state) => states.push(ScopeStateReport {
+                            name: state.name.clone(),
+                            ty: state.ty.clone(),
+                            default: state.default.as_ref().map(format_ax_expr),
+                        }),
+                        AxScopeStmt::Render(scope_render) => {
+                            render = Some(ScopeRenderReport {
+                                name: scope_render_name(&scope_render.call),
+                                call: format_ax_expr(&scope_render.call),
+                            });
+                        }
+                    }
+                }
+
+                Some(ScopeItemReport {
+                    name: scope.name.clone(),
+                    members: scope.members.clone(),
+                    member_details: scope_member_details(&scope.members, &member_symbols),
+                    states,
+                    render,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if !scopes.is_empty() {
+            files.push(ScopeFileReport { file, scopes });
+        }
+    }
+
+    Ok(ScopeReport { files })
+}
+
+fn backend_source_path_for_report_file(root: &Path, file: &str) -> Option<PathBuf> {
+    [
+        root.join("app").join(file),
+        root.join("routes").join(file),
+        root.join("jobs").join(file),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+}
+
+fn collect_project_scope_member_symbol_reports(
+    sources: &[(String, String)],
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for (file, source) in sources {
+        let Ok(document) = parse_backend_ax(source) else {
+            continue;
+        };
+
+        for (name, mut member) in scope_export_symbol_reports(&document) {
+            member.origin = "project-export".to_string();
+            member.source = Some(file.clone());
+            symbols.entry(name).or_insert(member);
+        }
+    }
+
+    symbols
+}
+
+fn scope_namespace_import_symbol_reports(
+    root: &Path,
+    importing_path: &Path,
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for import_decl in &document.imports {
+        let namespace_bindings = import_decl
+            .bindings
+            .iter()
+            .filter(|binding| binding.is_namespace())
+            .collect::<Vec<_>>();
+        if namespace_bindings.is_empty() {
+            continue;
+        }
+
+        let Some(import_path) =
+            resolve_scope_asx_import_path(root, importing_path, &import_decl.source)
+        else {
+            continue;
+        };
+        let Ok(source) = fs::read_to_string(&import_path) else {
+            continue;
+        };
+
+        for binding in namespace_bindings {
+            symbols.insert(
+                binding.local.clone(),
+                ScopeMemberReport {
+                    name: binding.local.clone(),
+                    kind: "namespace".to_string(),
+                    origin: "namespace-import".to_string(),
+                    source: Some(import_decl.source.clone()),
+                },
+            );
+
+            if let Ok(document) = parse_backend_ax(&source) {
+                for (_, mut member) in scope_export_symbol_reports(&document) {
+                    member.name = format!("{}.{}", binding.local, member.name);
+                    member.origin = "namespace-import".to_string();
+                    member.source = Some(import_decl.source.clone());
+                    symbols.insert(member.name.clone(), member);
+                }
+                continue;
+            }
+
+            if let Ok(file) = parse_ax_v2(&source) {
+                for member in asx_export_symbol_reports(&file) {
+                    let name = format!("{}.{}", binding.local, member.name);
+                    symbols.insert(
+                        name.clone(),
+                        ScopeMemberReport {
+                            name,
+                            kind: member.kind,
+                            origin: "namespace-import".to_string(),
+                            source: Some(import_decl.source.clone()),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    symbols
+}
+
+fn scope_asx_import_symbol_reports(
+    root: &Path,
+    importing_path: &Path,
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for import_decl in &document.imports {
+        let Some(import_path) =
+            resolve_scope_asx_import_path(root, importing_path, &import_decl.source)
+        else {
+            continue;
+        };
+        let Ok(source) = fs::read_to_string(&import_path) else {
+            continue;
+        };
+        let Ok(file) = parse_ax_v2(&source) else {
+            continue;
+        };
+
+        for binding in &import_decl.bindings {
+            if binding.is_namespace() {
+                continue;
+            }
+            let Some(kind) = asx_export_kind_for_binding(&file, &binding.imported) else {
+                continue;
+            };
+
+            symbols.insert(
+                binding.local.clone(),
+                ScopeMemberReport {
+                    name: binding.local.clone(),
+                    kind,
+                    origin: "asx-import".to_string(),
+                    source: Some(import_decl.source.clone()),
+                },
+            );
+        }
+    }
+
+    symbols
+}
+
+fn scope_member_details(
+    members: &[String],
+    member_symbols: &std::collections::BTreeMap<String, ScopeMemberReport>,
+) -> Vec<ScopeMemberReport> {
+    let mut details = Vec::new();
+
+    for member in members {
+        details.push(
+            member_symbols
+                .get(member)
+                .cloned()
+                .unwrap_or_else(|| ScopeMemberReport {
+                    name: member.clone(),
+                    kind: "unknown".to_string(),
+                    origin: "unresolved-v0".to_string(),
+                    source: None,
+                }),
+        );
+
+        let namespace_prefix = format!("{member}.");
+        for (name, detail) in member_symbols.range(namespace_prefix.clone()..) {
+            if !name.starts_with(&namespace_prefix) {
+                break;
+            }
+            details.push(detail.clone());
+        }
+    }
+
+    details
+}
+
+fn resolve_scope_asx_import_path(
+    root: &Path,
+    importing_path: &Path,
+    source: &str,
+) -> Option<PathBuf> {
+    if source.starts_with("./") || source.starts_with("../") {
+        let mut path = importing_path.parent()?.join(source);
+        if path.extension().is_none() {
+            path.set_extension("ax");
+        }
+        let normalized = normalize_content_path(&path).ok()?;
+        let normalized_root = normalize_content_path(root).ok()?;
+        return normalized
+            .starts_with(&normalized_root)
+            .then_some(normalized);
+    }
+
+    resolve_preview_import_path(root, source)
+}
+
+fn asx_export_kind_for_binding(
+    file: &axonyx_core::ax_ast_v2_prelude::AxFileV2,
+    imported: &str,
+) -> Option<String> {
+    if file.page.name == imported {
+        return Some("render".to_string());
+    }
+
+    file.components
+        .iter()
+        .any(|component| component.name == imported)
+        .then(|| "component".to_string())
+}
+
+struct AsxExportSymbolReport {
+    name: String,
+    kind: String,
+}
+
+fn asx_export_symbol_reports(
+    file: &axonyx_core::ax_ast_v2_prelude::AxFileV2,
+) -> Vec<AsxExportSymbolReport> {
+    let mut symbols = vec![AsxExportSymbolReport {
+        name: file.page.name.clone(),
+        kind: "render".to_string(),
+    }];
+
+    symbols.extend(
+        file.components
+            .iter()
+            .map(|component| AsxExportSymbolReport {
+                name: component.name.clone(),
+                kind: "component".to_string(),
+            }),
+    );
+
+    symbols
+}
+
+fn scope_member_symbol_reports(
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for import_decl in &document.imports {
+        for binding in &import_decl.bindings {
+            symbols.insert(
+                binding.local.clone(),
+                ScopeMemberReport {
+                    name: binding.local.clone(),
+                    kind: if binding.is_namespace() {
+                        "namespace".to_string()
+                    } else {
+                        "import".to_string()
+                    },
+                    origin: "import".to_string(),
+                    source: Some(import_decl.source.clone()),
+                },
+            );
+        }
+    }
+
+    symbols.extend(scope_export_symbol_reports(document));
+    symbols
+}
+
+fn scope_export_symbol_reports(
+    document: &AxBackendDocument,
+) -> std::collections::BTreeMap<String, ScopeMemberReport> {
+    let mut symbols = std::collections::BTreeMap::new();
+
+    for block in &document.blocks {
+        match block {
+            AxBackendBlock::Loader(loader) if loader.exported => {
+                symbols.insert(
+                    loader.name.clone(),
+                    ScopeMemberReport {
+                        name: loader.name.clone(),
+                        kind: "query".to_string(),
+                        origin: "local-export".to_string(),
+                        source: None,
+                    },
+                );
+            }
+            AxBackendBlock::Action(action) if action.exported => {
+                symbols.insert(
+                    action.name.clone(),
+                    ScopeMemberReport {
+                        name: action.name.clone(),
+                        kind: "action".to_string(),
+                        origin: "local-export".to_string(),
+                        source: None,
+                    },
+                );
+            }
+            AxBackendBlock::Function(function) if function.exported => {
+                symbols.insert(
+                    function.name.clone(),
+                    ScopeMemberReport {
+                        name: function.name.clone(),
+                        kind: "helper".to_string(),
+                        origin: "local-export".to_string(),
+                        source: None,
+                    },
+                );
+            }
+            AxBackendBlock::Backend(_)
+            | AxBackendBlock::Route(_)
+            | AxBackendBlock::Job(_)
+            | AxBackendBlock::Scope(_)
+            | AxBackendBlock::Loader(_)
+            | AxBackendBlock::Action(_)
+            | AxBackendBlock::Function(_) => {}
+        }
+    }
+
+    symbols
+}
+
+fn source_has_scope_declaration(source: &str) -> bool {
+    source
+        .lines()
+        .any(|line| line.trim_start().starts_with("scope "))
+}
+
+fn scope_render_name(call: &AxExpr) -> String {
+    match call {
+        AxExpr::Call { path, .. } => path.join("."),
+        _ => format_ax_expr(call),
+    }
 }
 
 fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBindingReport> {
@@ -4808,6 +5270,7 @@ fn check_backend_requirements(
     let mut diagnostics = root
         .map(|root| check_backend_imports(root, path, source, document))
         .unwrap_or_default();
+    diagnostics.extend(check_backend_scope_contracts(path, source, document));
     let plan = match lower_backend_document(document) {
         Ok(plan) => plan,
         Err(error) => {
@@ -4850,6 +5313,127 @@ fn check_backend_requirements(
     });
 
     diagnostics
+}
+
+fn check_backend_scope_contracts(
+    path: &Path,
+    source: &str,
+    document: &AxBackendDocument,
+) -> Vec<CheckDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut scope_names = std::collections::BTreeSet::new();
+    let mut state_occurrences = std::collections::BTreeMap::<String, usize>::new();
+    let mut render_occurrence = 0usize;
+
+    for block in &document.blocks {
+        let AxBackendBlock::Scope(scope) = block else {
+            continue;
+        };
+
+        if !scope_names.insert(scope.name.clone()) {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_scope_header(source, &scope.name),
+                column: 1,
+                severity: "error",
+                code: "axonyx-scope-duplicate",
+                message: format!(
+                    "scope `{}` is declared more than once in this file.",
+                    scope.name
+                ),
+            });
+        }
+
+        let mut members = std::collections::BTreeSet::new();
+        for member in &scope.members {
+            if members.insert(member.clone()) {
+                continue;
+            }
+
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_scope_header(source, &scope.name),
+                column: 1,
+                severity: "error",
+                code: "axonyx-scope-member-duplicate",
+                message: format!(
+                    "scope `{}` lists member `{member}` more than once.",
+                    scope.name
+                ),
+            });
+        }
+
+        let mut state_names = std::collections::BTreeSet::new();
+        let mut render_count = 0usize;
+        for statement in &scope.body {
+            match statement {
+                AxScopeStmt::State(state) => {
+                    let occurrence = state_occurrences.entry(state.name.clone()).or_default();
+                    *occurrence += 1;
+                    if state_names.insert(state.name.clone()) {
+                        continue;
+                    }
+
+                    diagnostics.push(CheckDiagnostic {
+                        file: display_path(path),
+                        line: line_for_scope_state(source, &state.name, *occurrence),
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-scope-state-duplicate",
+                        message: format!(
+                            "scope `{}` declares state `{}` more than once.",
+                            scope.name, state.name
+                        ),
+                    });
+                }
+                AxScopeStmt::Render(render) => {
+                    render_occurrence += 1;
+                    render_count += 1;
+                    if render_count > 1 {
+                        diagnostics.push(CheckDiagnostic {
+                            file: display_path(path),
+                            line: line_for_scope_render(source, render_occurrence),
+                            column: 1,
+                            severity: "error",
+                            code: "axonyx-scope-render-duplicate",
+                            message: format!(
+                                "scope `{}` declares more than one render entry.",
+                                scope.name
+                            ),
+                        });
+                    }
+
+                    let render_name = scope_render_name(&render.call);
+                    if !scope.members.is_empty()
+                        && !scope_members_include_symbol(&scope.members, &render_name)
+                    {
+                        diagnostics.push(CheckDiagnostic {
+                            file: display_path(path),
+                            line: line_for_scope_render(source, render_occurrence),
+                            column: 1,
+                            severity: "error",
+                            code: "axonyx-scope-render-member",
+                            message: format!(
+                                "scope `{}` renders `{render_name}` but that symbol is not listed in the scope member header.",
+                                scope.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn scope_members_include_symbol(members: &[String], symbol: &str) -> bool {
+    members.iter().any(|member| {
+        member == symbol
+            || symbol
+                .strip_prefix(member)
+                .is_some_and(|remaining| remaining.starts_with('.'))
+    })
 }
 
 fn check_backend_env_contracts(
@@ -4964,6 +5548,7 @@ fn check_backend_database_surface(
                 &resources,
                 &mut diagnostics,
             ),
+            AxBackendBlock::Scope(_) => {}
         }
     }
 
@@ -5917,6 +6502,37 @@ fn line_for_repeated_source_pattern(source: &str, pattern: &str, occurrence: usi
         .unwrap_or_else(|| line_for_source_pattern(source, pattern))
 }
 
+fn line_for_scope_header(source: &str, scope: &str) -> usize {
+    let prefix = format!("scope {scope}");
+    source
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.trim_start().starts_with(&prefix))
+        .map(|(index, _)| index + 1)
+        .unwrap_or_else(|| line_for_source_pattern(source, scope))
+}
+
+fn line_for_scope_state(source: &str, state: &str, occurrence: usize) -> usize {
+    let prefix = format!("state {state}:");
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with(&prefix))
+        .nth(occurrence.saturating_sub(1))
+        .map(|(index, _)| index + 1)
+        .unwrap_or_else(|| line_for_source_pattern(source, state))
+}
+
+fn line_for_scope_render(source: &str, occurrence: usize) -> usize {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("render "))
+        .nth(occurrence.saturating_sub(1))
+        .map(|(index, _)| index + 1)
+        .unwrap_or_else(|| line_for_source_pattern(source, "render "))
+}
+
 fn check_type_annotations(
     path: &Path,
     source: &str,
@@ -6218,6 +6834,9 @@ fn validate_backend_import_path_recursive(
         })?;
 
     for binding in bindings {
+        if binding.is_namespace() {
+            continue;
+        }
         if !backend_document_exports_symbol(&document, &binding.imported) {
             return Err(BackendImportValidationError::MissingExport {
                 path: path.to_path_buf(),
@@ -6256,7 +6875,10 @@ fn backend_document_exports_symbol(document: &AxBackendDocument, name: &str) -> 
         AxBackendBlock::Loader(loader) => loader.exported && loader.name == name,
         AxBackendBlock::Action(action) => action.exported && action.name == name,
         AxBackendBlock::Function(function) => function.exported && function.name == name,
-        AxBackendBlock::Backend(_) | AxBackendBlock::Route(_) | AxBackendBlock::Job(_) => false,
+        AxBackendBlock::Backend(_)
+        | AxBackendBlock::Route(_)
+        | AxBackendBlock::Job(_)
+        | AxBackendBlock::Scope(_) => false,
     })
 }
 
@@ -6437,6 +7059,7 @@ fn looks_like_backend_ax(source: &str) -> bool {
             || line.starts_with("query ")
             || line.starts_with("action ")
             || line.starts_with("fn ")
+            || line.starts_with("scope ")
             || line.starts_with("job ")
     })
 }
@@ -6585,6 +7208,10 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidRequirement { line }
         | AxBackendParseError::InvalidReturn { line }
         | AxBackendParseError::InvalidSend { line }
+        | AxBackendParseError::InvalidScope { line }
+        | AxBackendParseError::InvalidScopeMember { line }
+        | AxBackendParseError::InvalidScopeState { line }
+        | AxBackendParseError::InvalidScopeRender { line }
         | AxBackendParseError::InvalidQuerySource { line }
         | AxBackendParseError::InvalidQueryClause { line }
         | AxBackendParseError::InvalidQueryNumber { line }
@@ -7732,12 +8359,14 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.scopes,
+        report.summary.scope_states,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -7770,6 +8399,11 @@ fn print_melt_text(report: &MeltReport) {
         print_data_text(&report.data);
     }
 
+    if !report.scopes.files.is_empty() {
+        println!();
+        print_scope_text(&report.scopes);
+    }
+
     if !report.diagnostics.is_empty() {
         println!();
         println!("Diagnostics:");
@@ -7799,15 +8433,56 @@ fn print_data_text(report: &DataReport) {
     }
 }
 
+fn print_scope_text(report: &ScopeReport) {
+    println!("Scope graph:");
+    for file in &report.files {
+        println!("  {}", file.file);
+        for scope in &file.scopes {
+            let members = if scope.members.is_empty() {
+                "members=none".to_string()
+            } else {
+                format!("members={}", scope.members.join(","))
+            };
+            let render = scope
+                .render
+                .as_ref()
+                .map(|render| format!("render={}", render.call))
+                .unwrap_or_else(|| "render=none".to_string());
+            println!("    scope {} {} {}", scope.name, members, render);
+            for member in &scope.member_details {
+                let source = member
+                    .source
+                    .as_ref()
+                    .map(|source| format!(" source={source}"))
+                    .unwrap_or_default();
+                println!(
+                    "      member {} kind={} origin={}{}",
+                    member.name, member.kind, member.origin, source
+                );
+            }
+            for state in &scope.states {
+                let default = state
+                    .default
+                    .as_ref()
+                    .map(|value| format!(" default={value}"))
+                    .unwrap_or_default();
+                println!("      state {}: {}{}", state.name, state.ty, default);
+            }
+        }
+    }
+}
+
 fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.scopes,
+        report.summary.scope_states,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -7894,6 +8569,11 @@ fn print_graph_text(report: &MeltReport) {
                 println!("    {} invalidates={}", action.name, labels);
             }
         }
+    }
+
+    if !report.scopes.files.is_empty() {
+        println!();
+        print_scope_text(&report.scopes);
     }
 
     if !report.diagnostics.is_empty() {
@@ -8501,6 +9181,9 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
     for path in paths {
         let source = fs::read_to_string(&path)
             .with_context(|| format!("failed to read '{}'", path.display()))?;
+        if looks_like_backend_ax(&source) {
+            continue;
+        }
         if !source_has_state_declaration(&source) {
             continue;
         }
@@ -12804,6 +13487,7 @@ route GET "/api/posts" -> Post[]
         )
         .expect("config should write");
         fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::create_dir_all(root.join("app/layout")).expect("layout dir should exist");
         fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
         fs::write(
             root.join("app/backend.ax"),
@@ -12836,6 +13520,16 @@ return {
         )
         .expect("loader should write");
         fs::write(
+            root.join("app/layout/scope.ax"),
+            r#"
+scope Layout <RenderLayout, setTheme> {
+  state theme: String = "silver"
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope should write");
+        fs::write(
             root.join("app/settings/page.ax"),
             "page Settings\n<Copy>Settings</Copy>\n",
         )
@@ -12859,6 +13553,8 @@ return {
         assert_eq!(report.summary.action_routes, 1);
         assert_eq!(report.summary.actions, 1);
         assert_eq!(report.summary.state_signals, 1);
+        assert_eq!(report.summary.scopes, 1);
+        assert_eq!(report.summary.scope_states, 1);
         assert_eq!(report.summary.data_bindings, 1);
         assert_eq!(report.summary.query_keys, 1);
         assert_eq!(report.summary.query_invalidations, 1);
@@ -12877,10 +13573,38 @@ return {
                 query_key: vec!["posts".to_string()],
             }]
         );
+        assert_eq!(report.scopes.files.len(), 1);
+        assert_eq!(report.scopes.files[0].file, "layout/scope.ax");
+        assert_eq!(report.scopes.files[0].scopes[0].name, "Layout");
+        assert_eq!(
+            report.scopes.files[0].scopes[0].members,
+            vec!["RenderLayout".to_string(), "setTheme".to_string()]
+        );
+        assert_eq!(report.scopes.files[0].scopes[0].member_details.len(), 2);
+        assert_eq!(
+            report.scopes.files[0].scopes[0].member_details[0].name,
+            "RenderLayout"
+        );
+        assert_eq!(
+            report.scopes.files[0].scopes[0].member_details[0].origin,
+            "unresolved-v0"
+        );
+        assert_eq!(report.scopes.files[0].scopes[0].states[0].name, "theme");
+        assert_eq!(
+            report.scopes.files[0].scopes[0]
+                .render
+                .as_ref()
+                .map(|render| render.call.as_str()),
+            Some("RenderLayout()")
+        );
         assert!(report
             .layers
             .iter()
             .any(|layer| layer.name == "Axonyx Pages" && layer.status == "ready"));
+        assert!(report
+            .layers
+            .iter()
+            .any(|layer| layer.name == "Axonyx Scope" && layer.status == "ready"));
         assert!(report
             .layers
             .iter()
@@ -12890,8 +13614,76 @@ return {
         assert!(json.contains("\"Axonyx Pages\""));
         assert!(json.contains("\"summary\""));
         assert!(json.contains("\"data\""));
+        assert!(json.contains("\"scopes\""));
+        assert!(json.contains("\"member_details\""));
+        assert!(json.contains("\"unresolved-v0\""));
+        assert!(json.contains("\"scope_states\":1"));
         assert!(json.contains("\"query_key\""));
         assert!(json.contains("\"invalidates\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn scope_report_expands_namespace_import_members() {
+        let root = make_temp_dir("scope-namespace-import");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/blog")).expect("blog dir should exist");
+        fs::write(
+            root.join("app/blog/domain.ax"),
+            r#"
+export query loadPosts() -> Post[] {
+  data posts = db.posts.all()
+  return posts
+}
+
+export action createPost
+  insert posts
+    title: "Hello"
+  return ok
+
+export fn isPublished(status: String) -> Bool {
+  return status == "published"
+}
+"#,
+        )
+        .expect("domain should write");
+        fs::write(
+            root.join("app/blog/scope.ax"),
+            r#"
+import * as Domain from "./domain.ax"
+
+scope Blog <Domain> {
+  state filter: String = "published"
+  render BlogPage()
+}
+"#,
+        )
+        .expect("scope should write");
+
+        let report = collect_scope_report(&root).expect("scope report should collect");
+        let scope = &report.files[0].scopes[0];
+
+        assert_eq!(scope.name, "Blog");
+        assert_eq!(scope.members, vec!["Domain".to_string()]);
+        assert_eq!(
+            scope
+                .member_details
+                .iter()
+                .map(|member| (
+                    member.name.as_str(),
+                    member.kind.as_str(),
+                    member.origin.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Domain", "namespace", "namespace-import"),
+                ("Domain.createPost", "action", "namespace-import"),
+                ("Domain.isPublished", "helper", "namespace-import"),
+                ("Domain.loadPosts", "query", "namespace-import"),
+            ]
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -18181,6 +18973,304 @@ export fn normalizeStatus(status?: String) -> String {
         );
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_scope_only_backend_file() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout {
+  state theme: String = "silver"
+  render RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_reports_scope_contract_errors() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout <RenderLayout, RenderLayout, RenderHeader> {
+  state theme: String = "silver"
+  state theme: String = "gold"
+  render RenderLayout()
+  render RenderHeader()
+}
+"#,
+            None,
+        );
+
+        let codes = diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            vec![
+                "axonyx-scope-member-duplicate",
+                "axonyx-scope-state-duplicate",
+                "axonyx-scope-render-duplicate"
+            ]
+        );
+        assert!(diagnostics[0].message.contains("RenderLayout"));
+        assert!(diagnostics[1].message.contains("theme"));
+        assert!(diagnostics[2].message.contains("more than one render"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_scope_render_outside_member_header() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout <RenderLayout> {
+  render OtherLayout()
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-scope-render-member");
+        assert!(diagnostics[0].message.contains("OtherLayout"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_scope_render_inside_namespace_member() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout <Domain> {
+  render Domain.RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_keeps_bare_render_outside_namespace_member() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout <Domain> {
+  render RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-scope-render-member");
+        assert!(diagnostics[0].message.contains("RenderLayout"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_duplicate_scope_names() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Layout {
+  render RenderLayout()
+}
+
+scope Layout {
+  render RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-scope-duplicate");
+        assert!(diagnostics[0].message.contains("Layout"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_scope_render_errors_on_current_scope_lines() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout/scope.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+scope Header <RenderHeader> {
+  render RenderHeader()
+}
+
+scope Layout <RenderLayout> {
+  render OtherLayout()
+  render RenderLayout()
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].code, "axonyx-scope-render-member");
+        assert_eq!(diagnostics[0].line, 7);
+        assert_eq!(diagnostics[1].code, "axonyx-scope-render-duplicate");
+        assert_eq!(diagnostics[1].line, 8);
+    }
+
+    #[test]
+    fn scope_member_symbol_reports_classifies_v0_member_origins() {
+        let document = parse_backend_ax(
+            r#"
+import { RenderLayout } from "./page.ax"
+
+export action setTheme(theme: String)
+  return ok
+
+export query loadPosts() -> Post[]
+  return posts
+
+export fn isTheme(value: String) -> bool
+  return true
+
+scope Layout <RenderLayout, setTheme, loadPosts, isTheme, MissingMember> {
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope document should parse");
+
+        let symbols = scope_member_symbol_reports(&document);
+
+        assert_eq!(
+            symbols
+                .get("RenderLayout")
+                .map(|member| member.origin.as_str()),
+            Some("import")
+        );
+        assert_eq!(
+            symbols
+                .get("RenderLayout")
+                .and_then(|member| member.source.as_deref()),
+            Some("./page.ax")
+        );
+        assert_eq!(
+            symbols.get("setTheme").map(|member| member.kind.as_str()),
+            Some("action")
+        );
+        assert_eq!(
+            symbols.get("loadPosts").map(|member| member.kind.as_str()),
+            Some("query")
+        );
+        assert_eq!(
+            symbols.get("isTheme").map(|member| member.kind.as_str()),
+            Some("helper")
+        );
+        assert!(!symbols.contains_key("MissingMember"));
+    }
+
+    #[test]
+    fn collect_scope_report_classifies_project_level_backend_exports() {
+        let root = make_temp_dir("scope-project-level-exports");
+        fs::create_dir_all(root.join("app/layout")).expect("layout dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared dir should exist");
+        fs::write(
+            root.join("app/layout/scope.ax"),
+            r#"
+scope Layout <setTheme> {
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope should write");
+        fs::write(
+            root.join("app/shared/actions.ax"),
+            r#"
+export action setTheme(theme: String)
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let report = collect_scope_report(&root).expect("scope report should collect");
+        let member = &report.files[0].scopes[0].member_details[0];
+
+        assert_eq!(member.name, "setTheme");
+        assert_eq!(member.kind, "action");
+        assert_eq!(member.origin, "project-export");
+        assert_eq!(member.source.as_deref(), Some("shared/actions.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn collect_scope_report_classifies_asx_page_imports_as_render_members() {
+        let root = make_temp_dir("scope-asx-page-imports");
+        fs::create_dir_all(root.join("app/layout")).expect("layout dir should exist");
+        fs::write(
+            root.join("app/layout/scope.ax"),
+            r#"
+import { RenderLayout } from "./page.ax"
+
+scope Layout <RenderLayout> {
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope should write");
+        fs::write(
+            root.join("app/layout/page.ax"),
+            r#"
+page RenderLayout()
+
+<Slot />
+"#,
+        )
+        .expect("page should write");
+
+        let report = collect_scope_report(&root).expect("scope report should collect");
+        let member = &report.files[0].scopes[0].member_details[0];
+
+        assert_eq!(member.name, "RenderLayout");
+        assert_eq!(member.kind, "render");
+        assert_eq!(member.origin, "asx-import");
+        assert_eq!(member.source.as_deref(), Some("./page.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn collect_scope_report_skips_malformed_backend_files_without_scope() {
+        let root = make_temp_dir("scope-skips-malformed-non-scope-backend");
+        fs::create_dir_all(root.join("app/layout")).expect("layout dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared dir should exist");
+        fs::write(
+            root.join("app/layout/scope.ax"),
+            r#"
+scope Layout <RenderLayout> {
+  render RenderLayout()
+}
+"#,
+        )
+        .expect("scope should write");
+        fs::write(
+            root.join("app/shared/actions.ax"),
+            "action Broken\n    return ok\n",
+        )
+        .expect("malformed backend should write");
+
+        let report = collect_scope_report(&root).expect("scope report should still collect");
+
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].scopes[0].name, "Layout");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
