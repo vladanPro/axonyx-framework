@@ -18875,6 +18875,29 @@ let posts: List<Post>> = load PostsList
     }
 
     #[test]
+    fn check_ax_source_accepts_pages_v2_const_declarations() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Posts() {
+  data posts = loadPosts()
+  const hasPosts = posts.length > 0
+
+  return ASX {
+    <If when={hasPosts}>
+      <Copy>Posts are ready</Copy>
+    </If>
+  }
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
     fn check_ax_source_reports_unknown_typed_each_member() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
         let diagnostics = check_ax_source_with_root(
