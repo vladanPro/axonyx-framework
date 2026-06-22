@@ -3301,7 +3301,7 @@ fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBin
         return None;
     };
 
-    let AxExpr::Call { path, args } = &binding.value else {
+    let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
         return None;
     };
 
@@ -3317,6 +3317,16 @@ fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBin
         source: format_ax_expr(&binding.value),
         query_key,
     })
+}
+
+fn query_call_from_binding_expr(expr: &AxExpr) -> Option<(&[String], &[AxExpr])> {
+    match expr {
+        AxExpr::Call { path, args } => Some((path.as_slice(), args.as_slice())),
+        AxExpr::Member { object, .. } | AxExpr::OptionalMember { object, .. } => {
+            query_call_from_binding_expr(object)
+        }
+        _ => None,
+    }
 }
 
 fn is_query_function_path(path: &[String]) -> bool {
@@ -4714,7 +4724,7 @@ fn check_query_function_call_contracts(root: &Path) -> Result<Vec<CheckDiagnosti
             let AxStatement::Data(binding) = statement else {
                 continue;
             };
-            let AxExpr::Call { path, args } = &binding.value else {
+            let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
                 continue;
             };
             let Some(name) = path.first() else {
@@ -12951,6 +12961,24 @@ mod tests {
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::default(),
         }
+    }
+
+    #[test]
+    fn data_binding_report_accepts_query_call_member_sources() {
+        let statement = AxStatement::data(
+            "posts",
+            AxExpr::call(["loadDashboard"], [AxExpr::string("published")]).member("posts"),
+        );
+
+        let report =
+            data_binding_report_from_statement(&statement).expect("member query should report");
+
+        assert_eq!(report.name, "posts");
+        assert_eq!(report.source, r#"loadDashboard("published").posts"#);
+        assert_eq!(
+            report.query_key,
+            vec!["posts".to_string(), r#""published""#.to_string()]
+        );
     }
 
     fn seed_test_sqlite_posts(root: &Path) {
