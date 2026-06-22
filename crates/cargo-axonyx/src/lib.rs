@@ -58,7 +58,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.39";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.40";
 const AXONYX_UI_VERSION: &str = "0.0.48";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -3301,7 +3301,7 @@ fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBin
         return None;
     };
 
-    let AxExpr::Call { path, args } = &binding.value else {
+    let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
         return None;
     };
 
@@ -3317,6 +3317,16 @@ fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBin
         source: format_ax_expr(&binding.value),
         query_key,
     })
+}
+
+fn query_call_from_binding_expr(expr: &AxExpr) -> Option<(&[String], &[AxExpr])> {
+    match expr {
+        AxExpr::Call { path, args } => Some((path.as_slice(), args.as_slice())),
+        AxExpr::Member { object, .. } | AxExpr::OptionalMember { object, .. } => {
+            query_call_from_binding_expr(object)
+        }
+        _ => None,
+    }
 }
 
 fn is_query_function_path(path: &[String]) -> bool {
@@ -4714,7 +4724,7 @@ fn check_query_function_call_contracts(root: &Path) -> Result<Vec<CheckDiagnosti
             let AxStatement::Data(binding) = statement else {
                 continue;
             };
-            let AxExpr::Call { path, args } = &binding.value else {
+            let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
                 continue;
             };
             let Some(name) = path.first() else {
@@ -7169,6 +7179,7 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::HeadValueRequiresSingleChild { .. }
         | AxConvertV2Error::HeadValueInvalidChild { .. }
         | AxConvertV2Error::HeadTagChildrenNotSupported { .. }
+        | AxConvertV2Error::DuplicateClassAttr { .. }
         | AxConvertV2Error::InvalidStateInitializer { .. }
         | AxConvertV2Error::UnknownStateBinding { .. }
         | AxConvertV2Error::InvalidStateBinding { .. } => Some(1),
@@ -12951,6 +12962,24 @@ mod tests {
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::default(),
         }
+    }
+
+    #[test]
+    fn data_binding_report_accepts_query_call_member_sources() {
+        let statement = AxStatement::data(
+            "posts",
+            AxExpr::call(["loadDashboard"], [AxExpr::string("published")]).member("posts"),
+        );
+
+        let report =
+            data_binding_report_from_statement(&statement).expect("member query should report");
+
+        assert_eq!(report.name, "posts");
+        assert_eq!(report.source, r#"loadDashboard("published").posts"#);
+        assert_eq!(
+            report.query_key,
+            vec!["posts".to_string(), r#""published""#.to_string()]
+        );
     }
 
     fn seed_test_sqlite_posts(root: &Path) {
@@ -18844,6 +18873,29 @@ let posts: List<Post>> = load PostsList
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 4);
         assert_eq!(diagnostics[0].code, "axonyx-type");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_pages_v2_const_declarations() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Posts() {
+  data posts = loadPosts()
+  const hasPosts = posts.length > 0
+
+  return ASX {
+    <If when={hasPosts}>
+      <Copy>Posts are ready</Copy>
+    </If>
+  }
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
     }
 
     #[test]
