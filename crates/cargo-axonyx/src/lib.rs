@@ -6449,6 +6449,7 @@ fn collect_env_refs_from_return(
             collect_env_refs_from_expr(target, refs);
         }
         axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NoContent
+        | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NotFound
         | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Ok => {}
     }
 }
