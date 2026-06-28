@@ -691,6 +691,7 @@ struct RouteManifestItem {
     method: Option<String>,
     returns: Option<String>,
     responses: Vec<ApiResponseReport>,
+    auth: Vec<ApiAuthReport>,
     file: String,
     layouts: Vec<String>,
     loader: Option<String>,
@@ -718,6 +719,7 @@ struct ApiRouteReport {
     route: String,
     returns: Option<String>,
     responses: Vec<ApiResponseReport>,
+    auth: Vec<ApiAuthReport>,
     file: String,
     params: Vec<String>,
     inputs: Vec<ActionInputReport>,
@@ -728,6 +730,11 @@ struct ApiRouteReport {
 struct ApiResponseReport {
     status: u16,
     description: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApiAuthReport {
+    scheme: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3412,6 +3419,7 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
             route: route.route,
             returns: route.returns,
             responses: route.responses,
+            auth: route.auth,
             file: route.file,
             params: route.params,
             inputs: route.inputs,
@@ -8260,6 +8268,7 @@ fn app_route_manifest_item(
         method: None,
         returns: None,
         responses: Vec::new(),
+        auth: Vec::new(),
         file: display_relative_path(root, page_path),
         layouts,
         loader: loader_path
@@ -8299,12 +8308,14 @@ fn collect_backend_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>>
 
             let hooks = route_hooks_from_body(&route.body);
             let responses = route_responses_from_body(&route.body);
+            let auth = route_auth_from_body(&route.body);
             routes.push(RouteManifestItem {
                 kind: "api",
                 route: route.path.clone(),
                 method: Some(route.method),
                 returns: route.returns,
                 responses,
+                auth,
                 file: format!("routes/{relative_path}"),
                 layouts: Vec::new(),
                 loader: None,
@@ -8344,6 +8355,44 @@ fn route_hooks_from_body(body: &[AxBackendStmt]) -> Vec<RouteHookReport> {
             })
         })
         .collect()
+}
+
+fn route_auth_from_body(body: &[AxBackendStmt]) -> Vec<ApiAuthReport> {
+    let mut schemes = std::collections::BTreeSet::<&'static str>::new();
+
+    for stmt in body {
+        if let AxBackendStmt::Require(requirement) = stmt {
+            collect_auth_from_expr(&requirement.value, &mut schemes);
+        }
+    }
+
+    schemes
+        .into_iter()
+        .map(|scheme| ApiAuthReport { scheme })
+        .collect()
+}
+
+fn collect_auth_from_expr(expr: &AxExpr, schemes: &mut std::collections::BTreeSet<&'static str>) {
+    if expr_is_member_path(expr, &["Auth", "signedSession"]) {
+        schemes.insert("signedSession");
+    }
+}
+
+fn expr_is_member_path(expr: &AxExpr, expected: &[&str]) -> bool {
+    let mut out = Vec::new();
+    collect_expr_member_path(expr, &mut out);
+    out.iter().map(String::as_str).eq(expected.iter().copied())
+}
+
+fn collect_expr_member_path(expr: &AxExpr, out: &mut Vec<String>) {
+    match expr {
+        AxExpr::Identifier(value) => out.push(value.clone()),
+        AxExpr::Member { object, property } | AxExpr::OptionalMember { object, property } => {
+            collect_expr_member_path(object, out);
+            out.push(property.clone());
+        }
+        _ => {}
+    }
 }
 
 fn route_responses_from_body(body: &[AxBackendStmt]) -> Vec<ApiResponseReport> {
@@ -8714,6 +8763,17 @@ fn print_routes_text(report: &RoutesReport) {
                     .join(",")
             ));
         }
+        if !route.auth.is_empty() {
+            details.push(format!(
+                "auth={}",
+                route
+                    .auth
+                    .iter()
+                    .map(route_auth_label)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
         details.push(format!("file={}", route.file));
         if !route.layouts.is_empty() {
             details.push(format!("layouts={}", route.layouts.len()));
@@ -8758,6 +8818,10 @@ fn route_hook_label(hook: &RouteHookReport) -> String {
     format!("{}:{}", hook.phase, hook.value)
 }
 
+fn route_auth_label(auth: &ApiAuthReport) -> String {
+    auth.scheme.to_string()
+}
+
 fn route_input_label(input: &ActionInputReport) -> String {
     let marker = if input.optional { "?" } else { "" };
     input
@@ -8786,6 +8850,17 @@ fn print_api_text(report: &ApiReport) {
                     .responses
                     .iter()
                     .map(|response| response.status.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        if !route.auth.is_empty() {
+            details.push(format!(
+                "auth={}",
+                route
+                    .auth
+                    .iter()
+                    .map(route_auth_label)
                     .collect::<Vec<_>>()
                     .join(",")
             ));
@@ -8887,10 +8962,21 @@ fn api_report_openapi_value(report: &ApiReport) -> serde_json::Value {
         "paths": paths
     });
 
-    if !report.schemas.is_empty() {
-        document["components"] = serde_json::json!({
-            "schemas": openapi_components_schemas(&report.schemas)
-        });
+    if !report.schemas.is_empty() || api_report_uses_auth(report) {
+        let mut components = serde_json::Map::new();
+        if !report.schemas.is_empty() {
+            components.insert(
+                "schemas".to_string(),
+                openapi_components_schemas(&report.schemas),
+            );
+        }
+        if api_report_uses_auth(report) {
+            components.insert(
+                "securitySchemes".to_string(),
+                openapi_security_schemes(report),
+            );
+        }
+        document["components"] = serde_json::Value::Object(components);
     }
 
     document
@@ -8925,6 +9011,19 @@ fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
         );
     }
 
+    if !route.auth.is_empty() {
+        operation.insert(
+            "security".to_string(),
+            serde_json::Value::Array(
+                route
+                    .auth
+                    .iter()
+                    .map(openapi_security_requirement)
+                    .collect(),
+            ),
+        );
+    }
+
     let response_schema = route
         .returns
         .as_deref()
@@ -8956,6 +9055,39 @@ fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
     operation.insert("responses".to_string(), responses);
 
     serde_json::Value::Object(operation)
+}
+
+fn api_report_uses_auth(report: &ApiReport) -> bool {
+    report.routes.iter().any(|route| !route.auth.is_empty())
+}
+
+fn openapi_security_schemes(report: &ApiReport) -> serde_json::Value {
+    let mut schemes = serde_json::Map::new();
+
+    if report
+        .routes
+        .iter()
+        .flat_map(|route| route.auth.iter())
+        .any(|auth| auth.scheme == "signedSession")
+    {
+        schemes.insert(
+            "signedSessionAuth".to_string(),
+            serde_json::json!({
+                "type": "apiKey",
+                "in": "cookie",
+                "name": "session"
+            }),
+        );
+    }
+
+    serde_json::Value::Object(schemes)
+}
+
+fn openapi_security_requirement(auth: &ApiAuthReport) -> serde_json::Value {
+    match auth.scheme {
+        "signedSession" => serde_json::json!({ "signedSessionAuth": [] }),
+        other => serde_json::json!({ other: [] }),
+    }
 }
 
 fn openapi_parameters_for_route(route: &ApiRouteReport) -> Vec<serde_json::Value> {
@@ -13480,7 +13612,7 @@ route GET "/api/posts/:slug" -> Post
   return json(post)
 
 route POST "/api/posts/:slug" -> Post
-  require request.cookies.session else redirect("/login")
+  require Auth.signedSession else redirect("/login")
   return json(post)
 
 route DELETE "/api/posts/:slug"
@@ -13523,6 +13655,12 @@ route DELETE "/api/posts/:slug"
             }]
         );
         assert_eq!(
+            post_route.auth,
+            vec![ApiAuthReport {
+                scheme: "signedSession",
+            }]
+        );
+        assert_eq!(
             delete_route.responses,
             vec![
                 ApiResponseReport {
@@ -13544,6 +13682,21 @@ route DELETE "/api/posts/:slug"
         assert_eq!(
             value["paths"]["/api/posts/{slug}"]["post"]["responses"]["303"]["description"],
             "See Other"
+        );
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["post"]["security"][0]["signedSessionAuth"]
+                .as_array()
+                .expect("signed session security value should be array")
+                .len(),
+            0
+        );
+        assert_eq!(
+            value["components"]["securitySchemes"]["signedSessionAuth"]["in"],
+            "cookie"
+        );
+        assert_eq!(
+            value["components"]["securitySchemes"]["signedSessionAuth"]["name"],
+            "session"
         );
         assert_eq!(
             value["paths"]["/api/posts/{slug}"]["delete"]["responses"]["204"]["description"],
@@ -13568,6 +13721,7 @@ route DELETE "/api/posts/:slug"
                     status: 404,
                     description: "Not Found",
                 }],
+                auth: Vec::new(),
                 file: "routes/api/posts.ax".to_string(),
                 params: vec!["slug".to_string()],
                 inputs: vec![
