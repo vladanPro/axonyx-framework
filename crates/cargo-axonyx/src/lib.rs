@@ -690,6 +690,7 @@ struct RouteManifestItem {
     route: String,
     method: Option<String>,
     returns: Option<String>,
+    responses: Vec<ApiResponseReport>,
     file: String,
     layouts: Vec<String>,
     loader: Option<String>,
@@ -716,10 +717,17 @@ struct ApiRouteReport {
     method: String,
     route: String,
     returns: Option<String>,
+    responses: Vec<ApiResponseReport>,
     file: String,
     params: Vec<String>,
     inputs: Vec<ActionInputReport>,
     hooks: Vec<RouteHookReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApiResponseReport {
+    status: u16,
+    description: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3403,6 +3411,7 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
             method: route.method.unwrap_or_else(|| "*".to_string()),
             route: route.route,
             returns: route.returns,
+            responses: route.responses,
             file: route.file,
             params: route.params,
             inputs: route.inputs,
@@ -8250,6 +8259,7 @@ fn app_route_manifest_item(
         route,
         method: None,
         returns: None,
+        responses: Vec::new(),
         file: display_relative_path(root, page_path),
         layouts,
         loader: loader_path
@@ -8288,11 +8298,13 @@ fn collect_backend_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>>
             };
 
             let hooks = route_hooks_from_body(&route.body);
+            let responses = route_responses_from_body(&route.body);
             routes.push(RouteManifestItem {
                 kind: "api",
                 route: route.path.clone(),
                 method: Some(route.method),
                 returns: route.returns,
+                responses,
                 file: format!("routes/{relative_path}"),
                 layouts: Vec::new(),
                 loader: None,
@@ -8332,6 +8344,40 @@ fn route_hooks_from_body(body: &[AxBackendStmt]) -> Vec<RouteHookReport> {
             })
         })
         .collect()
+}
+
+fn route_responses_from_body(body: &[AxBackendStmt]) -> Vec<ApiResponseReport> {
+    let mut responses = Vec::new();
+
+    if body.iter().any(stmt_can_return_not_found) {
+        responses.push(ApiResponseReport {
+            status: 404,
+            description: "Not Found",
+        });
+    }
+
+    responses
+}
+
+fn stmt_can_return_not_found(stmt: &AxBackendStmt) -> bool {
+    match stmt {
+        AxBackendStmt::Return(value) => return_is_not_found(value),
+        AxBackendStmt::Require(requirement) => requirement
+            .fallback
+            .as_ref()
+            .is_some_and(return_is_not_found),
+        _ => false,
+    }
+}
+
+fn return_is_not_found(value: &AxReturn) -> bool {
+    matches!(
+        value,
+        AxReturn::Expr(AxExpr::Call { path, args })
+            if args.is_empty()
+                && path.len() == 1
+                && matches!(path[0].as_str(), "notFound" | "not_found")
+    )
 }
 
 fn route_pattern_from_segments(segments: &[&str]) -> String {
@@ -8617,6 +8663,17 @@ fn print_routes_text(report: &RoutesReport) {
         if let Some(returns) = &route.returns {
             details.push(format!("returns={returns}"));
         }
+        if !route.responses.is_empty() {
+            details.push(format!(
+                "responses={}",
+                route
+                    .responses
+                    .iter()
+                    .map(|response| response.status.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
         details.push(format!("file={}", route.file));
         if !route.layouts.is_empty() {
             details.push(format!("layouts={}", route.layouts.len()));
@@ -8681,6 +8738,17 @@ fn print_api_text(report: &ApiReport) {
         let mut details = vec![format!("file={}", route.file)];
         if let Some(returns) = &route.returns {
             details.push(format!("returns={returns}"));
+        }
+        if !route.responses.is_empty() {
+            details.push(format!(
+                "responses={}",
+                route
+                    .responses
+                    .iter()
+                    .map(|response| response.status.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
         }
         if !route.params.is_empty() {
             details.push(format!("params={}", route.params.join(",")));
@@ -8823,19 +8891,29 @@ fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
         .map(openapi_schema_for_ax_type)
         .unwrap_or_else(|| serde_json::json!({ "type": "object" }));
 
-    operation.insert(
-        "responses".to_string(),
-        serde_json::json!({
-            "200": {
-                "description": "OK",
-                "content": {
-                    "application/json": {
-                        "schema": response_schema
-                    }
+    let mut responses = serde_json::json!({
+        "200": {
+            "description": "OK",
+            "content": {
+                "application/json": {
+                    "schema": response_schema
                 }
             }
-        }),
-    );
+        }
+    });
+    if let serde_json::Value::Object(responses) = &mut responses {
+        for response in &route.responses {
+            responses
+                .entry(response.status.to_string())
+                .or_insert_with(|| {
+                    serde_json::json!({
+                        "description": response.description
+                    })
+                });
+        }
+    }
+
+    operation.insert("responses".to_string(), responses);
 
     serde_json::Value::Object(operation)
 }
@@ -13350,12 +13428,51 @@ route POST "/api/posts" -> Post
     }
 
     #[test]
+    fn api_report_collects_not_found_response_contracts() {
+        let root = make_temp_dir("api-report-not-found");
+        fs::create_dir_all(root.join("routes/api/posts/[slug]"))
+            .expect("api route dir should exist");
+        fs::write(
+            root.join("routes/api/posts/[slug]/post.ax"),
+            r#"
+route GET "/api/posts/:slug" -> Post
+  require params.slug else notFound()
+  return json(post)
+"#,
+        )
+        .expect("route source should write");
+
+        let report = collect_api_report(&root).expect("api report should collect");
+
+        assert_eq!(report.routes.len(), 1);
+        assert_eq!(
+            report.routes[0].responses,
+            vec![ApiResponseReport {
+                status: 404,
+                description: "Not Found",
+            }]
+        );
+
+        let value = api_report_openapi_value(&report);
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["get"]["responses"]["404"]["description"],
+            "Not Found"
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn api_report_can_render_openapi_document() {
         let report = ApiReport {
             routes: vec![ApiRouteReport {
                 method: "POST".to_string(),
                 route: "/api/posts/:slug".to_string(),
                 returns: Some("Post[]".to_string()),
+                responses: vec![ApiResponseReport {
+                    status: 404,
+                    description: "Not Found",
+                }],
                 file: "routes/api/posts.ax".to_string(),
                 params: vec!["slug".to_string()],
                 inputs: vec![
@@ -13409,6 +13526,7 @@ route POST "/api/posts" -> Post
             operation["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
             "#/components/schemas/Post"
         );
+        assert_eq!(operation["responses"]["404"]["description"], "Not Found");
         assert_eq!(
             value["components"]["schemas"]["Post"]["properties"]["title"]["type"],
             "string"
