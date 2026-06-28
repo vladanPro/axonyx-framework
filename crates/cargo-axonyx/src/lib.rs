@@ -1222,6 +1222,7 @@ fn collect_db_check_report(root: &Path, url_override: Option<&str>) -> Result<Db
             }],
             limit: None,
             offset: None,
+            mode: ax_backend_runtime::AxQueryMode::Many,
         },
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
