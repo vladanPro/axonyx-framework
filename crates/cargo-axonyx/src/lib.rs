@@ -8347,37 +8347,77 @@ fn route_hooks_from_body(body: &[AxBackendStmt]) -> Vec<RouteHookReport> {
 }
 
 fn route_responses_from_body(body: &[AxBackendStmt]) -> Vec<ApiResponseReport> {
-    let mut responses = Vec::new();
+    let mut responses = std::collections::BTreeMap::<u16, &'static str>::new();
 
-    if body.iter().any(stmt_can_return_not_found) {
-        responses.push(ApiResponseReport {
-            status: 404,
-            description: "Not Found",
-        });
+    for stmt in body {
+        collect_responses_from_stmt(stmt, &mut responses);
     }
 
     responses
+        .into_iter()
+        .map(|(status, description)| ApiResponseReport {
+            status,
+            description,
+        })
+        .collect()
 }
 
-fn stmt_can_return_not_found(stmt: &AxBackendStmt) -> bool {
+fn collect_responses_from_stmt(
+    stmt: &AxBackendStmt,
+    responses: &mut std::collections::BTreeMap<u16, &'static str>,
+) {
     match stmt {
-        AxBackendStmt::Return(value) => return_is_not_found(value),
-        AxBackendStmt::Require(requirement) => requirement
-            .fallback
-            .as_ref()
-            .is_some_and(return_is_not_found),
-        _ => false,
+        AxBackendStmt::Return(value) => collect_responses_from_return(value, responses),
+        AxBackendStmt::Require(requirement) => {
+            if let Some(fallback) = &requirement.fallback {
+                collect_responses_from_return(fallback, responses);
+            }
+        }
+        _ => {}
     }
 }
 
-fn return_is_not_found(value: &AxReturn) -> bool {
-    matches!(
-        value,
-        AxReturn::Expr(AxExpr::Call { path, args })
-            if args.is_empty()
-                && path.len() == 1
-                && matches!(path[0].as_str(), "notFound" | "not_found")
-    )
+fn collect_responses_from_return(
+    value: &AxReturn,
+    responses: &mut std::collections::BTreeMap<u16, &'static str>,
+) {
+    let AxReturn::Expr(AxExpr::Call { path, args }) = value else {
+        return;
+    };
+    let Some(name) = path.last().map(String::as_str) else {
+        return;
+    };
+
+    match name {
+        "notFound" | "not_found" if args.is_empty() => {
+            responses.insert(404, "Not Found");
+        }
+        "noContent" | "no_content" if args.is_empty() => {
+            responses.insert(204, "No Content");
+        }
+        "redirect" if args.len() == 1 => {
+            responses.insert(303, "See Other");
+        }
+        "redirect" if args.len() == 2 => {
+            if let AxExpr::Number(status) = &args[0] {
+                if let Ok(status) = u16::try_from(*status) {
+                    responses.insert(status, redirect_response_description(status));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redirect_response_description(status: u16) -> &'static str {
+    match status {
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        _ => "Redirect",
+    }
 }
 
 fn route_pattern_from_segments(segments: &[&str]) -> String {
@@ -13438,25 +13478,80 @@ route POST "/api/posts" -> Post
 route GET "/api/posts/:slug" -> Post
   require params.slug else notFound()
   return json(post)
+
+route POST "/api/posts/:slug" -> Post
+  require request.cookies.session else redirect("/login")
+  return json(post)
+
+route DELETE "/api/posts/:slug"
+  require request.cookies.session else redirect(307, "/login")
+  return noContent()
 "#,
         )
         .expect("route source should write");
 
         let report = collect_api_report(&root).expect("api report should collect");
 
-        assert_eq!(report.routes.len(), 1);
+        assert_eq!(report.routes.len(), 3);
+        let get_route = report
+            .routes
+            .iter()
+            .find(|route| route.method == "GET")
+            .expect("GET route should exist");
+        let post_route = report
+            .routes
+            .iter()
+            .find(|route| route.method == "POST")
+            .expect("POST route should exist");
+        let delete_route = report
+            .routes
+            .iter()
+            .find(|route| route.method == "DELETE")
+            .expect("DELETE route should exist");
         assert_eq!(
-            report.routes[0].responses,
+            get_route.responses,
             vec![ApiResponseReport {
                 status: 404,
                 description: "Not Found",
             }]
+        );
+        assert_eq!(
+            post_route.responses,
+            vec![ApiResponseReport {
+                status: 303,
+                description: "See Other",
+            }]
+        );
+        assert_eq!(
+            delete_route.responses,
+            vec![
+                ApiResponseReport {
+                    status: 204,
+                    description: "No Content",
+                },
+                ApiResponseReport {
+                    status: 307,
+                    description: "Temporary Redirect",
+                },
+            ]
         );
 
         let value = api_report_openapi_value(&report);
         assert_eq!(
             value["paths"]["/api/posts/{slug}"]["get"]["responses"]["404"]["description"],
             "Not Found"
+        );
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["post"]["responses"]["303"]["description"],
+            "See Other"
+        );
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["delete"]["responses"]["204"]["description"],
+            "No Content"
+        );
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["delete"]["responses"]["307"]["description"],
+            "Temporary Redirect"
         );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
