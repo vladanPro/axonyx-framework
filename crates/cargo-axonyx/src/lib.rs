@@ -8755,24 +8755,11 @@ fn print_routes_text(report: &RoutesReport) {
         if !route.responses.is_empty() {
             details.push(format!(
                 "responses={}",
-                route
-                    .responses
-                    .iter()
-                    .map(|response| response.status.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
+                route_responses_label(&route.responses)
             ));
         }
         if !route.auth.is_empty() {
-            details.push(format!(
-                "auth={}",
-                route
-                    .auth
-                    .iter()
-                    .map(route_auth_label)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ));
+            details.push(format!("auth={}", route_auths_label(&route.auth)));
         }
         details.push(format!("file={}", route.file));
         if !route.layouts.is_empty() {
@@ -8818,6 +8805,21 @@ fn route_hook_label(hook: &RouteHookReport) -> String {
     format!("{}:{}", hook.phase, hook.value)
 }
 
+fn route_responses_label(responses: &[ApiResponseReport]) -> String {
+    responses
+        .iter()
+        .map(|response| response.status.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn route_auths_label(auth: &[ApiAuthReport]) -> String {
+    auth.iter()
+        .map(route_auth_label)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn route_auth_label(auth: &ApiAuthReport) -> String {
     auth.scheme.to_string()
 }
@@ -8846,24 +8848,11 @@ fn print_api_text(report: &ApiReport) {
         if !route.responses.is_empty() {
             details.push(format!(
                 "responses={}",
-                route
-                    .responses
-                    .iter()
-                    .map(|response| response.status.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
+                route_responses_label(&route.responses)
             ));
         }
         if !route.auth.is_empty() {
-            details.push(format!(
-                "auth={}",
-                route
-                    .auth
-                    .iter()
-                    .map(route_auth_label)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ));
+            details.push(format!("auth={}", route_auths_label(&route.auth)));
         }
         if !route.params.is_empty() {
             details.push(format!("params={}", route.params.join(",")));
@@ -8912,6 +8901,12 @@ fn print_api_schema_text(report: &ApiReport) {
         println!("// {} {}", route.method, route.route);
         if let Some(returns) = &route.returns {
             println!("// response: {}", ax_return_schema_type(returns));
+        }
+        if !route.responses.is_empty() {
+            println!("// responses: {}", route_responses_label(&route.responses));
+        }
+        if !route.auth.is_empty() {
+            println!("// auth: {}", route_auths_label(&route.auth));
         }
         println!("type {}Request {{", api_route_type_name(route));
         if route.inputs.is_empty() {
@@ -13708,6 +13703,29 @@ route DELETE "/api/posts/:slug"
         );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn api_report_contract_labels_are_stable() {
+        assert_eq!(
+            route_responses_label(&[
+                ApiResponseReport {
+                    status: 204,
+                    description: "No Content",
+                },
+                ApiResponseReport {
+                    status: 303,
+                    description: "See Other",
+                },
+            ]),
+            "204,303"
+        );
+        assert_eq!(
+            route_auths_label(&[ApiAuthReport {
+                scheme: "signedSession",
+            }]),
+            "signedSession"
+        );
     }
 
     #[test]
