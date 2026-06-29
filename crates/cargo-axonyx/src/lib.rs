@@ -58,7 +58,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.41";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.42";
 const AXONYX_UI_VERSION: &str = "0.0.48";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -690,6 +690,8 @@ struct RouteManifestItem {
     route: String,
     method: Option<String>,
     returns: Option<String>,
+    responses: Vec<ApiResponseReport>,
+    auth: Vec<ApiAuthReport>,
     file: String,
     layouts: Vec<String>,
     loader: Option<String>,
@@ -716,10 +718,23 @@ struct ApiRouteReport {
     method: String,
     route: String,
     returns: Option<String>,
+    responses: Vec<ApiResponseReport>,
+    auth: Vec<ApiAuthReport>,
     file: String,
     params: Vec<String>,
     inputs: Vec<ActionInputReport>,
     hooks: Vec<RouteHookReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApiResponseReport {
+    status: u16,
+    description: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ApiAuthReport {
+    scheme: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1222,6 +1237,7 @@ fn collect_db_check_report(root: &Path, url_override: Option<&str>) -> Result<Db
             }],
             limit: None,
             offset: None,
+            mode: ax_backend_runtime::AxQueryMode::Many,
         },
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1706,6 +1722,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_request_logging_check(root));
     checks.push(doctor_error_boundaries_check(root));
     checks.push(doctor_aegis_config_check(root));
+    checks.push(doctor_api_contracts_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
     let ui_enabled = axonyx_source
@@ -1917,6 +1934,49 @@ fn doctor_aegis_config_check(root: &Path) -> DoctorCheck {
             message: "aegis.toml is missing; `cargo ax test` has no route QA config.".to_string(),
             hint: Some("Run `aegis init` or recreate the starter with the latest create-axonyx."),
         }
+    }
+}
+
+fn doctor_api_contracts_check(root: &Path) -> DoctorCheck {
+    match collect_api_report(root) {
+        Ok(report) => {
+            let routes = report.routes.len();
+            let typed = report
+                .routes
+                .iter()
+                .filter(|route| route.returns.is_some())
+                .count();
+            let auth_guarded = report
+                .routes
+                .iter()
+                .filter(|route| !route.auth.is_empty())
+                .count();
+            let with_response_metadata = report
+                .routes
+                .iter()
+                .filter(|route| !route.responses.is_empty())
+                .count();
+
+            DoctorCheck {
+                code: "api-contracts",
+                severity: DoctorSeverity::Ok,
+                message: format!(
+                    "{} API route{}, {} typed, {} auth-guarded, {} with response metadata; OpenAPI export ready.",
+                    routes,
+                    if routes == 1 { "" } else { "s" },
+                    typed,
+                    auth_guarded,
+                    with_response_metadata
+                ),
+                hint: None,
+            }
+        }
+        Err(error) => DoctorCheck {
+            code: "api-contracts",
+            severity: DoctorSeverity::Error,
+            message: format!("API contracts could not be collected: {error}"),
+            hint: Some("Run `cargo ax api` or `cargo ax check` to inspect route contract errors."),
+        },
     }
 }
 
@@ -2538,11 +2598,11 @@ fn doctor_framework_layer_status_lines(checks: &[DoctorCheck]) -> Vec<String> {
         ),
         doctor_layer_line(
             "Axonyx Server",
-            "server-body-limit",
+            "api-contracts",
             checks,
-            "request limits, streaming config, and hosted start checks are visible",
-            "server config needs attention",
-            "server config could not be fully checked",
+            "API contracts, route metadata, and OpenAPI export are visible",
+            "API/server contract metadata needs attention",
+            "API/server contract metadata could not be fully checked",
         ),
         doctor_layer_line(
             "Axonyx State",
@@ -3402,6 +3462,8 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
             method: route.method.unwrap_or_else(|| "*".to_string()),
             route: route.route,
             returns: route.returns,
+            responses: route.responses,
+            auth: route.auth,
             file: route.file,
             params: route.params,
             inputs: route.inputs,
@@ -6448,6 +6510,7 @@ fn collect_env_refs_from_return(
             collect_env_refs_from_expr(target, refs);
         }
         axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NoContent
+        | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NotFound
         | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Ok => {}
     }
 }
@@ -8248,6 +8311,8 @@ fn app_route_manifest_item(
         route,
         method: None,
         returns: None,
+        responses: Vec::new(),
+        auth: Vec::new(),
         file: display_relative_path(root, page_path),
         layouts,
         loader: loader_path
@@ -8286,11 +8351,15 @@ fn collect_backend_route_manifest(root: &Path) -> Result<Vec<RouteManifestItem>>
             };
 
             let hooks = route_hooks_from_body(&route.body);
+            let responses = route_responses_from_body(&route.body);
+            let auth = route_auth_from_body(&route.body);
             routes.push(RouteManifestItem {
                 kind: "api",
                 route: route.path.clone(),
                 method: Some(route.method),
                 returns: route.returns,
+                responses,
+                auth,
                 file: format!("routes/{relative_path}"),
                 layouts: Vec::new(),
                 loader: None,
@@ -8330,6 +8399,118 @@ fn route_hooks_from_body(body: &[AxBackendStmt]) -> Vec<RouteHookReport> {
             })
         })
         .collect()
+}
+
+fn route_auth_from_body(body: &[AxBackendStmt]) -> Vec<ApiAuthReport> {
+    let mut schemes = std::collections::BTreeSet::<&'static str>::new();
+
+    for stmt in body {
+        if let AxBackendStmt::Require(requirement) = stmt {
+            collect_auth_from_expr(&requirement.value, &mut schemes);
+        }
+    }
+
+    schemes
+        .into_iter()
+        .map(|scheme| ApiAuthReport { scheme })
+        .collect()
+}
+
+fn collect_auth_from_expr(expr: &AxExpr, schemes: &mut std::collections::BTreeSet<&'static str>) {
+    if expr_is_member_path(expr, &["Auth", "signedSession"]) {
+        schemes.insert("signedSession");
+    }
+}
+
+fn expr_is_member_path(expr: &AxExpr, expected: &[&str]) -> bool {
+    let mut out = Vec::new();
+    collect_expr_member_path(expr, &mut out);
+    out.iter().map(String::as_str).eq(expected.iter().copied())
+}
+
+fn collect_expr_member_path(expr: &AxExpr, out: &mut Vec<String>) {
+    match expr {
+        AxExpr::Identifier(value) => out.push(value.clone()),
+        AxExpr::Member { object, property } | AxExpr::OptionalMember { object, property } => {
+            collect_expr_member_path(object, out);
+            out.push(property.clone());
+        }
+        _ => {}
+    }
+}
+
+fn route_responses_from_body(body: &[AxBackendStmt]) -> Vec<ApiResponseReport> {
+    let mut responses = std::collections::BTreeMap::<u16, &'static str>::new();
+
+    for stmt in body {
+        collect_responses_from_stmt(stmt, &mut responses);
+    }
+
+    responses
+        .into_iter()
+        .map(|(status, description)| ApiResponseReport {
+            status,
+            description,
+        })
+        .collect()
+}
+
+fn collect_responses_from_stmt(
+    stmt: &AxBackendStmt,
+    responses: &mut std::collections::BTreeMap<u16, &'static str>,
+) {
+    match stmt {
+        AxBackendStmt::Return(value) => collect_responses_from_return(value, responses),
+        AxBackendStmt::Require(requirement) => {
+            if let Some(fallback) = &requirement.fallback {
+                collect_responses_from_return(fallback, responses);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_responses_from_return(
+    value: &AxReturn,
+    responses: &mut std::collections::BTreeMap<u16, &'static str>,
+) {
+    let AxReturn::Expr(AxExpr::Call { path, args }) = value else {
+        return;
+    };
+    let Some(name) = path.last().map(String::as_str) else {
+        return;
+    };
+
+    match name {
+        "notFound" | "not_found" if args.is_empty() => {
+            responses.insert(404, "Not Found");
+        }
+        "noContent" | "no_content" if args.is_empty() => {
+            responses.insert(204, "No Content");
+        }
+        "redirect" if args.len() == 1 => {
+            responses.insert(303, "See Other");
+        }
+        "redirect" if args.len() == 2 => {
+            if let AxExpr::Number(status) = &args[0] {
+                if let Ok(status) = u16::try_from(*status) {
+                    responses.insert(status, redirect_response_description(status));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redirect_response_description(status: u16) -> &'static str {
+    match status {
+        301 => "Moved Permanently",
+        302 => "Found",
+        303 => "See Other",
+        307 => "Temporary Redirect",
+        308 => "Permanent Redirect",
+        _ => "Redirect",
+    }
 }
 
 fn route_pattern_from_segments(segments: &[&str]) -> String {
@@ -8615,6 +8796,15 @@ fn print_routes_text(report: &RoutesReport) {
         if let Some(returns) = &route.returns {
             details.push(format!("returns={returns}"));
         }
+        if !route.responses.is_empty() {
+            details.push(format!(
+                "responses={}",
+                route_responses_label(&route.responses)
+            ));
+        }
+        if !route.auth.is_empty() {
+            details.push(format!("auth={}", route_auths_label(&route.auth)));
+        }
         details.push(format!("file={}", route.file));
         if !route.layouts.is_empty() {
             details.push(format!("layouts={}", route.layouts.len()));
@@ -8659,6 +8849,25 @@ fn route_hook_label(hook: &RouteHookReport) -> String {
     format!("{}:{}", hook.phase, hook.value)
 }
 
+fn route_responses_label(responses: &[ApiResponseReport]) -> String {
+    responses
+        .iter()
+        .map(|response| response.status.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn route_auths_label(auth: &[ApiAuthReport]) -> String {
+    auth.iter()
+        .map(route_auth_label)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn route_auth_label(auth: &ApiAuthReport) -> String {
+    auth.scheme.to_string()
+}
+
 fn route_input_label(input: &ActionInputReport) -> String {
     let marker = if input.optional { "?" } else { "" };
     input
@@ -8679,6 +8888,15 @@ fn print_api_text(report: &ApiReport) {
         let mut details = vec![format!("file={}", route.file)];
         if let Some(returns) = &route.returns {
             details.push(format!("returns={returns}"));
+        }
+        if !route.responses.is_empty() {
+            details.push(format!(
+                "responses={}",
+                route_responses_label(&route.responses)
+            ));
+        }
+        if !route.auth.is_empty() {
+            details.push(format!("auth={}", route_auths_label(&route.auth)));
         }
         if !route.params.is_empty() {
             details.push(format!("params={}", route.params.join(",")));
@@ -8727,6 +8945,12 @@ fn print_api_schema_text(report: &ApiReport) {
         println!("// {} {}", route.method, route.route);
         if let Some(returns) = &route.returns {
             println!("// response: {}", ax_return_schema_type(returns));
+        }
+        if !route.responses.is_empty() {
+            println!("// responses: {}", route_responses_label(&route.responses));
+        }
+        if !route.auth.is_empty() {
+            println!("// auth: {}", route_auths_label(&route.auth));
         }
         println!("type {}Request {{", api_route_type_name(route));
         if route.inputs.is_empty() {
@@ -8777,10 +9001,21 @@ fn api_report_openapi_value(report: &ApiReport) -> serde_json::Value {
         "paths": paths
     });
 
-    if !report.schemas.is_empty() {
-        document["components"] = serde_json::json!({
-            "schemas": openapi_components_schemas(&report.schemas)
-        });
+    if !report.schemas.is_empty() || api_report_uses_auth(report) {
+        let mut components = serde_json::Map::new();
+        if !report.schemas.is_empty() {
+            components.insert(
+                "schemas".to_string(),
+                openapi_components_schemas(&report.schemas),
+            );
+        }
+        if api_report_uses_auth(report) {
+            components.insert(
+                "securitySchemes".to_string(),
+                openapi_security_schemes(report),
+            );
+        }
+        document["components"] = serde_json::Value::Object(components);
     }
 
     document
@@ -8815,27 +9050,83 @@ fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
         );
     }
 
+    if !route.auth.is_empty() {
+        operation.insert(
+            "security".to_string(),
+            serde_json::Value::Array(
+                route
+                    .auth
+                    .iter()
+                    .map(openapi_security_requirement)
+                    .collect(),
+            ),
+        );
+    }
+
     let response_schema = route
         .returns
         .as_deref()
         .map(openapi_schema_for_ax_type)
         .unwrap_or_else(|| serde_json::json!({ "type": "object" }));
 
-    operation.insert(
-        "responses".to_string(),
-        serde_json::json!({
-            "200": {
-                "description": "OK",
-                "content": {
-                    "application/json": {
-                        "schema": response_schema
-                    }
+    let mut responses = serde_json::json!({
+        "200": {
+            "description": "OK",
+            "content": {
+                "application/json": {
+                    "schema": response_schema
                 }
             }
-        }),
-    );
+        }
+    });
+    if let serde_json::Value::Object(responses) = &mut responses {
+        for response in &route.responses {
+            responses
+                .entry(response.status.to_string())
+                .or_insert_with(|| {
+                    serde_json::json!({
+                        "description": response.description
+                    })
+                });
+        }
+    }
+
+    operation.insert("responses".to_string(), responses);
 
     serde_json::Value::Object(operation)
+}
+
+fn api_report_uses_auth(report: &ApiReport) -> bool {
+    report.routes.iter().any(|route| !route.auth.is_empty())
+}
+
+fn openapi_security_schemes(report: &ApiReport) -> serde_json::Value {
+    let mut schemes = serde_json::Map::new();
+
+    if report
+        .routes
+        .iter()
+        .flat_map(|route| route.auth.iter())
+        .any(|auth| auth.scheme == "signedSession")
+    {
+        schemes.insert(
+            "signedSessionAuth".to_string(),
+            serde_json::json!({
+                "type": "apiKey",
+                "in": "cookie",
+                "name": "session"
+            }),
+        );
+    }
+
+    serde_json::Value::Object(schemes)
+}
+
+fn openapi_security_requirement(auth: &ApiAuthReport) -> serde_json::Value {
+    match auth.scheme {
+        "signedSession" => serde_json::json!({ "signedSessionAuth": [] }),
+        other => serde_json::json!({ other: [] }),
+    }
 }
 
 fn openapi_parameters_for_route(route: &ApiRouteReport) -> Vec<serde_json::Value> {
@@ -13348,12 +13639,151 @@ route POST "/api/posts" -> Post
     }
 
     #[test]
+    fn api_report_collects_not_found_response_contracts() {
+        let root = make_temp_dir("api-report-not-found");
+        fs::create_dir_all(root.join("routes/api/posts/[slug]"))
+            .expect("api route dir should exist");
+        fs::write(
+            root.join("routes/api/posts/[slug]/post.ax"),
+            r#"
+route GET "/api/posts/:slug" -> Post
+  require params.slug else notFound()
+  return json(post)
+
+route POST "/api/posts/:slug" -> Post
+  require Auth.signedSession else redirect("/login")
+  return json(post)
+
+route DELETE "/api/posts/:slug"
+  require request.cookies.session else redirect(307, "/login")
+  return noContent()
+"#,
+        )
+        .expect("route source should write");
+
+        let report = collect_api_report(&root).expect("api report should collect");
+
+        assert_eq!(report.routes.len(), 3);
+        let get_route = report
+            .routes
+            .iter()
+            .find(|route| route.method == "GET")
+            .expect("GET route should exist");
+        let post_route = report
+            .routes
+            .iter()
+            .find(|route| route.method == "POST")
+            .expect("POST route should exist");
+        let delete_route = report
+            .routes
+            .iter()
+            .find(|route| route.method == "DELETE")
+            .expect("DELETE route should exist");
+        assert_eq!(
+            get_route.responses,
+            vec![ApiResponseReport {
+                status: 404,
+                description: "Not Found",
+            }]
+        );
+        assert_eq!(
+            post_route.responses,
+            vec![ApiResponseReport {
+                status: 303,
+                description: "See Other",
+            }]
+        );
+        assert_eq!(
+            post_route.auth,
+            vec![ApiAuthReport {
+                scheme: "signedSession",
+            }]
+        );
+        assert_eq!(
+            delete_route.responses,
+            vec![
+                ApiResponseReport {
+                    status: 204,
+                    description: "No Content",
+                },
+                ApiResponseReport {
+                    status: 307,
+                    description: "Temporary Redirect",
+                },
+            ]
+        );
+
+        let value = api_report_openapi_value(&report);
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["get"]["responses"]["404"]["description"],
+            "Not Found"
+        );
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["post"]["responses"]["303"]["description"],
+            "See Other"
+        );
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["post"]["security"][0]["signedSessionAuth"]
+                .as_array()
+                .expect("signed session security value should be array")
+                .len(),
+            0
+        );
+        assert_eq!(
+            value["components"]["securitySchemes"]["signedSessionAuth"]["in"],
+            "cookie"
+        );
+        assert_eq!(
+            value["components"]["securitySchemes"]["signedSessionAuth"]["name"],
+            "session"
+        );
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["delete"]["responses"]["204"]["description"],
+            "No Content"
+        );
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["delete"]["responses"]["307"]["description"],
+            "Temporary Redirect"
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn api_report_contract_labels_are_stable() {
+        assert_eq!(
+            route_responses_label(&[
+                ApiResponseReport {
+                    status: 204,
+                    description: "No Content",
+                },
+                ApiResponseReport {
+                    status: 303,
+                    description: "See Other",
+                },
+            ]),
+            "204,303"
+        );
+        assert_eq!(
+            route_auths_label(&[ApiAuthReport {
+                scheme: "signedSession",
+            }]),
+            "signedSession"
+        );
+    }
+
+    #[test]
     fn api_report_can_render_openapi_document() {
         let report = ApiReport {
             routes: vec![ApiRouteReport {
                 method: "POST".to_string(),
                 route: "/api/posts/:slug".to_string(),
                 returns: Some("Post[]".to_string()),
+                responses: vec![ApiResponseReport {
+                    status: 404,
+                    description: "Not Found",
+                }],
+                auth: Vec::new(),
                 file: "routes/api/posts.ax".to_string(),
                 params: vec!["slug".to_string()],
                 inputs: vec![
@@ -13407,6 +13837,7 @@ route POST "/api/posts" -> Post
             operation["responses"]["200"]["content"]["application/json"]["schema"]["items"]["$ref"],
             "#/components/schemas/Post"
         );
+        assert_eq!(operation["responses"]["404"]["description"], "Not Found");
         assert_eq!(
             value["components"]["schemas"]["Post"]["properties"]["title"]["type"],
             "string"
@@ -15880,6 +16311,45 @@ page Home
     }
 
     #[test]
+    fn doctor_reports_api_contract_summary() {
+        let root = make_temp_dir("doctor-api-contracts");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts" -> Post[]
+  return json(posts)
+
+route POST "/api/posts" -> Post
+  require Auth.signedSession else redirect("/login")
+  return json(post)
+
+route DELETE "/api/posts/:slug"
+  return noContent()
+"#,
+        )
+        .expect("api route should write");
+
+        let checks = doctor_checks(&root, None);
+        let api = checks
+            .iter()
+            .find(|check| check.code == "api-contracts")
+            .expect("api contracts check should exist");
+
+        assert_eq!(api.severity, DoctorSeverity::Ok);
+        assert!(api.message.contains("3 API routes"));
+        assert!(api.message.contains("2 typed"));
+        assert!(api.message.contains("1 auth-guarded"));
+        assert!(api.message.contains("2 with response metadata"));
+        assert!(api.message.contains("OpenAPI export ready"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn doctor_reports_page_streaming_config() {
         let root = make_temp_dir("doctor-stream-pages");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -16366,7 +16836,7 @@ axonyx-ui = { path = "vendor/axonyx-ui" }
                 hint: None,
             },
             DoctorCheck {
-                code: "server-body-limit",
+                code: "api-contracts",
                 severity: DoctorSeverity::Ok,
                 message: "ok".to_string(),
                 hint: None,
