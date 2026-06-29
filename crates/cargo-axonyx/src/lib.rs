@@ -1722,6 +1722,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_request_logging_check(root));
     checks.push(doctor_error_boundaries_check(root));
     checks.push(doctor_aegis_config_check(root));
+    checks.push(doctor_api_contracts_check(root));
 
     let axonyx_source = fs::read_to_string(root.join("Axonyx.toml")).ok();
     let ui_enabled = axonyx_source
@@ -1933,6 +1934,49 @@ fn doctor_aegis_config_check(root: &Path) -> DoctorCheck {
             message: "aegis.toml is missing; `cargo ax test` has no route QA config.".to_string(),
             hint: Some("Run `aegis init` or recreate the starter with the latest create-axonyx."),
         }
+    }
+}
+
+fn doctor_api_contracts_check(root: &Path) -> DoctorCheck {
+    match collect_api_report(root) {
+        Ok(report) => {
+            let routes = report.routes.len();
+            let typed = report
+                .routes
+                .iter()
+                .filter(|route| route.returns.is_some())
+                .count();
+            let auth_guarded = report
+                .routes
+                .iter()
+                .filter(|route| !route.auth.is_empty())
+                .count();
+            let with_response_metadata = report
+                .routes
+                .iter()
+                .filter(|route| !route.responses.is_empty())
+                .count();
+
+            DoctorCheck {
+                code: "api-contracts",
+                severity: DoctorSeverity::Ok,
+                message: format!(
+                    "{} API route{}, {} typed, {} auth-guarded, {} with response metadata; OpenAPI export ready.",
+                    routes,
+                    if routes == 1 { "" } else { "s" },
+                    typed,
+                    auth_guarded,
+                    with_response_metadata
+                ),
+                hint: None,
+            }
+        }
+        Err(error) => DoctorCheck {
+            code: "api-contracts",
+            severity: DoctorSeverity::Error,
+            message: format!("API contracts could not be collected: {error}"),
+            hint: Some("Run `cargo ax api` or `cargo ax check` to inspect route contract errors."),
+        },
     }
 }
 
@@ -2554,11 +2598,11 @@ fn doctor_framework_layer_status_lines(checks: &[DoctorCheck]) -> Vec<String> {
         ),
         doctor_layer_line(
             "Axonyx Server",
-            "server-body-limit",
+            "api-contracts",
             checks,
-            "request limits, streaming config, and hosted start checks are visible",
-            "server config needs attention",
-            "server config could not be fully checked",
+            "API contracts, route metadata, and OpenAPI export are visible",
+            "API/server contract metadata needs attention",
+            "API/server contract metadata could not be fully checked",
         ),
         doctor_layer_line(
             "Axonyx State",
@@ -16267,6 +16311,45 @@ page Home
     }
 
     #[test]
+    fn doctor_reports_api_contract_summary() {
+        let root = make_temp_dir("doctor-api-contracts");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts" -> Post[]
+  return json(posts)
+
+route POST "/api/posts" -> Post
+  require Auth.signedSession else redirect("/login")
+  return json(post)
+
+route DELETE "/api/posts/:slug"
+  return noContent()
+"#,
+        )
+        .expect("api route should write");
+
+        let checks = doctor_checks(&root, None);
+        let api = checks
+            .iter()
+            .find(|check| check.code == "api-contracts")
+            .expect("api contracts check should exist");
+
+        assert_eq!(api.severity, DoctorSeverity::Ok);
+        assert!(api.message.contains("3 API routes"));
+        assert!(api.message.contains("2 typed"));
+        assert!(api.message.contains("1 auth-guarded"));
+        assert!(api.message.contains("2 with response metadata"));
+        assert!(api.message.contains("OpenAPI export ready"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn doctor_reports_page_streaming_config() {
         let root = make_temp_dir("doctor-stream-pages");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -16753,7 +16836,7 @@ axonyx-ui = { path = "vendor/axonyx-ui" }
                 hint: None,
             },
             DoctorCheck {
-                code: "server-body-limit",
+                code: "api-contracts",
                 severity: DoctorSeverity::Ok,
                 message: "ok".to_string(),
                 hint: None,
