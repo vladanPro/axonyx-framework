@@ -885,6 +885,34 @@ struct ScopeRenderReport {
     call: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentReport {
+    files: Vec<ComponentFileReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentFileReport {
+    file: String,
+    components: Vec<ComponentDeclReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentDeclReport {
+    name: String,
+    params: Vec<String>,
+    states: Vec<String>,
+    clients: Vec<ComponentClientReport>,
+    has_style: bool,
+    has_render: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentClientReport {
+    target: String,
+    source: String,
+    path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeltReport {
     app: MeltAppReport,
@@ -895,6 +923,7 @@ struct MeltReport {
     state: StateReport,
     data: DataReport,
     scopes: ScopeReport,
+    components: ComponentReport,
     content: ContentManifest,
     diagnostics: Vec<CheckDiagnostic>,
     summary: MeltSummary,
@@ -923,6 +952,8 @@ struct MeltSummary {
     data_bindings: usize,
     scopes: usize,
     scope_states: usize,
+    components: usize,
+    component_clients: usize,
     query_keys: usize,
     query_invalidations: usize,
     content_collections: usize,
@@ -2773,6 +2804,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let state = collect_state_report(root)?;
     let data = collect_data_report(root, &routes)?;
     let scopes = collect_scope_report(root)?;
+    let components = collect_component_report(root)?;
     let content = collect_content_manifest(root)?;
     let diagnostics = check_app_sources(root)?;
     let summary = melt_summary(
@@ -2782,6 +2814,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         &state,
         &data,
         &scopes,
+        &components,
         &content,
         &diagnostics,
     );
@@ -2800,6 +2833,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         state,
         data,
         scopes,
+        components,
         content,
         diagnostics,
         summary,
@@ -2813,6 +2847,7 @@ fn melt_summary(
     state: &StateReport,
     data: &DataReport,
     scopes: &ScopeReport,
+    components: &ComponentReport,
     content: &ContentManifest,
     diagnostics: &[CheckDiagnostic],
 ) -> MeltSummary {
@@ -2830,6 +2865,17 @@ fn melt_summary(
         .flat_map(|route| &route.actions)
         .map(|action| action.invalidates.len())
         .sum();
+    let component_count = components
+        .files
+        .iter()
+        .map(|file| file.components.len())
+        .sum();
+    let component_clients = components
+        .files
+        .iter()
+        .flat_map(|file| &file.components)
+        .map(|component| component.clients.len())
+        .sum();
     MeltSummary {
         page_routes: routes
             .routes
@@ -2843,6 +2889,8 @@ fn melt_summary(
         data_bindings,
         scopes: scope_count,
         scope_states,
+        components: component_count,
+        component_clients,
         query_keys: data_bindings,
         query_invalidations,
         content_collections: content.collections.len(),
@@ -2896,6 +2944,18 @@ fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport
             name: "Axonyx Scope",
             status: if summary.scopes > 0 { "ready" } else { "empty" },
             detail: format!("{} scope container(s) discovered.", summary.scopes),
+        },
+        MeltLayerReport {
+            name: "Axonyx Components",
+            status: if summary.components > 0 {
+                "ready"
+            } else {
+                "empty"
+            },
+            detail: format!(
+                "{} component(s), {} client behavior declaration(s).",
+                summary.components, summary.component_clients
+            ),
         },
         MeltLayerReport {
             name: "Axonyx Foundry",
@@ -2960,6 +3020,129 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
     Ok(DataReport {
         routes: data_routes,
     })
+}
+
+fn collect_component_report(root: &Path) -> Result<ComponentReport> {
+    let mut paths = Vec::new();
+    collect_ax_files(&root.join("app"), &mut paths)?;
+
+    let mut files = Vec::new();
+    for path in paths {
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
+        let Some(file) = parse_component_report_source(&source) else {
+            continue;
+        };
+
+        let components = file
+            .components
+            .iter()
+            .map(|component| ComponentDeclReport {
+                name: component.name.clone(),
+                params: component
+                    .params
+                    .iter()
+                    .map(|param| match &param.default {
+                        Some(default) => format!("{}={}", param.name, default),
+                        None => param.name.clone(),
+                    })
+                    .collect(),
+                states: component
+                    .states
+                    .iter()
+                    .map(|state| match (&state.ty, &state.scope) {
+                        (Some(ty), Some(scope)) => format!("{}.{}: {}", scope, state.name, ty),
+                        (Some(ty), None) => format!("{}: {}", state.name, ty),
+                        (None, Some(scope)) => format!("{}.{}", scope, state.name),
+                        (None, None) => state.name.clone(),
+                    })
+                    .collect(),
+                clients: component
+                    .clients
+                    .iter()
+                    .map(|client| {
+                        let target = match &client.target {
+                            axonyx_core::ax_ast_v2_prelude::AxComponentClientTargetV2::Js => "JS",
+                            axonyx_core::ax_ast_v2_prelude::AxComponentClientTargetV2::Wasm => {
+                                "WASM"
+                            }
+                        }
+                        .to_string();
+                        match &client.source {
+                            axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::Inline(
+                                source,
+                            ) => ComponentClientReport {
+                                target,
+                                source: "inline".to_string(),
+                                path: Some(format!("{} bytes", source.len())),
+                            },
+                            axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(
+                                path,
+                            ) => ComponentClientReport {
+                                target,
+                                source: "file".to_string(),
+                                path: Some(path.clone()),
+                            },
+                        }
+                    })
+                    .collect(),
+                has_style: component.style.is_some(),
+                has_render: component.render.is_some(),
+            })
+            .collect::<Vec<_>>();
+
+        if components.is_empty() {
+            continue;
+        }
+
+        files.push(ComponentFileReport {
+            file: path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+            components,
+        });
+    }
+
+    Ok(ComponentReport { files })
+}
+
+fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_prelude::AxFileV2> {
+    if let Ok(file) = parse_ax_v2(source) {
+        return Some(file);
+    }
+    if !source
+        .lines()
+        .any(|line| line.trim_start().starts_with("component "))
+    {
+        return None;
+    }
+
+    let mut prefix = Vec::new();
+    let mut body = Vec::new();
+    let mut in_prefix = true;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if in_prefix
+            && (trimmed.is_empty() || trimmed.starts_with("use ") || trimmed.starts_with("import "))
+        {
+            prefix.push(line);
+        } else {
+            in_prefix = false;
+            body.push(line);
+        }
+    }
+
+    let mut synthetic = String::new();
+    if !prefix.is_empty() {
+        synthetic.push_str(&prefix.join("\n"));
+        synthetic.push_str("\n\n");
+    }
+    synthetic.push_str("page ComponentModule\n\n");
+    synthetic.push_str(&body.join("\n"));
+
+    parse_ax_v2(&synthetic).ok()
 }
 
 fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
@@ -8551,7 +8734,7 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
@@ -8559,6 +8742,8 @@ fn print_melt_text(report: &MeltReport) {
         report.summary.state_signals,
         report.summary.scopes,
         report.summary.scope_states,
+        report.summary.components,
+        report.summary.component_clients,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -8591,6 +8776,11 @@ fn print_melt_text(report: &MeltReport) {
         print_data_text(&report.data);
     }
 
+    if !report.components.files.is_empty() {
+        println!();
+        print_component_text(&report.components);
+    }
+
     if !report.scopes.files.is_empty() {
         println!();
         print_scope_text(&report.scopes);
@@ -8621,6 +8811,47 @@ fn print_data_text(report: &DataReport) {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+        }
+    }
+}
+
+fn print_component_text(report: &ComponentReport) {
+    println!("Component graph:");
+    for file in &report.files {
+        println!("  {}", file.file);
+        for component in &file.components {
+            let params = if component.params.is_empty() {
+                "params=none".to_string()
+            } else {
+                format!("params={}", component.params.join(","))
+            };
+            let states = if component.states.is_empty() {
+                "states=none".to_string()
+            } else {
+                format!("states={}", component.states.join(","))
+            };
+            let style = if component.has_style {
+                "style=yes"
+            } else {
+                "style=no"
+            };
+            let render = if component.has_render {
+                "render=ASX"
+            } else {
+                "render=legacy"
+            };
+            println!(
+                "    component {} {} {} {} {}",
+                component.name, params, states, style, render
+            );
+            for client in &component.clients {
+                println!(
+                    "      client {} source={} path={}",
+                    client.target,
+                    client.source,
+                    client.path.as_deref().unwrap_or("none")
+                );
+            }
         }
     }
 }
@@ -8668,13 +8899,15 @@ fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
         report.summary.state_signals,
         report.summary.scopes,
         report.summary.scope_states,
+        report.summary.components,
+        report.summary.component_clients,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -8761,6 +8994,11 @@ fn print_graph_text(report: &MeltReport) {
                 println!("    {} invalidates={}", action.name, labels);
             }
         }
+    }
+
+    if !report.components.files.is_empty() {
+        println!();
+        print_component_text(&report.components);
     }
 
     if !report.scopes.files.is_empty() {
@@ -9532,12 +9770,32 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
 }
 
 fn source_has_state_declaration(source: &str) -> bool {
-    source.lines().map(str::trim_start).any(|line| {
-        line.starts_with("state ")
+    let mut component_depth = 0usize;
+    for raw_line in source.lines() {
+        let line = raw_line.trim_start();
+        if component_depth > 0 {
+            component_depth = update_component_block_depth(component_depth, line);
+            continue;
+        }
+        if line.starts_with("component ") {
+            component_depth = update_component_block_depth(0, line);
+            continue;
+        }
+        if line.starts_with("state ")
             || line.starts_with("app state ")
             || line.starts_with("layout state ")
             || line.starts_with("page state ")
-    })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn update_component_block_depth(depth: usize, line: &str) -> usize {
+    let open_count = line.chars().filter(|char| *char == '{').count();
+    let close_count = line.chars().filter(|char| *char == '}').count();
+    depth.saturating_add(open_count).saturating_sub(close_count)
 }
 
 fn state_scope_for_path(root: &Path, path: &Path) -> String {
@@ -14080,6 +14338,88 @@ scope Layout <RenderLayout, setTheme> {
         assert!(json.contains("\"scope_states\":1"));
         assert!(json.contains("\"query_key\""));
         assert!(json.contains("\"invalidates\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn melt_report_collects_component_client_metadata() {
+        let root = make_temp_dir("melt-report-component-clients");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<ThemeSwitcher />\n")
+            .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switcher.ax"),
+            r#"
+component ThemeSwitcher(label = "Theme") {
+  state selected: String = "silver"
+  client JS from "./theme-switcher.client.js"
+  client WASM from "./theme-switcher.client.wasm"
+  style { recipe = "theme-switcher" }
+  render ASX {
+    <label class="ax-theme-switcher">
+      <span>{label}</span>
+      <select data-ax-behavior="theme">
+        <option value="silver">Silver</option>
+      </select>
+    </label>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+
+        let report = collect_melt_report(&root).expect("melt report should collect");
+
+        assert_eq!(report.summary.components, 1);
+        assert_eq!(report.summary.component_clients, 2);
+        assert_eq!(report.components.files.len(), 1);
+        assert_eq!(
+            report.components.files[0].file,
+            "app/components/theme-switcher.ax"
+        );
+        assert_eq!(
+            report.components.files[0].components[0].name,
+            "ThemeSwitcher"
+        );
+        assert_eq!(
+            report.components.files[0].components[0].params,
+            vec!["label=\"Theme\"".to_string()]
+        );
+        assert_eq!(
+            report.components.files[0].components[0].states,
+            vec!["selected: String".to_string()]
+        );
+        assert!(report.components.files[0].components[0].has_style);
+        assert!(report.components.files[0].components[0].has_render);
+        assert_eq!(
+            report.components.files[0].components[0].clients[0],
+            ComponentClientReport {
+                target: "JS".to_string(),
+                source: "file".to_string(),
+                path: Some("./theme-switcher.client.js".to_string()),
+            }
+        );
+        assert_eq!(
+            report.components.files[0].components[0].clients[1],
+            ComponentClientReport {
+                target: "WASM".to_string(),
+                source: "file".to_string(),
+                path: Some("./theme-switcher.client.wasm".to_string()),
+            }
+        );
+        assert!(report
+            .layers
+            .iter()
+            .any(|layer| layer.name == "Axonyx Components" && layer.status == "ready"));
+
+        let json = serde_json::to_string(&report).expect("melt report should serialize");
+        assert!(json.contains("\"components\":1"));
+        assert!(json.contains("\"component_clients\":2"));
+        assert!(json.contains("\"ThemeSwitcher\""));
+        assert!(json.contains("theme-switcher.client.js"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
