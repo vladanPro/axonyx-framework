@@ -3042,9 +3042,13 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
                 params: component
                     .params
                     .iter()
-                    .map(|param| match &param.default {
-                        Some(default) => format!("{}={}", param.name, default),
-                        None => param.name.clone(),
+                    .map(|param| match (&param.ty, &param.default) {
+                        (Some(ty), Some(default)) => {
+                            format!("{}: {} = {}", param.name, ty, default)
+                        }
+                        (Some(ty), None) => format!("{}: {}", param.name, ty),
+                        (None, Some(default)) => format!("{}={}", param.name, default),
+                        (None, None) => param.name.clone(),
                     })
                     .collect(),
                 states: component
@@ -14353,7 +14357,7 @@ scope Layout <RenderLayout, setTheme> {
         fs::write(
             root.join("app/components/theme-switcher.ax"),
             r#"
-component ThemeSwitcher(label = "Theme") {
+component ThemeSwitcher(label: String = "Theme") {
   state selected: String = "silver"
   client JS from "./theme-switcher.client.js"
   client WASM from "./theme-switcher.client.wasm"
@@ -14386,7 +14390,7 @@ component ThemeSwitcher(label = "Theme") {
         );
         assert_eq!(
             report.components.files[0].components[0].params,
-            vec!["label=\"Theme\"".to_string()]
+            vec!["label: String = \"Theme\"".to_string()]
         );
         assert_eq!(
             report.components.files[0].components[0].states,
