@@ -913,6 +913,20 @@ struct ComponentClientReport {
     path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentClientManifest {
+    clients: Vec<ComponentClientManifestEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentClientManifestEntry {
+    component: String,
+    file: String,
+    target: String,
+    source: String,
+    output: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeltReport {
     app: MeltAppReport,
@@ -7860,6 +7874,7 @@ fn build_static_site_from_app_root(
 
     copy_public_assets_to_dist(root, &output_dir)?;
     copy_package_assets_to_dist(root, &output_dir)?;
+    write_component_client_manifest_to_dist(root, &output_dir)?;
     let content_collection_count = write_content_manifest_to_dist(root, &output_dir)?;
     let state_signal_count = write_state_manifest_to_dist(root, &output_dir)?;
     let melt_graph_written = write_melt_graph_to_dist(root, &output_dir)?;
@@ -8217,6 +8232,133 @@ fn copy_hashed_package_entry(entry: &Path, target_dir: &Path) -> Result<()> {
         .with_context(|| format!("failed to copy hashed package asset '{}'", entry.display()))?;
 
     Ok(())
+}
+
+fn write_component_client_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize> {
+    let manifest = collect_component_client_manifest(root, output_dir)?;
+    let count = manifest.clients.len();
+    if count == 0 {
+        return Ok(0);
+    }
+
+    let target_dir = output_dir.join("_ax").join("components");
+    fs::create_dir_all(&target_dir)
+        .with_context(|| format!("failed to create '{}'", target_dir.display()))?;
+
+    let target = target_dir.join("manifest.json");
+    let json = serde_json::to_string_pretty(&manifest)
+        .context("failed to render component client manifest as JSON")?;
+    fs::write(&target, json).with_context(|| {
+        format!(
+            "failed to write component client manifest to '{}'",
+            target.display()
+        )
+    })?;
+
+    Ok(count)
+}
+
+fn collect_component_client_manifest(
+    root: &Path,
+    output_dir: &Path,
+) -> Result<ComponentClientManifest> {
+    let report = collect_component_report(root)?;
+    let root_canonical = root
+        .canonicalize()
+        .with_context(|| format!("failed to resolve app root '{}'", root.display()))?;
+    let mut clients = Vec::new();
+
+    for file in report.files {
+        let component_file = root.join(&file.file);
+        let component_dir = component_file.parent().unwrap_or(root);
+        for component in file.components {
+            for client in component.clients {
+                if client.source != "file" {
+                    continue;
+                }
+                let Some(source) = client.path else {
+                    continue;
+                };
+                let source_path = component_dir.join(&source);
+                if !source_path.exists() || !source_path.is_file() {
+                    bail!(
+                        "component `{}` references missing client {} file '{}'",
+                        component.name,
+                        client.target,
+                        source_path.display()
+                    );
+                }
+                let source_canonical = source_path.canonicalize().with_context(|| {
+                    format!(
+                        "failed to resolve component client file '{}'",
+                        source_path.display()
+                    )
+                })?;
+                if !source_canonical.starts_with(&root_canonical) {
+                    bail!(
+                        "component `{}` client file '{}' must stay inside app root '{}'",
+                        component.name,
+                        source_path.display(),
+                        root.display()
+                    );
+                }
+
+                let output = component_client_output_path(&file.file, &component.name, &source)?;
+                let target = output_dir.join(&output);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create '{}'", parent.display()))?;
+                }
+                fs::copy(&source_path, &target).with_context(|| {
+                    format!(
+                        "failed to copy component client '{}' to '{}'",
+                        source_path.display(),
+                        target.display()
+                    )
+                })?;
+
+                clients.push(ComponentClientManifestEntry {
+                    component: component.name.clone(),
+                    file: file.file.clone(),
+                    target: client.target,
+                    source,
+                    output: output.to_string_lossy().replace('\\', "/"),
+                });
+            }
+        }
+    }
+
+    Ok(ComponentClientManifest { clients })
+}
+
+fn component_client_output_path(
+    component_file: &str,
+    component_name: &str,
+    source: &str,
+) -> Result<PathBuf> {
+    let source_path = Path::new(source);
+    if source_path.is_absolute()
+        || source_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!(
+            "component `{}` client source '{}' must be relative and stay inside the app",
+            component_name,
+            source
+        );
+    }
+
+    let file_name = source_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("component client source '{source}' has no file name"))?;
+    let mut base = PathBuf::from("_ax").join("components");
+    let mut component_path = PathBuf::from(component_file);
+    component_path.set_extension("");
+    base.push(component_path);
+    base.push(component_name);
+    base.push(file_name);
+    Ok(base)
 }
 
 fn write_content_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize> {
@@ -12004,7 +12146,10 @@ fn load_dist_ax_asset(root: &Path, request_path: &str) -> Result<Option<StaticAs
         return Ok(None);
     }
 
-    if !matches!(segments[1].as_str(), "state" | "content" | "melt") {
+    if !matches!(
+        segments[1].as_str(),
+        "state" | "content" | "melt" | "components"
+    ) {
         return Ok(None);
     }
 
@@ -15692,6 +15837,76 @@ page state count: Number = 1
         assert!(snapshot.contains("\"key\": \"page:root:count:2\""));
         assert!(snapshot.contains("\"kind\": \"number\""));
         assert!(snapshot.contains("\"value\": 1.0"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_writes_component_client_manifest() {
+        let root = make_temp_dir("static-build-component-clients");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            "page Home\n<ThemeSwitcher label=\"Choose\" />\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switcher.ax"),
+            r#"
+component ThemeSwitcher(label: String = "Theme") {
+  client JS from "./theme-switcher.client.js"
+  client WASM from "./theme-switcher.client.wasm"
+  render ASX {
+    <select data-ax-behavior="theme">
+      <option value="silver">Silver</option>
+    </select>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+        fs::write(
+            root.join("app/components/theme-switcher.client.js"),
+            "window.__themeSwitcher = true;",
+        )
+        .expect("client js should write");
+        fs::write(
+            root.join("app/components/theme-switcher.client.wasm"),
+            b"\0asm",
+        )
+        .expect("client wasm should write");
+
+        build_static_site_from_app_root(&root, Path::new("dist"), true)
+            .expect("static build should copy component clients");
+
+        let manifest = fs::read_to_string(root.join("dist/_ax/components/manifest.json"))
+            .expect("component client manifest should exist");
+        assert!(manifest.contains("\"component\": \"ThemeSwitcher\""));
+        assert!(manifest.contains("\"target\": \"JS\""));
+        assert!(manifest.contains("\"target\": \"WASM\""));
+        assert!(manifest.contains(
+            "_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js"
+        ));
+        assert!(root
+            .join(
+                "dist/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js"
+            )
+            .exists());
+        assert!(root
+            .join(
+                "dist/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.wasm"
+            )
+            .exists());
+
+        let asset = load_dist_ax_asset(
+            &root,
+            "/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js",
+        )
+        .expect("component client asset lookup should work")
+        .expect("component client asset should exist");
+        assert_eq!(asset.content_type, "application/javascript; charset=utf-8");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
