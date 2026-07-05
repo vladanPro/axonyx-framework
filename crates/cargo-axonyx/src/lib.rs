@@ -59,7 +59,7 @@ const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/referen
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.43";
-const AXONYX_UI_VERSION: &str = "0.0.49";
+const AXONYX_UI_VERSION: &str = "0.0.50";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -17020,7 +17020,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.49\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.50\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -17579,7 +17579,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
-        assert!(updated.contains("version = \"0.0.49\""));
+        assert!(updated.contains("version = \"0.0.50\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
