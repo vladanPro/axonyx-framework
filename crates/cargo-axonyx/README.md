@@ -132,7 +132,7 @@ Generated apps depend on published Cargo packages by default:
 
 ```toml
 axonyx-runtime = "0.1.14"
-axonyx-ui = "0.0.48"
+axonyx-ui = "0.0.49"
 ```
 
 Local path and package override flows are still supported for framework development and UI dogfooding.
