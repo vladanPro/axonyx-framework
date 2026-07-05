@@ -16110,8 +16110,6 @@ page state count: Number = 1
         fs::write(
             root.join("app/components/theme-switcher.ax"),
             r#"
-page ThemeSwitcher(label: String = "Theme")
-
 component ThemeSwitcher(label: String = "Theme") {
   client JS from "./theme-switcher.client.js"
   client WASM from "./theme-switcher.client.wasm"
@@ -16121,8 +16119,6 @@ component ThemeSwitcher(label: String = "Theme") {
     </select>
   }
 }
-
-<ThemeSwitcher label={label} />
 "#,
         )
         .expect("component should write");
