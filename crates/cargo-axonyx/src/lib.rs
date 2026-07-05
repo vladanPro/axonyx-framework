@@ -927,6 +927,26 @@ struct ComponentClientManifestEntry {
     output: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentUsageReport {
+    routes: Vec<ComponentUsageRouteReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentUsageRouteReport {
+    route: String,
+    file: String,
+    scripts: Vec<ComponentUsageScriptReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, PartialOrd, Ord)]
+struct ComponentUsageScriptReport {
+    component: String,
+    file: String,
+    source: String,
+    output: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeltReport {
     app: MeltAppReport,
@@ -938,6 +958,7 @@ struct MeltReport {
     data: DataReport,
     scopes: ScopeReport,
     components: ComponentReport,
+    component_usage: ComponentUsageReport,
     content: ContentManifest,
     diagnostics: Vec<CheckDiagnostic>,
     summary: MeltSummary,
@@ -968,6 +989,8 @@ struct MeltSummary {
     scope_states: usize,
     components: usize,
     component_clients: usize,
+    component_client_routes: usize,
+    component_client_scripts: usize,
     query_keys: usize,
     query_invalidations: usize,
     content_collections: usize,
@@ -2819,6 +2842,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let data = collect_data_report(root, &routes)?;
     let scopes = collect_scope_report(root)?;
     let components = collect_component_report(root)?;
+    let component_usage = collect_component_usage_report(root, &routes)?;
     let content = collect_content_manifest(root)?;
     let diagnostics = check_app_sources(root)?;
     let summary = melt_summary(
@@ -2829,6 +2853,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         &data,
         &scopes,
         &components,
+        &component_usage,
         &content,
         &diagnostics,
     );
@@ -2848,6 +2873,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         data,
         scopes,
         components,
+        component_usage,
         content,
         diagnostics,
         summary,
@@ -2862,6 +2888,7 @@ fn melt_summary(
     data: &DataReport,
     scopes: &ScopeReport,
     components: &ComponentReport,
+    component_usage: &ComponentUsageReport,
     content: &ContentManifest,
     diagnostics: &[CheckDiagnostic],
 ) -> MeltSummary {
@@ -2890,6 +2917,11 @@ fn melt_summary(
         .flat_map(|file| &file.components)
         .map(|component| component.clients.len())
         .sum();
+    let component_client_scripts = component_usage
+        .routes
+        .iter()
+        .map(|route| route.scripts.len())
+        .sum();
     MeltSummary {
         page_routes: routes
             .routes
@@ -2905,6 +2937,8 @@ fn melt_summary(
         scope_states,
         components: component_count,
         component_clients,
+        component_client_routes: component_usage.routes.len(),
+        component_client_scripts,
         query_keys: data_bindings,
         query_invalidations,
         content_collections: content.collections.len(),
@@ -3161,6 +3195,97 @@ fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_
     synthetic.push_str(&body.join("\n"));
 
     parse_ax_v2(&synthetic).ok()
+}
+
+fn collect_component_usage_report(
+    root: &Path,
+    routes: &RoutesReport,
+) -> Result<ComponentUsageReport> {
+    let mut route_reports = Vec::new();
+
+    for route in routes.routes.iter().filter(|route| route.kind == "page") {
+        let Some(resolved) = resolve_route(root, &route.route)? else {
+            continue;
+        };
+        let mut visited = std::collections::BTreeSet::new();
+        let mut scripts = std::collections::BTreeSet::new();
+        for path in resolved
+            .layout_paths
+            .iter()
+            .chain(std::iter::once(&resolved.page_path))
+        {
+            collect_component_usage_scripts(root, path, &mut visited, &mut scripts)?;
+        }
+
+        if scripts.is_empty() {
+            continue;
+        }
+
+        route_reports.push(ComponentUsageRouteReport {
+            route: route.route.clone(),
+            file: route.file.clone(),
+            scripts: scripts.into_iter().collect(),
+        });
+    }
+
+    Ok(ComponentUsageReport {
+        routes: route_reports,
+    })
+}
+
+fn collect_component_usage_scripts(
+    root: &Path,
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+    scripts: &mut std::collections::BTreeSet<ComponentUsageScriptReport>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let Some(document) = parse_component_report_source(&source) else {
+        return Ok(());
+    };
+    let Ok(relative_file) = path.strip_prefix(root) else {
+        return Ok(());
+    };
+    let relative_file = relative_file.to_string_lossy().replace('\\', "/");
+
+    for component in &document.components {
+        for client in &component.clients {
+            if !matches!(
+                client.target,
+                axonyx_core::ax_ast_v2_prelude::AxComponentClientTargetV2::Js
+            ) {
+                continue;
+            }
+            let axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(source) =
+                &client.source
+            else {
+                continue;
+            };
+            let output = component_client_output_path(&relative_file, &component.name, source)?;
+            scripts.insert(ComponentUsageScriptReport {
+                component: component.name.clone(),
+                file: relative_file.clone(),
+                source: source.clone(),
+                output: format!("/{}", output.to_string_lossy().replace('\\', "/")),
+            });
+        }
+    }
+
+    for import_decl in document.imports {
+        if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
+            if import_path.exists() && import_path.starts_with(root) {
+                collect_component_usage_scripts(root, &import_path, visited, scripts)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
@@ -8880,7 +9005,7 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
@@ -8890,6 +9015,8 @@ fn print_melt_text(report: &MeltReport) {
         report.summary.scope_states,
         report.summary.components,
         report.summary.component_clients,
+        report.summary.component_client_routes,
+        report.summary.component_client_scripts,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -8925,6 +9052,11 @@ fn print_melt_text(report: &MeltReport) {
     if !report.components.files.is_empty() {
         println!();
         print_component_text(&report.components);
+    }
+
+    if !report.component_usage.routes.is_empty() {
+        println!();
+        print_component_usage_text(&report.component_usage);
     }
 
     if !report.scopes.files.is_empty() {
@@ -9002,6 +9134,19 @@ fn print_component_text(report: &ComponentReport) {
     }
 }
 
+fn print_component_usage_text(report: &ComponentUsageReport) {
+    println!("Component client usage:");
+    for route in &report.routes {
+        println!("  {} ({})", route.route, route.file);
+        for script in &route.scripts {
+            println!(
+                "    {} script={} source={} file={}",
+                script.component, script.output, script.source, script.file
+            );
+        }
+    }
+}
+
 fn print_scope_text(report: &ScopeReport) {
     println!("Scope graph:");
     for file in &report.files {
@@ -9045,7 +9190,7 @@ fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
@@ -9054,6 +9199,8 @@ fn print_graph_text(report: &MeltReport) {
         report.summary.scope_states,
         report.summary.components,
         report.summary.component_clients,
+        report.summary.component_client_routes,
+        report.summary.component_client_scripts,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -9145,6 +9292,11 @@ fn print_graph_text(report: &MeltReport) {
     if !report.components.files.is_empty() {
         println!();
         print_component_text(&report.components);
+    }
+
+    if !report.component_usage.routes.is_empty() {
+        println!();
+        print_component_usage_text(&report.component_usage);
     }
 
     if !report.scopes.files.is_empty() {
@@ -14580,8 +14732,11 @@ scope Layout <RenderLayout, setTheme> {
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
         fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
-        fs::write(root.join("app/page.ax"), "page Home\n<ThemeSwitcher />\n")
-            .expect("page should write");
+        fs::write(
+            root.join("app/page.ax"),
+            "import { ThemeSwitcher } from \"@/components/theme-switcher.ax\"\n\npage Home\n<ThemeSwitcher />\n",
+        )
+        .expect("page should write");
         fs::write(
             root.join("app/components/theme-switcher.ax"),
             r#"
@@ -14607,6 +14762,8 @@ component ThemeSwitcher(label: String = "Theme") {
 
         assert_eq!(report.summary.components, 1);
         assert_eq!(report.summary.component_clients, 2);
+        assert_eq!(report.summary.component_client_routes, 1);
+        assert_eq!(report.summary.component_client_scripts, 1);
         assert_eq!(report.components.files.len(), 1);
         assert_eq!(
             report.components.files[0].file,
@@ -14646,10 +14803,25 @@ component ThemeSwitcher(label: String = "Theme") {
             .layers
             .iter()
             .any(|layer| layer.name == "Axonyx Components" && layer.status == "ready"));
+        assert_eq!(report.component_usage.routes.len(), 1);
+        assert_eq!(report.component_usage.routes[0].route, "/");
+        assert_eq!(
+            report.component_usage.routes[0].scripts,
+            vec![ComponentUsageScriptReport {
+                component: "ThemeSwitcher".to_string(),
+                file: "app/components/theme-switcher.ax".to_string(),
+                source: "./theme-switcher.client.js".to_string(),
+                output:
+                    "/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js"
+                        .to_string(),
+            }]
+        );
 
         let json = serde_json::to_string(&report).expect("melt report should serialize");
         assert!(json.contains("\"components\":1"));
         assert!(json.contains("\"component_clients\":2"));
+        assert!(json.contains("\"component_client_routes\":1"));
+        assert!(json.contains("\"component_usage\""));
         assert!(json.contains("\"ThemeSwitcher\""));
         assert!(json.contains("theme-switcher.client.js"));
 
