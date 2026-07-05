@@ -77,7 +77,7 @@ static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String
     OnceLock::new();
 
 #[derive(Debug, Parser)]
-#[command(name = "ax")]
+#[command(name = "ax", version = AXONYX_CLI_VERSION)]
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -16661,6 +16661,15 @@ page Home
         let cli = Cli::try_parse_from(normalized).expect("cargo ax args should parse");
 
         assert!(matches!(cli.command, Commands::Run(_)));
+    }
+
+    #[test]
+    fn cli_version_reports_package_version() {
+        use clap::CommandFactory;
+
+        let version = Cli::command().render_version().to_string();
+
+        assert!(version.contains(AXONYX_CLI_VERSION));
     }
 
     #[test]
