@@ -7401,21 +7401,23 @@ fn validate_import_path_recursive(
         import_source: String::new(),
         expected: Some(path.to_path_buf()),
     })?;
-    let document = parse_ax_auto(&source).map_err(|error| ImportValidationError::Parse {
-        path: path.to_path_buf(),
-        line: line_from_auto_parse_error(&error).unwrap_or(1),
-        message: message_from_auto_parse_error(&error),
+    let imports = parse_import_validation_sources(&source).map_err(|(line, message)| {
+        ImportValidationError::Parse {
+            path: path.to_path_buf(),
+            line,
+            message,
+        }
     })?;
 
     stack.push(canonical);
 
-    for import_decl in document.imports {
-        let resolved = resolve_preview_import_path(root, &import_decl.source);
+    for import_source in imports {
+        let resolved = resolve_preview_import_path(root, &import_source);
         let Some(import_path) = resolved.as_ref().filter(|path| path.exists()) else {
             stack.pop();
             return Err(ImportValidationError::Missing {
                 from_path: path.to_path_buf(),
-                import_source: import_decl.source,
+                import_source,
                 expected: resolved,
             });
         };
@@ -7428,6 +7430,29 @@ fn validate_import_path_recursive(
 
     stack.pop();
     Ok(())
+}
+
+fn parse_import_validation_sources(source: &str) -> Result<Vec<String>, (usize, String)> {
+    match parse_ax_auto(source) {
+        Ok(document) => Ok(document
+            .imports
+            .into_iter()
+            .map(|import| import.source)
+            .collect()),
+        Err(auto_error) => {
+            let Some(document) = parse_component_report_source(source) else {
+                return Err((
+                    line_from_auto_parse_error(&auto_error).unwrap_or(1),
+                    message_from_auto_parse_error(&auto_error),
+                ));
+            };
+            Ok(document
+                .imports
+                .into_iter()
+                .map(|import| import.source)
+                .collect())
+        }
+    }
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
@@ -21330,6 +21355,42 @@ page Home
         assert_eq!(diagnostics[0].code, "axonyx-import-parse");
         assert!(diagnostics[0].message.contains("SiteCard.ax"));
         assert!(diagnostics[0].message.contains("line 2"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_component_only_import_target() {
+        let root = make_temp_dir("check-component-only-import-target");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/components/SiteCard.ax"),
+            r#"
+component SiteCard(title = "Demo") {
+  <article class="site-card">
+    <h2>{title}</h2>
+    <Slot />
+  </article>
+}
+"#,
+        )
+        .expect("component should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SiteCard } from "@/components/SiteCard.ax"
+
+page Home
+<SiteCard title="Hello" />
+"#,
+            Some(&root),
+        );
+
+        assert!(diagnostics.is_empty());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
