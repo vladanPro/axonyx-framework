@@ -7440,7 +7440,7 @@ fn parse_import_validation_sources(source: &str) -> Result<Vec<String>, (usize, 
             .map(|import| import.source)
             .collect()),
         Err(auto_error) => {
-            let Some(document) = parse_component_report_source(source) else {
+            let Some(document) = parse_component_only_import_validation_document(source) else {
                 return Err((
                     line_from_auto_parse_error(&auto_error).unwrap_or(1),
                     message_from_auto_parse_error(&auto_error),
@@ -7453,6 +7453,40 @@ fn parse_import_validation_sources(source: &str) -> Result<Vec<String>, (usize, 
                 .collect())
         }
     }
+}
+
+fn parse_component_only_import_validation_document(source: &str) -> Option<AxDocument> {
+    if !source
+        .lines()
+        .any(|line| line.trim_start().starts_with("component "))
+    {
+        return None;
+    }
+
+    let mut prefix = Vec::new();
+    let mut body = Vec::new();
+    let mut in_prefix = true;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if in_prefix
+            && (trimmed.is_empty() || trimmed.starts_with("use ") || trimmed.starts_with("import "))
+        {
+            prefix.push(line);
+        } else {
+            in_prefix = false;
+            body.push(line);
+        }
+    }
+
+    let mut synthetic = String::new();
+    if !prefix.is_empty() {
+        synthetic.push_str(&prefix.join("\n"));
+        synthetic.push_str("\n\n");
+    }
+    synthetic.push_str("page ComponentModule\n\n");
+    synthetic.push_str(&body.join("\n"));
+
+    parse_ax_auto(&synthetic).ok()
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
