@@ -58,7 +58,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.44";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.45";
 const AXONYX_UI_VERSION: &str = "0.0.52";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -20067,6 +20067,99 @@ page Home
 
         assert!(html.contains(r#"<a class="ax-button" data-variant="primary" href="/docs">"#));
         assert!(html.contains("Docs"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn renders_real_foundry_components_from_framework_vendor_package() {
+        let workspace = make_temp_dir("real-foundry-component-smoke");
+        let root = workspace.join("axonyx-site");
+        let ui_root = std::env::current_exe()
+            .expect("test executable path should resolve")
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("framework root should resolve from test executable")
+            .join("vendor/axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("src")).expect("src dir should exist");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("app target should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("app cargo manifest should write");
+        fs::write(
+            root.join("app/layout.ax"),
+            r#"
+import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
+import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
+import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
+
+page RootLayout
+
+<SiteShell max="xl">
+  <TextLink href="/docs">Docs</TextLink>
+  <ThemeSwitcher label="Theme" size="sm" surface="forged" storageKey="smoke-theme" ariaLabel="Theme switcher" />
+  <Slot />
+</SiteShell>
+"#,
+        )
+        .expect("layout should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { Button } from "@axonyx/ui/foundry/Button.ax"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
+import { Copy } from "@axonyx/ui/foundry/Copy.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+
+<ContentGrid cols="2" gap="lg">
+  <SectionCard title="Foundry import smoke">
+    <Copy>Rendered from the real axonyx-ui package.</Copy>
+    <Button href="/posts" variant="primary" surface="forged">Open posts</Button>
+  </SectionCard>
+</ContentGrid>
+"#,
+        )
+        .expect("page should write");
+        let text_link_path = resolve_preview_import_path(&root, "@axonyx/ui/foundry/TextLink.ax")
+            .expect("TextLink import path should resolve");
+        assert!(
+            text_link_path.exists(),
+            "TextLink import should exist at {}",
+            text_link_path.display()
+        );
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = test_dev_state(&root);
+        let html = render_route_html(&state, &route).expect("real Foundry imports should render");
+
+        assert!(html.contains(r#"class="ax-link""#));
+        assert!(html.contains(r#"href="/docs""#));
+        assert!(html.contains(r#"data-ax-theme-storage-key="smoke-theme""#));
+        assert!(html.contains(r#"data-max="xl""#));
+        assert!(html.contains("Foundry import smoke"));
+        assert!(html.contains(r#"href="/posts""#));
+        assert!(html.contains("Rendered from the real axonyx-ui package."));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
