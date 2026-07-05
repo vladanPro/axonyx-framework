@@ -59,7 +59,7 @@ const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/referen
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.44";
-const AXONYX_UI_VERSION: &str = "0.0.51";
+const AXONYX_UI_VERSION: &str = "0.0.52";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -17020,7 +17020,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.51\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.52\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -17579,7 +17579,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
-        assert!(updated.contains("version = \"0.0.51\""));
+        assert!(updated.contains("version = \"0.0.52\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -19982,6 +19982,91 @@ page Home
 
         assert!(html.contains("Imported through Cargo"));
         assert!(html.contains("No package override needed"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn renders_package_component_declaration_with_props_from_cargo_dependency() {
+        let workspace = make_temp_dir("ui-package-cargo-button-component");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/foundry")).expect("ui foundry dir should exist");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r##"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"##
+            ),
+        )
+        .expect("app cargo manifest should write");
+        fs::write(
+            ui_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .expect("ui cargo manifest should write");
+        fs::write(ui_root.join("src/lib.rs"), "").expect("ui lib should write");
+        fs::write(
+            ui_root.join("Axonyx.package.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+namespace = "@axonyx/ui"
+
+[exports]
+ax_root = "src"
+"#,
+        )
+        .expect("ui package metadata should write");
+        fs::write(
+            ui_root.join("src/foundry/Button.ax"),
+            r##"
+component Button(variant = "", href = "#") {
+  <a class="ax-button" data-variant={variant} href={href}>
+    <Slot />
+  </a>
+}
+"##,
+        )
+        .expect("ui component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { Button } from "@axonyx/ui/foundry/Button.ax"
+
+page Home
+
+<Button href="/docs" variant="primary">Docs</Button>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = test_dev_state(&root);
+        let html = render_route_html(&state, &route).expect("cargo package button should render");
+
+        assert!(html.contains(r#"<a class="ax-button" data-variant="primary" href="/docs">"#));
+        assert!(html.contains("Docs"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
