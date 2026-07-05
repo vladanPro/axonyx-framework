@@ -77,7 +77,12 @@ static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String
     OnceLock::new();
 
 #[derive(Debug, Parser)]
-#[command(name = "ax", version = AXONYX_CLI_VERSION)]
+#[command(
+    name = "ax",
+    version = AXONYX_CLI_VERSION,
+    about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.",
+    long_about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.\n\nCommon commands:\n  cargo ax run dev      Start the local development server\n  cargo ax build --clean Build a production-ready static/server bundle\n  cargo ax check        Run .ax diagnostics before build/deploy\n  cargo ax doctor       Inspect app, runtime, UI, server, and deploy readiness"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -85,23 +90,41 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Add an Axonyx module such as docs, site, ui, or cms.")]
     Add(AddArgs),
+    #[command(about = "Inspect action contracts and invalidation metadata.")]
     Actions(ActionsArgs),
+    #[command(about = "Inspect API route contracts or export OpenAPI/schema output.")]
     Api(ApiArgs),
+    #[command(about = "Build the Axonyx app into dist artifacts.")]
     Build(BuildArgs),
+    #[command(about = "Run source diagnostics without building.")]
     Check(CheckArgs),
+    #[command(about = "Inspect configured content collections.")]
     Content(ContentArgs),
+    #[command(about = "Check or pull database schema metadata.")]
     Db(DbArgs),
+    #[command(about = "Start the local development server.")]
     Dev(DevArgs),
+    #[command(about = "Inspect app, runtime, UI, server, state, and deploy readiness.")]
     Doctor(DoctorArgs),
+    #[command(about = "Print the Melt graph for framework internals.")]
     Graph(GraphArgs),
+    #[command(about = "Inspect or validate the Melt compiler graph.")]
     Melt(MeltArgs),
+    #[command(about = "List app and API routes.")]
     Routes(RoutesArgs),
+    #[command(about = "Run Axonyx commands such as dev/start with npm-like ergonomics.")]
     Run(RunArgs),
+    #[command(about = "Pull or infer Axonyx type schemas.")]
     Schema(SchemaArgs),
+    #[command(about = "Inspect state manifests and bindings.")]
     State(StateArgs),
+    #[command(about = "Start the streaming development server probe.")]
     Stream(DevArgs),
+    #[command(about = "Run Axonyx route/component/browser QA checks.")]
     Test(TestArgs),
+    #[command(about = "Upgrade registry dependencies and optionally reinstall the CLI.")]
     Upgrade(UpgradeArgs),
 }
 
