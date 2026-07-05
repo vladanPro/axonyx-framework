@@ -1707,6 +1707,49 @@ fn installed_cargo_axonyx_version() -> Result<Option<String>> {
     Ok(None)
 }
 
+fn doctor_cli_version_check() -> DoctorCheck {
+    doctor_cli_version_check_from_installed(installed_cargo_axonyx_version())
+}
+
+fn doctor_cli_version_check_from_installed(installed: Result<Option<String>>) -> DoctorCheck {
+    match installed {
+        Ok(Some(version)) if version == AXONYX_CLI_VERSION => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Ok,
+            message: format!("cargo-axonyx {version} is current."),
+            hint: None,
+        },
+        Ok(Some(version)) if is_version_older(&version, AXONYX_CLI_VERSION) => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Warn,
+            message: format!(
+                "cargo-axonyx {version} is older than this CLI build {AXONYX_CLI_VERSION}."
+            ),
+            hint: Some("cargo install cargo-axonyx --force"),
+        },
+        Ok(Some(version)) => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "cargo-axonyx {version} is newer than this CLI build {AXONYX_CLI_VERSION}."
+            ),
+            hint: None,
+        },
+        Ok(None) => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Warn,
+            message: "Could not find cargo-axonyx in `cargo install --list`.".to_string(),
+            hint: Some("cargo install cargo-axonyx --force"),
+        },
+        Err(_) => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Warn,
+            message: "Could not inspect installed cargo-axonyx version.".to_string(),
+            hint: Some("cargo install cargo-axonyx --force"),
+        },
+    }
+}
+
 fn doctor_command(args: DoctorArgs) -> Result<()> {
     let root = app_root()?;
     let checks = doctor_checks(&root, args.deploy);
@@ -1728,6 +1771,7 @@ fn doctor_command(args: DoctorArgs) -> Result<()> {
 fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
 
+    checks.push(doctor_cli_version_check());
     checks.push(doctor_file_check(
         root.join("Axonyx.toml").exists(),
         "axonyx-config",
@@ -16670,6 +16714,16 @@ page Home
         let version = Cli::command().render_version().to_string();
 
         assert!(version.contains(AXONYX_CLI_VERSION));
+    }
+
+    #[test]
+    fn doctor_cli_version_warns_when_installed_cli_is_old() {
+        let check = doctor_cli_version_check_from_installed(Ok(Some("0.1.0".to_string())));
+
+        assert_eq!(check.code, "cli-version");
+        assert_eq!(check.severity, DoctorSeverity::Warn);
+        assert!(check.message.contains("older than this CLI build"));
+        assert_eq!(check.hint, Some("cargo install cargo-axonyx --force"));
     }
 
     #[test]
