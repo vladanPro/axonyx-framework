@@ -12652,7 +12652,90 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
     })?;
 
     let html = apply_package_use_assets(&state.root, html, &layout_refs, &page_source);
+    let html = apply_component_client_assets(&state.root, route, html);
     Ok(apply_theme_config(&state.root, html))
+}
+
+fn apply_component_client_assets(root: &Path, route: &ResolvedRoute, html: String) -> String {
+    let hrefs = component_client_script_hrefs_for_route(root, route).unwrap_or_default();
+    if hrefs.is_empty() {
+        return html;
+    }
+
+    hrefs
+        .into_iter()
+        .fold(html, |current, href| ensure_head_script(&current, &href))
+}
+
+fn component_client_script_hrefs_for_route(
+    root: &Path,
+    route: &ResolvedRoute,
+) -> Result<Vec<String>> {
+    let mut visited = std::collections::BTreeSet::new();
+    let mut hrefs = std::collections::BTreeSet::new();
+
+    for path in route
+        .layout_paths
+        .iter()
+        .chain(std::iter::once(&route.page_path))
+    {
+        collect_component_client_script_hrefs(root, path, &mut visited, &mut hrefs)?;
+    }
+
+    Ok(hrefs.into_iter().collect())
+}
+
+fn collect_component_client_script_hrefs(
+    root: &Path,
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+    hrefs: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let Some(document) = parse_component_report_source(&source) else {
+        return Ok(());
+    };
+    let Ok(relative_file) = path.strip_prefix(root) else {
+        return Ok(());
+    };
+    let relative_file = relative_file.to_string_lossy().replace('\\', "/");
+
+    for component in &document.components {
+        for client in &component.clients {
+            if !matches!(
+                client.target,
+                axonyx_core::ax_ast_v2_prelude::AxComponentClientTargetV2::Js
+            ) {
+                continue;
+            }
+            let axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(source) =
+                &client.source
+            else {
+                continue;
+            };
+
+            let output = component_client_output_path(&relative_file, &component.name, source)?;
+            if root.join("dist").join(&output).exists() {
+                hrefs.insert(format!("/{}", output.to_string_lossy().replace('\\', "/")));
+            }
+        }
+    }
+
+    for import_decl in document.imports {
+        if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
+            if import_path.exists() && import_path.starts_with(root) {
+                collect_component_client_script_hrefs(root, &import_path, visited, hrefs)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_package_use_assets(
@@ -15849,12 +15932,14 @@ page state count: Number = 1
             .expect("config should write");
         fs::write(
             root.join("app/page.ax"),
-            "page Home\n<ThemeSwitcher label=\"Choose\" />\n",
+            "import { ThemeSwitcher } from \"@/components/theme-switcher.ax\"\n\npage Home\n<ThemeSwitcher label=\"Choose\" />\n",
         )
         .expect("page should write");
         fs::write(
             root.join("app/components/theme-switcher.ax"),
             r#"
+page ThemeSwitcher(label: String = "Theme")
+
 component ThemeSwitcher(label: String = "Theme") {
   client JS from "./theme-switcher.client.js"
   client WASM from "./theme-switcher.client.wasm"
@@ -15864,6 +15949,8 @@ component ThemeSwitcher(label: String = "Theme") {
     </select>
   }
 }
+
+<ThemeSwitcher label={label} />
 "#,
         )
         .expect("component should write");
@@ -15899,6 +15986,12 @@ component ThemeSwitcher(label: String = "Theme") {
                 "dist/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.wasm"
             )
             .exists());
+        let html =
+            fs::read_to_string(root.join("dist/index.html")).expect("home html should exist");
+        assert!(html.contains(
+            "<script src=\"/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js\" defer=\"true\"></script>"
+        ));
+        assert!(!html.contains("theme-switcher.client.wasm\" defer"));
 
         let asset = load_dist_ax_asset(
             &root,
