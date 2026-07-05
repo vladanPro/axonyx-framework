@@ -58,8 +58,8 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.42";
-const AXONYX_UI_VERSION: &str = "0.0.48";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.45";
+const AXONYX_UI_VERSION: &str = "0.0.52";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -885,6 +885,68 @@ struct ScopeRenderReport {
     call: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentReport {
+    files: Vec<ComponentFileReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentFileReport {
+    file: String,
+    components: Vec<ComponentDeclReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentDeclReport {
+    name: String,
+    params: Vec<String>,
+    states: Vec<String>,
+    clients: Vec<ComponentClientReport>,
+    has_style: bool,
+    has_render: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentClientReport {
+    target: String,
+    source: String,
+    path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentClientManifest {
+    clients: Vec<ComponentClientManifestEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentClientManifestEntry {
+    component: String,
+    file: String,
+    target: String,
+    source: String,
+    output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentUsageReport {
+    routes: Vec<ComponentUsageRouteReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentUsageRouteReport {
+    route: String,
+    file: String,
+    scripts: Vec<ComponentUsageScriptReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, PartialOrd, Ord)]
+struct ComponentUsageScriptReport {
+    component: String,
+    file: String,
+    source: String,
+    output: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct MeltReport {
     app: MeltAppReport,
@@ -895,6 +957,8 @@ struct MeltReport {
     state: StateReport,
     data: DataReport,
     scopes: ScopeReport,
+    components: ComponentReport,
+    component_usage: ComponentUsageReport,
     content: ContentManifest,
     diagnostics: Vec<CheckDiagnostic>,
     summary: MeltSummary,
@@ -923,6 +987,10 @@ struct MeltSummary {
     data_bindings: usize,
     scopes: usize,
     scope_states: usize,
+    components: usize,
+    component_clients: usize,
+    component_client_routes: usize,
+    component_client_scripts: usize,
     query_keys: usize,
     query_invalidations: usize,
     content_collections: usize,
@@ -2773,6 +2841,8 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let state = collect_state_report(root)?;
     let data = collect_data_report(root, &routes)?;
     let scopes = collect_scope_report(root)?;
+    let components = collect_component_report(root)?;
+    let component_usage = collect_component_usage_report(root, &routes)?;
     let content = collect_content_manifest(root)?;
     let diagnostics = check_app_sources(root)?;
     let summary = melt_summary(
@@ -2782,6 +2852,8 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         &state,
         &data,
         &scopes,
+        &components,
+        &component_usage,
         &content,
         &diagnostics,
     );
@@ -2800,6 +2872,8 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         state,
         data,
         scopes,
+        components,
+        component_usage,
         content,
         diagnostics,
         summary,
@@ -2813,6 +2887,8 @@ fn melt_summary(
     state: &StateReport,
     data: &DataReport,
     scopes: &ScopeReport,
+    components: &ComponentReport,
+    component_usage: &ComponentUsageReport,
     content: &ContentManifest,
     diagnostics: &[CheckDiagnostic],
 ) -> MeltSummary {
@@ -2830,6 +2906,22 @@ fn melt_summary(
         .flat_map(|route| &route.actions)
         .map(|action| action.invalidates.len())
         .sum();
+    let component_count = components
+        .files
+        .iter()
+        .map(|file| file.components.len())
+        .sum();
+    let component_clients = components
+        .files
+        .iter()
+        .flat_map(|file| &file.components)
+        .map(|component| component.clients.len())
+        .sum();
+    let component_client_scripts = component_usage
+        .routes
+        .iter()
+        .map(|route| route.scripts.len())
+        .sum();
     MeltSummary {
         page_routes: routes
             .routes
@@ -2843,6 +2935,10 @@ fn melt_summary(
         data_bindings,
         scopes: scope_count,
         scope_states,
+        components: component_count,
+        component_clients,
+        component_client_routes: component_usage.routes.len(),
+        component_client_scripts,
         query_keys: data_bindings,
         query_invalidations,
         content_collections: content.collections.len(),
@@ -2896,6 +2992,18 @@ fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport
             name: "Axonyx Scope",
             status: if summary.scopes > 0 { "ready" } else { "empty" },
             detail: format!("{} scope container(s) discovered.", summary.scopes),
+        },
+        MeltLayerReport {
+            name: "Axonyx Components",
+            status: if summary.components > 0 {
+                "ready"
+            } else {
+                "empty"
+            },
+            detail: format!(
+                "{} component(s), {} client behavior declaration(s).",
+                summary.components, summary.component_clients
+            ),
         },
         MeltLayerReport {
             name: "Axonyx Foundry",
@@ -2960,6 +3068,224 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
     Ok(DataReport {
         routes: data_routes,
     })
+}
+
+fn collect_component_report(root: &Path) -> Result<ComponentReport> {
+    let mut paths = Vec::new();
+    collect_ax_files(&root.join("app"), &mut paths)?;
+
+    let mut files = Vec::new();
+    for path in paths {
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
+        let Some(file) = parse_component_report_source(&source) else {
+            continue;
+        };
+
+        let components = file
+            .components
+            .iter()
+            .map(|component| ComponentDeclReport {
+                name: component.name.clone(),
+                params: component
+                    .params
+                    .iter()
+                    .map(|param| match (&param.ty, &param.default) {
+                        (Some(ty), Some(default)) => {
+                            format!("{}: {} = {}", param.name, ty, default)
+                        }
+                        (Some(ty), None) => format!("{}: {}", param.name, ty),
+                        (None, Some(default)) => format!("{}={}", param.name, default),
+                        (None, None) => param.name.clone(),
+                    })
+                    .collect(),
+                states: component
+                    .states
+                    .iter()
+                    .map(|state| match (&state.ty, &state.scope) {
+                        (Some(ty), Some(scope)) => format!("{}.{}: {}", scope, state.name, ty),
+                        (Some(ty), None) => format!("{}: {}", state.name, ty),
+                        (None, Some(scope)) => format!("{}.{}", scope, state.name),
+                        (None, None) => state.name.clone(),
+                    })
+                    .collect(),
+                clients: component
+                    .clients
+                    .iter()
+                    .map(|client| {
+                        let target = match &client.target {
+                            axonyx_core::ax_ast_v2_prelude::AxComponentClientTargetV2::Js => "JS",
+                            axonyx_core::ax_ast_v2_prelude::AxComponentClientTargetV2::Wasm => {
+                                "WASM"
+                            }
+                        }
+                        .to_string();
+                        match &client.source {
+                            axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::Inline(
+                                source,
+                            ) => ComponentClientReport {
+                                target,
+                                source: "inline".to_string(),
+                                path: Some(format!("{} bytes", source.len())),
+                            },
+                            axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(
+                                path,
+                            ) => ComponentClientReport {
+                                target,
+                                source: "file".to_string(),
+                                path: Some(path.clone()),
+                            },
+                        }
+                    })
+                    .collect(),
+                has_style: component.style.is_some(),
+                has_render: component.render.is_some(),
+            })
+            .collect::<Vec<_>>();
+
+        if components.is_empty() {
+            continue;
+        }
+
+        files.push(ComponentFileReport {
+            file: path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+            components,
+        });
+    }
+
+    Ok(ComponentReport { files })
+}
+
+fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_prelude::AxFileV2> {
+    if let Ok(file) = parse_ax_v2(source) {
+        return Some(file);
+    }
+    if !source
+        .lines()
+        .any(|line| line.trim_start().starts_with("component "))
+    {
+        return None;
+    }
+
+    let mut prefix = Vec::new();
+    let mut body = Vec::new();
+    let mut in_prefix = true;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if in_prefix
+            && (trimmed.is_empty() || trimmed.starts_with("use ") || trimmed.starts_with("import "))
+        {
+            prefix.push(line);
+        } else {
+            in_prefix = false;
+            body.push(line);
+        }
+    }
+
+    let mut synthetic = String::new();
+    if !prefix.is_empty() {
+        synthetic.push_str(&prefix.join("\n"));
+        synthetic.push_str("\n\n");
+    }
+    synthetic.push_str("page ComponentModule\n\n");
+    synthetic.push_str(&body.join("\n"));
+
+    parse_ax_v2(&synthetic).ok()
+}
+
+fn collect_component_usage_report(
+    root: &Path,
+    routes: &RoutesReport,
+) -> Result<ComponentUsageReport> {
+    let mut route_reports = Vec::new();
+
+    for route in routes.routes.iter().filter(|route| route.kind == "page") {
+        let Some(resolved) = resolve_route(root, &route.route)? else {
+            continue;
+        };
+        let mut visited = std::collections::BTreeSet::new();
+        let mut scripts = std::collections::BTreeSet::new();
+        for path in resolved
+            .layout_paths
+            .iter()
+            .chain(std::iter::once(&resolved.page_path))
+        {
+            collect_component_usage_scripts(root, path, &mut visited, &mut scripts)?;
+        }
+
+        if scripts.is_empty() {
+            continue;
+        }
+
+        route_reports.push(ComponentUsageRouteReport {
+            route: route.route.clone(),
+            file: route.file.clone(),
+            scripts: scripts.into_iter().collect(),
+        });
+    }
+
+    Ok(ComponentUsageReport {
+        routes: route_reports,
+    })
+}
+
+fn collect_component_usage_scripts(
+    root: &Path,
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+    scripts: &mut std::collections::BTreeSet<ComponentUsageScriptReport>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let Some(document) = parse_component_report_source(&source) else {
+        return Ok(());
+    };
+    let Ok(relative_file) = path.strip_prefix(root) else {
+        return Ok(());
+    };
+    let relative_file = relative_file.to_string_lossy().replace('\\', "/");
+
+    for component in &document.components {
+        for client in &component.clients {
+            if !matches!(
+                client.target,
+                axonyx_core::ax_ast_v2_prelude::AxComponentClientTargetV2::Js
+            ) {
+                continue;
+            }
+            let axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(source) =
+                &client.source
+            else {
+                continue;
+            };
+            let output = component_client_output_path(&relative_file, &component.name, source)?;
+            scripts.insert(ComponentUsageScriptReport {
+                component: component.name.clone(),
+                file: relative_file.clone(),
+                source: source.clone(),
+                output: format!("/{}", output.to_string_lossy().replace('\\', "/")),
+            });
+        }
+    }
+
+    for import_decl in document.imports {
+        if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
+            if import_path.exists() && import_path.starts_with(root) {
+                collect_component_usage_scripts(root, &import_path, visited, scripts)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn collect_scope_report(root: &Path) -> Result<ScopeReport> {
@@ -7075,21 +7401,23 @@ fn validate_import_path_recursive(
         import_source: String::new(),
         expected: Some(path.to_path_buf()),
     })?;
-    let document = parse_ax_auto(&source).map_err(|error| ImportValidationError::Parse {
-        path: path.to_path_buf(),
-        line: line_from_auto_parse_error(&error).unwrap_or(1),
-        message: message_from_auto_parse_error(&error),
+    let imports = parse_import_validation_sources(&source).map_err(|(line, message)| {
+        ImportValidationError::Parse {
+            path: path.to_path_buf(),
+            line,
+            message,
+        }
     })?;
 
     stack.push(canonical);
 
-    for import_decl in document.imports {
-        let resolved = resolve_preview_import_path(root, &import_decl.source);
+    for import_source in imports {
+        let resolved = resolve_preview_import_path(root, &import_source);
         let Some(import_path) = resolved.as_ref().filter(|path| path.exists()) else {
             stack.pop();
             return Err(ImportValidationError::Missing {
                 from_path: path.to_path_buf(),
-                import_source: import_decl.source,
+                import_source,
                 expected: resolved,
             });
         };
@@ -7102,6 +7430,63 @@ fn validate_import_path_recursive(
 
     stack.pop();
     Ok(())
+}
+
+fn parse_import_validation_sources(source: &str) -> Result<Vec<String>, (usize, String)> {
+    match parse_ax_auto(source) {
+        Ok(document) => Ok(document
+            .imports
+            .into_iter()
+            .map(|import| import.source)
+            .collect()),
+        Err(auto_error) => {
+            let Some(document) = parse_component_only_import_validation_document(source) else {
+                return Err((
+                    line_from_auto_parse_error(&auto_error).unwrap_or(1),
+                    message_from_auto_parse_error(&auto_error),
+                ));
+            };
+            Ok(document
+                .imports
+                .into_iter()
+                .map(|import| import.source)
+                .collect())
+        }
+    }
+}
+
+fn parse_component_only_import_validation_document(source: &str) -> Option<AxDocument> {
+    if !source
+        .lines()
+        .any(|line| line.trim_start().starts_with("component "))
+    {
+        return None;
+    }
+
+    let mut prefix = Vec::new();
+    let mut body = Vec::new();
+    let mut in_prefix = true;
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if in_prefix
+            && (trimmed.is_empty() || trimmed.starts_with("use ") || trimmed.starts_with("import "))
+        {
+            prefix.push(line);
+        } else {
+            in_prefix = false;
+            body.push(line);
+        }
+    }
+
+    let mut synthetic = String::new();
+    if !prefix.is_empty() {
+        synthetic.push_str(&prefix.join("\n"));
+        synthetic.push_str("\n\n");
+    }
+    synthetic.push_str("page ComponentModule\n\n");
+    synthetic.push_str(&body.join("\n"));
+
+    parse_ax_auto(&synthetic).ok()
 }
 
 fn canonical_path(path: &Path) -> PathBuf {
@@ -7673,6 +8058,7 @@ fn build_static_site_from_app_root(
 
     copy_public_assets_to_dist(root, &output_dir)?;
     copy_package_assets_to_dist(root, &output_dir)?;
+    write_component_client_manifest_to_dist(root, &output_dir)?;
     let content_collection_count = write_content_manifest_to_dist(root, &output_dir)?;
     let state_signal_count = write_state_manifest_to_dist(root, &output_dir)?;
     let melt_graph_written = write_melt_graph_to_dist(root, &output_dir)?;
@@ -8030,6 +8416,133 @@ fn copy_hashed_package_entry(entry: &Path, target_dir: &Path) -> Result<()> {
         .with_context(|| format!("failed to copy hashed package asset '{}'", entry.display()))?;
 
     Ok(())
+}
+
+fn write_component_client_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize> {
+    let manifest = collect_component_client_manifest(root, output_dir)?;
+    let count = manifest.clients.len();
+    if count == 0 {
+        return Ok(0);
+    }
+
+    let target_dir = output_dir.join("_ax").join("components");
+    fs::create_dir_all(&target_dir)
+        .with_context(|| format!("failed to create '{}'", target_dir.display()))?;
+
+    let target = target_dir.join("manifest.json");
+    let json = serde_json::to_string_pretty(&manifest)
+        .context("failed to render component client manifest as JSON")?;
+    fs::write(&target, json).with_context(|| {
+        format!(
+            "failed to write component client manifest to '{}'",
+            target.display()
+        )
+    })?;
+
+    Ok(count)
+}
+
+fn collect_component_client_manifest(
+    root: &Path,
+    output_dir: &Path,
+) -> Result<ComponentClientManifest> {
+    let report = collect_component_report(root)?;
+    let root_canonical = root
+        .canonicalize()
+        .with_context(|| format!("failed to resolve app root '{}'", root.display()))?;
+    let mut clients = Vec::new();
+
+    for file in report.files {
+        let component_file = root.join(&file.file);
+        let component_dir = component_file.parent().unwrap_or(root);
+        for component in file.components {
+            for client in component.clients {
+                if client.source != "file" {
+                    continue;
+                }
+                let Some(source) = client.path else {
+                    continue;
+                };
+                let source_path = component_dir.join(&source);
+                if !source_path.exists() || !source_path.is_file() {
+                    bail!(
+                        "component `{}` references missing client {} file '{}'",
+                        component.name,
+                        client.target,
+                        source_path.display()
+                    );
+                }
+                let source_canonical = source_path.canonicalize().with_context(|| {
+                    format!(
+                        "failed to resolve component client file '{}'",
+                        source_path.display()
+                    )
+                })?;
+                if !source_canonical.starts_with(&root_canonical) {
+                    bail!(
+                        "component `{}` client file '{}' must stay inside app root '{}'",
+                        component.name,
+                        source_path.display(),
+                        root.display()
+                    );
+                }
+
+                let output = component_client_output_path(&file.file, &component.name, &source)?;
+                let target = output_dir.join(&output);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("failed to create '{}'", parent.display()))?;
+                }
+                fs::copy(&source_path, &target).with_context(|| {
+                    format!(
+                        "failed to copy component client '{}' to '{}'",
+                        source_path.display(),
+                        target.display()
+                    )
+                })?;
+
+                clients.push(ComponentClientManifestEntry {
+                    component: component.name.clone(),
+                    file: file.file.clone(),
+                    target: client.target,
+                    source,
+                    output: output.to_string_lossy().replace('\\', "/"),
+                });
+            }
+        }
+    }
+
+    Ok(ComponentClientManifest { clients })
+}
+
+fn component_client_output_path(
+    component_file: &str,
+    component_name: &str,
+    source: &str,
+) -> Result<PathBuf> {
+    let source_path = Path::new(source);
+    if source_path.is_absolute()
+        || source_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        bail!(
+            "component `{}` client source '{}' must be relative and stay inside the app",
+            component_name,
+            source
+        );
+    }
+
+    let file_name = source_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("component client source '{source}' has no file name"))?;
+    let mut base = PathBuf::from("_ax").join("components");
+    let mut component_path = PathBuf::from(component_file);
+    component_path.set_extension("");
+    base.push(component_path);
+    base.push(component_name);
+    base.push(file_name);
+    Ok(base)
 }
 
 fn write_content_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize> {
@@ -8551,7 +9064,7 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
@@ -8559,6 +9072,10 @@ fn print_melt_text(report: &MeltReport) {
         report.summary.state_signals,
         report.summary.scopes,
         report.summary.scope_states,
+        report.summary.components,
+        report.summary.component_clients,
+        report.summary.component_client_routes,
+        report.summary.component_client_scripts,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -8591,6 +9108,16 @@ fn print_melt_text(report: &MeltReport) {
         print_data_text(&report.data);
     }
 
+    if !report.components.files.is_empty() {
+        println!();
+        print_component_text(&report.components);
+    }
+
+    if !report.component_usage.routes.is_empty() {
+        println!();
+        print_component_usage_text(&report.component_usage);
+    }
+
     if !report.scopes.files.is_empty() {
         println!();
         print_scope_text(&report.scopes);
@@ -8620,6 +9147,60 @@ fn print_data_text(report: &DataReport) {
                     .map(|part| format!("{part:?}"))
                     .collect::<Vec<_>>()
                     .join(", ")
+            );
+        }
+    }
+}
+
+fn print_component_text(report: &ComponentReport) {
+    println!("Component graph:");
+    for file in &report.files {
+        println!("  {}", file.file);
+        for component in &file.components {
+            let params = if component.params.is_empty() {
+                "params=none".to_string()
+            } else {
+                format!("params={}", component.params.join(","))
+            };
+            let states = if component.states.is_empty() {
+                "states=none".to_string()
+            } else {
+                format!("states={}", component.states.join(","))
+            };
+            let style = if component.has_style {
+                "style=yes"
+            } else {
+                "style=no"
+            };
+            let render = if component.has_render {
+                "render=ASX"
+            } else {
+                "render=legacy"
+            };
+            println!(
+                "    component {} {} {} {} {}",
+                component.name, params, states, style, render
+            );
+            for client in &component.clients {
+                println!(
+                    "      client {} source={} path={}",
+                    client.target,
+                    client.source,
+                    client.path.as_deref().unwrap_or("none")
+                );
+            }
+        }
+    }
+}
+
+fn print_component_usage_text(report: &ComponentUsageReport) {
+    println!("Component client usage:");
+    for route in &report.routes {
+        println!("  {} ({})", route.route, route.file);
+        for script in &route.scripts {
+            println!(
+                "    {} script={} source={} file={}",
+                script.component, script.output, script.source, script.file
             );
         }
     }
@@ -8668,13 +9249,17 @@ fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
         report.summary.state_signals,
         report.summary.scopes,
         report.summary.scope_states,
+        report.summary.components,
+        report.summary.component_clients,
+        report.summary.component_client_routes,
+        report.summary.component_client_scripts,
         report.summary.data_bindings,
         report.summary.query_keys,
         report.summary.query_invalidations,
@@ -8761,6 +9346,16 @@ fn print_graph_text(report: &MeltReport) {
                 println!("    {} invalidates={}", action.name, labels);
             }
         }
+    }
+
+    if !report.components.files.is_empty() {
+        println!();
+        print_component_text(&report.components);
+    }
+
+    if !report.component_usage.routes.is_empty() {
+        println!();
+        print_component_usage_text(&report.component_usage);
     }
 
     if !report.scopes.files.is_empty() {
@@ -9532,12 +10127,32 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
 }
 
 fn source_has_state_declaration(source: &str) -> bool {
-    source.lines().map(str::trim_start).any(|line| {
-        line.starts_with("state ")
+    let mut component_depth = 0usize;
+    for raw_line in source.lines() {
+        let line = raw_line.trim_start();
+        if component_depth > 0 {
+            component_depth = update_component_block_depth(component_depth, line);
+            continue;
+        }
+        if line.starts_with("component ") {
+            component_depth = update_component_block_depth(0, line);
+            continue;
+        }
+        if line.starts_with("state ")
             || line.starts_with("app state ")
             || line.starts_with("layout state ")
             || line.starts_with("page state ")
-    })
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn update_component_block_depth(depth: usize, line: &str) -> usize {
+    let open_count = line.chars().filter(|char| *char == '{').count();
+    let close_count = line.chars().filter(|char| *char == '}').count();
+    depth.saturating_add(open_count).saturating_sub(close_count)
 }
 
 fn state_scope_for_path(root: &Path, path: &Path) -> String {
@@ -11742,7 +12357,10 @@ fn load_dist_ax_asset(root: &Path, request_path: &str) -> Result<Option<StaticAs
         return Ok(None);
     }
 
-    if !matches!(segments[1].as_str(), "state" | "content" | "melt") {
+    if !matches!(
+        segments[1].as_str(),
+        "state" | "content" | "melt" | "components"
+    ) {
         return Ok(None);
     }
 
@@ -12245,7 +12863,90 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
     })?;
 
     let html = apply_package_use_assets(&state.root, html, &layout_refs, &page_source);
+    let html = apply_component_client_assets(&state.root, route, html);
     Ok(apply_theme_config(&state.root, html))
+}
+
+fn apply_component_client_assets(root: &Path, route: &ResolvedRoute, html: String) -> String {
+    let hrefs = component_client_script_hrefs_for_route(root, route).unwrap_or_default();
+    if hrefs.is_empty() {
+        return html;
+    }
+
+    hrefs
+        .into_iter()
+        .fold(html, |current, href| ensure_head_script(&current, &href))
+}
+
+fn component_client_script_hrefs_for_route(
+    root: &Path,
+    route: &ResolvedRoute,
+) -> Result<Vec<String>> {
+    let mut visited = std::collections::BTreeSet::new();
+    let mut hrefs = std::collections::BTreeSet::new();
+
+    for path in route
+        .layout_paths
+        .iter()
+        .chain(std::iter::once(&route.page_path))
+    {
+        collect_component_client_script_hrefs(root, path, &mut visited, &mut hrefs)?;
+    }
+
+    Ok(hrefs.into_iter().collect())
+}
+
+fn collect_component_client_script_hrefs(
+    root: &Path,
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+    hrefs: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let Some(document) = parse_component_report_source(&source) else {
+        return Ok(());
+    };
+    let Ok(relative_file) = path.strip_prefix(root) else {
+        return Ok(());
+    };
+    let relative_file = relative_file.to_string_lossy().replace('\\', "/");
+
+    for component in &document.components {
+        for client in &component.clients {
+            if !matches!(
+                client.target,
+                axonyx_core::ax_ast_v2_prelude::AxComponentClientTargetV2::Js
+            ) {
+                continue;
+            }
+            let axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(source) =
+                &client.source
+            else {
+                continue;
+            };
+
+            let output = component_client_output_path(&relative_file, &component.name, source)?;
+            if root.join("dist").join(&output).exists() {
+                hrefs.insert(format!("/{}", output.to_string_lossy().replace('\\', "/")));
+            }
+        }
+    }
+
+    for import_decl in document.imports {
+        if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
+            if import_path.exists() && import_path.starts_with(root) {
+                collect_component_client_script_hrefs(root, &import_path, visited, hrefs)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_package_use_assets(
@@ -14085,6 +14786,108 @@ scope Layout <RenderLayout, setTheme> {
     }
 
     #[test]
+    fn melt_report_collects_component_client_metadata() {
+        let root = make_temp_dir("melt-report-component-clients");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            "import { ThemeSwitcher } from \"@/components/theme-switcher.ax\"\n\npage Home\n<ThemeSwitcher />\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switcher.ax"),
+            r#"
+component ThemeSwitcher(label: String = "Theme") {
+  state selected: String = "silver"
+  client JS from "./theme-switcher.client.js"
+  client WASM from "./theme-switcher.client.wasm"
+  style { recipe = "theme-switcher" }
+  render ASX {
+    <label class="ax-theme-switcher">
+      <span>{label}</span>
+      <select data-ax-behavior="theme">
+        <option value="silver">Silver</option>
+      </select>
+    </label>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+
+        let report = collect_melt_report(&root).expect("melt report should collect");
+
+        assert_eq!(report.summary.components, 1);
+        assert_eq!(report.summary.component_clients, 2);
+        assert_eq!(report.summary.component_client_routes, 1);
+        assert_eq!(report.summary.component_client_scripts, 1);
+        assert_eq!(report.components.files.len(), 1);
+        assert_eq!(
+            report.components.files[0].file,
+            "app/components/theme-switcher.ax"
+        );
+        assert_eq!(
+            report.components.files[0].components[0].name,
+            "ThemeSwitcher"
+        );
+        assert_eq!(
+            report.components.files[0].components[0].params,
+            vec!["label: String = \"Theme\"".to_string()]
+        );
+        assert_eq!(
+            report.components.files[0].components[0].states,
+            vec!["selected: String".to_string()]
+        );
+        assert!(report.components.files[0].components[0].has_style);
+        assert!(report.components.files[0].components[0].has_render);
+        assert_eq!(
+            report.components.files[0].components[0].clients[0],
+            ComponentClientReport {
+                target: "JS".to_string(),
+                source: "file".to_string(),
+                path: Some("./theme-switcher.client.js".to_string()),
+            }
+        );
+        assert_eq!(
+            report.components.files[0].components[0].clients[1],
+            ComponentClientReport {
+                target: "WASM".to_string(),
+                source: "file".to_string(),
+                path: Some("./theme-switcher.client.wasm".to_string()),
+            }
+        );
+        assert!(report
+            .layers
+            .iter()
+            .any(|layer| layer.name == "Axonyx Components" && layer.status == "ready"));
+        assert_eq!(report.component_usage.routes.len(), 1);
+        assert_eq!(report.component_usage.routes[0].route, "/");
+        assert_eq!(
+            report.component_usage.routes[0].scripts,
+            vec![ComponentUsageScriptReport {
+                component: "ThemeSwitcher".to_string(),
+                file: "app/components/theme-switcher.ax".to_string(),
+                source: "./theme-switcher.client.js".to_string(),
+                output:
+                    "/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js"
+                        .to_string(),
+            }]
+        );
+
+        let json = serde_json::to_string(&report).expect("melt report should serialize");
+        assert!(json.contains("\"components\":1"));
+        assert!(json.contains("\"component_clients\":2"));
+        assert!(json.contains("\"component_client_routes\":1"));
+        assert!(json.contains("\"component_usage\""));
+        assert!(json.contains("\"ThemeSwitcher\""));
+        assert!(json.contains("theme-switcher.client.js"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn scope_report_expands_namespace_import_members() {
         let root = make_temp_dir("scope-namespace-import");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
@@ -15353,6 +16156,82 @@ page state count: Number = 1
     }
 
     #[test]
+    fn build_static_site_writes_component_client_manifest() {
+        let root = make_temp_dir("static-build-component-clients");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            "import { ThemeSwitcher } from \"@/components/theme-switcher.ax\"\n\npage Home\n<ThemeSwitcher label=\"Choose\" />\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switcher.ax"),
+            r#"
+component ThemeSwitcher(label: String = "Theme") {
+  client JS from "./theme-switcher.client.js"
+  client WASM from "./theme-switcher.client.wasm"
+  render ASX {
+    <select data-ax-behavior="theme">
+      <option value="silver">Silver</option>
+    </select>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+        fs::write(
+            root.join("app/components/theme-switcher.client.js"),
+            "window.__themeSwitcher = true;",
+        )
+        .expect("client js should write");
+        fs::write(
+            root.join("app/components/theme-switcher.client.wasm"),
+            b"\0asm",
+        )
+        .expect("client wasm should write");
+
+        build_static_site_from_app_root(&root, Path::new("dist"), true)
+            .expect("static build should copy component clients");
+
+        let manifest = fs::read_to_string(root.join("dist/_ax/components/manifest.json"))
+            .expect("component client manifest should exist");
+        assert!(manifest.contains("\"component\": \"ThemeSwitcher\""));
+        assert!(manifest.contains("\"target\": \"JS\""));
+        assert!(manifest.contains("\"target\": \"WASM\""));
+        assert!(manifest.contains(
+            "_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js"
+        ));
+        assert!(root
+            .join(
+                "dist/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js"
+            )
+            .exists());
+        assert!(root
+            .join(
+                "dist/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.wasm"
+            )
+            .exists());
+        let html =
+            fs::read_to_string(root.join("dist/index.html")).expect("home html should exist");
+        assert!(html.contains(
+            "<script src=\"/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js\" defer=\"true\"></script>"
+        ));
+        assert!(!html.contains("theme-switcher.client.wasm\" defer"));
+
+        let asset = load_dist_ax_asset(
+            &root,
+            "/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js",
+        )
+        .expect("component client asset lookup should work")
+        .expect("component client asset should exist");
+        assert_eq!(asset.content_type, "application/javascript; charset=utf-8");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn build_static_site_copies_package_assets_and_use_injects_them() {
         let root = make_temp_dir("static-build-package-assets");
         let ui_root = root.join("vendor/axonyx-ui");
@@ -16141,7 +17020,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.48\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.52\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -16700,7 +17579,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
-        assert!(updated.contains("version = \"0.0.48\""));
+        assert!(updated.contains("version = \"0.0.52\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -19108,6 +19987,184 @@ page Home
     }
 
     #[test]
+    fn renders_package_component_declaration_with_props_from_cargo_dependency() {
+        let workspace = make_temp_dir("ui-package-cargo-button-component");
+        let root = workspace.join("axonyx-site");
+        let ui_root = workspace.join("axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/foundry")).expect("ui foundry dir should exist");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r##"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"##
+            ),
+        )
+        .expect("app cargo manifest should write");
+        fs::write(
+            ui_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .expect("ui cargo manifest should write");
+        fs::write(ui_root.join("src/lib.rs"), "").expect("ui lib should write");
+        fs::write(
+            ui_root.join("Axonyx.package.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+namespace = "@axonyx/ui"
+
+[exports]
+ax_root = "src"
+"#,
+        )
+        .expect("ui package metadata should write");
+        fs::write(
+            ui_root.join("src/foundry/Button.ax"),
+            r##"
+component Button(variant = "", href = "#") {
+  <a class="ax-button" data-variant={variant} href={href}>
+    <Slot />
+  </a>
+}
+"##,
+        )
+        .expect("ui component should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { Button } from "@axonyx/ui/foundry/Button.ax"
+
+page Home
+
+<Button href="/docs" variant="primary">Docs</Button>
+"#,
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = test_dev_state(&root);
+        let html = render_route_html(&state, &route).expect("cargo package button should render");
+
+        assert!(html.contains(r#"<a class="ax-button" data-variant="primary" href="/docs">"#));
+        assert!(html.contains("Docs"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn renders_real_foundry_components_from_framework_vendor_package() {
+        let workspace = make_temp_dir("real-foundry-component-smoke");
+        let root = workspace.join("axonyx-site");
+        let ui_root = std::env::current_exe()
+            .expect("test executable path should resolve")
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("framework root should resolve from test executable")
+            .join("vendor/axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("src")).expect("src dir should exist");
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("app target should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "axonyx-site"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("app cargo manifest should write");
+        fs::write(
+            root.join("app/layout.ax"),
+            r#"
+import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
+import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
+import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
+
+page RootLayout
+
+<SiteShell max="xl">
+  <TextLink href="/docs">Docs</TextLink>
+  <ThemeSwitcher label="Theme" size="sm" surface="forged" storageKey="smoke-theme" ariaLabel="Theme switcher" />
+  <Slot />
+</SiteShell>
+"#,
+        )
+        .expect("layout should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { Button } from "@axonyx/ui/foundry/Button.ax"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
+import { Copy } from "@axonyx/ui/foundry/Copy.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+
+page Home
+
+<ContentGrid cols="2" gap="lg">
+  <SectionCard title="Foundry import smoke">
+    <Copy>Rendered from the real axonyx-ui package.</Copy>
+    <Button href="/posts" variant="primary" surface="forged">Open posts</Button>
+  </SectionCard>
+</ContentGrid>
+"#,
+        )
+        .expect("page should write");
+        let text_link_path = resolve_preview_import_path(&root, "@axonyx/ui/foundry/TextLink.ax")
+            .expect("TextLink import path should resolve");
+        assert!(
+            text_link_path.exists(),
+            "TextLink import should exist at {}",
+            text_link_path.display()
+        );
+
+        let route = resolve_route(&root, "/")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = test_dev_state(&root);
+        let html = render_route_html(&state, &route).expect("real Foundry imports should render");
+
+        assert!(html.contains(r#"class="ax-link""#));
+        assert!(html.contains(r#"href="/docs""#));
+        assert!(html.contains(r#"data-ax-theme-storage-key="smoke-theme""#));
+        assert!(html.contains(r#"data-max="xl""#));
+        assert!(html.contains("Foundry import smoke"));
+        assert!(html.contains(r#"href="/posts""#));
+        assert!(html.contains("Rendered from the real axonyx-ui package."));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn use_axonyx_ui_injects_package_css_and_js() {
         let root = make_temp_dir("use-axonyx-ui-assets");
         let ui_root = root.join("vendor/axonyx-ui");
@@ -20510,6 +21567,42 @@ page Home
         assert_eq!(diagnostics[0].code, "axonyx-import-parse");
         assert!(diagnostics[0].message.contains("SiteCard.ax"));
         assert!(diagnostics[0].message.contains("line 2"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_component_only_import_target() {
+        let root = make_temp_dir("check-component-only-import-target");
+        let page_path = root.join("app/page.ax");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/components/SiteCard.ax"),
+            r#"
+component SiteCard(title = "Demo") {
+  <article class="site-card">
+    <h2>{title}</h2>
+    <Slot />
+  </article>
+}
+"#,
+        )
+        .expect("component should write");
+
+        let diagnostics = check_ax_source_with_root(
+            &page_path,
+            r#"
+import { SiteCard } from "@/components/SiteCard.ax"
+
+page Home
+<SiteCard title="Hello" />
+"#,
+            Some(&root),
+        );
+
+        assert!(diagnostics.is_empty());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
