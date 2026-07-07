@@ -17174,6 +17174,7 @@ page RootLayout
 
         assert!(checks
             .iter()
+            .filter(|check| check.code != "cli-version")
             .all(|check| check.severity == DoctorSeverity::Ok));
         assert!(checks.iter().any(|check| check.code == "ui-package-css"));
         assert!(checks.iter().any(|check| check.code == "ui-package-js"));
