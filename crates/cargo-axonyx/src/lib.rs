@@ -77,7 +77,12 @@ static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String
     OnceLock::new();
 
 #[derive(Debug, Parser)]
-#[command(name = "ax")]
+#[command(
+    name = "ax",
+    version = AXONYX_CLI_VERSION,
+    about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.",
+    long_about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.\n\nCommon commands:\n  cargo ax run dev      Start the local development server\n  cargo ax build --clean Build a production-ready static/server bundle\n  cargo ax check        Run .ax diagnostics before build/deploy\n  cargo ax doctor       Inspect app, runtime, UI, server, and deploy readiness"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -85,23 +90,41 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Add an Axonyx module such as docs, site, ui, or cms.")]
     Add(AddArgs),
+    #[command(about = "Inspect action contracts and invalidation metadata.")]
     Actions(ActionsArgs),
+    #[command(about = "Inspect API route contracts or export OpenAPI/schema output.")]
     Api(ApiArgs),
+    #[command(about = "Build the Axonyx app into dist artifacts.")]
     Build(BuildArgs),
+    #[command(about = "Run source diagnostics without building.")]
     Check(CheckArgs),
+    #[command(about = "Inspect configured content collections.")]
     Content(ContentArgs),
+    #[command(about = "Check or pull database schema metadata.")]
     Db(DbArgs),
+    #[command(about = "Start the local development server.")]
     Dev(DevArgs),
+    #[command(about = "Inspect app, runtime, UI, server, state, and deploy readiness.")]
     Doctor(DoctorArgs),
+    #[command(about = "Print the Melt graph for framework internals.")]
     Graph(GraphArgs),
+    #[command(about = "Inspect or validate the Melt compiler graph.")]
     Melt(MeltArgs),
+    #[command(about = "List app and API routes.")]
     Routes(RoutesArgs),
+    #[command(about = "Run Axonyx commands such as dev/start with npm-like ergonomics.")]
     Run(RunArgs),
+    #[command(about = "Pull or infer Axonyx type schemas.")]
     Schema(SchemaArgs),
+    #[command(about = "Inspect state manifests and bindings.")]
     State(StateArgs),
+    #[command(about = "Start the streaming development server probe.")]
     Stream(DevArgs),
+    #[command(about = "Run Axonyx route/component/browser QA checks.")]
     Test(TestArgs),
+    #[command(about = "Upgrade registry dependencies and optionally reinstall the CLI.")]
     Upgrade(UpgradeArgs),
 }
 
@@ -1707,6 +1730,49 @@ fn installed_cargo_axonyx_version() -> Result<Option<String>> {
     Ok(None)
 }
 
+fn doctor_cli_version_check() -> DoctorCheck {
+    doctor_cli_version_check_from_installed(installed_cargo_axonyx_version())
+}
+
+fn doctor_cli_version_check_from_installed(installed: Result<Option<String>>) -> DoctorCheck {
+    match installed {
+        Ok(Some(version)) if version == AXONYX_CLI_VERSION => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Ok,
+            message: format!("cargo-axonyx {version} is current."),
+            hint: None,
+        },
+        Ok(Some(version)) if is_version_older(&version, AXONYX_CLI_VERSION) => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Warn,
+            message: format!(
+                "cargo-axonyx {version} is older than this CLI build {AXONYX_CLI_VERSION}."
+            ),
+            hint: Some("cargo install cargo-axonyx --force"),
+        },
+        Ok(Some(version)) => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "cargo-axonyx {version} is newer than this CLI build {AXONYX_CLI_VERSION}."
+            ),
+            hint: None,
+        },
+        Ok(None) => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Warn,
+            message: "Could not find cargo-axonyx in `cargo install --list`.".to_string(),
+            hint: Some("cargo install cargo-axonyx --force"),
+        },
+        Err(_) => DoctorCheck {
+            code: "cli-version",
+            severity: DoctorSeverity::Warn,
+            message: "Could not inspect installed cargo-axonyx version.".to_string(),
+            hint: Some("cargo install cargo-axonyx --force"),
+        },
+    }
+}
+
 fn doctor_command(args: DoctorArgs) -> Result<()> {
     let root = app_root()?;
     let checks = doctor_checks(&root, args.deploy);
@@ -1728,6 +1794,7 @@ fn doctor_command(args: DoctorArgs) -> Result<()> {
 fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
 
+    checks.push(doctor_cli_version_check());
     checks.push(doctor_file_check(
         root.join("Axonyx.toml").exists(),
         "axonyx-config",
@@ -16664,6 +16731,25 @@ page Home
     }
 
     #[test]
+    fn cli_version_reports_package_version() {
+        use clap::CommandFactory;
+
+        let version = Cli::command().render_version().to_string();
+
+        assert!(version.contains(AXONYX_CLI_VERSION));
+    }
+
+    #[test]
+    fn doctor_cli_version_warns_when_installed_cli_is_old() {
+        let check = doctor_cli_version_check_from_installed(Ok(Some("0.1.0".to_string())));
+
+        assert_eq!(check.code, "cli-version");
+        assert_eq!(check.severity, DoctorSeverity::Warn);
+        assert!(check.message.contains("older than this CLI build"));
+        assert_eq!(check.hint, Some("cargo install cargo-axonyx --force"));
+    }
+
+    #[test]
     fn parses_db_check_command() {
         let cli = Cli::try_parse_from([
             "cargo-ax",
@@ -17088,6 +17174,7 @@ page RootLayout
 
         assert!(checks
             .iter()
+            .filter(|check| check.code != "cli-version")
             .all(|check| check.severity == DoctorSeverity::Ok));
         assert!(checks.iter().any(|check| check.code == "ui-package-css"));
         assert!(checks.iter().any(|check| check.code == "ui-package-js"));

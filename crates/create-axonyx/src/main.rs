@@ -16,7 +16,11 @@ const DEFAULT_UI_VERSION: &str = "0.0.52";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonyx")]
-#[command(about = "Create a new Axonyx app", version)]
+#[command(
+    about = "Create a new Axonyx app",
+    version,
+    long_about = "Create a new Axonyx app.\n\nCommon flow:\n  create-axonyx my-site --template site --yes\n  cd my-site\n  cargo ax run dev\n\nTemplates:\n  minimal  Smallest possible app\n  site     Foundry UI starter for marketing/docs-style sites\n  docs     Documentation starter with nested routes"
+)]
 struct Cli {
     /// Name or path of the app directory to create
     project_name: String,
@@ -63,8 +67,11 @@ enum RuntimeSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum AppTemplate {
+    /// Smallest possible Axonyx app.
     Minimal,
+    /// Foundry UI starter for marketing/docs-style sites.
     Site,
+    /// Documentation starter with nested routes.
     Docs,
 }
 
