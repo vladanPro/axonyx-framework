@@ -67,15 +67,6 @@ return {
           </div>
         </section>
 
-        <section class="ax-sidebar-section">
-          <span class="ax-sidebar-section__title">Action</span>
-          <div class="ax-sidebar-section__body">
-            <a class="ax-sidebar-item" href="/feedback">
-              <span class="ax-sidebar-item__content">Feedback action</span>
-            </a>
-          </div>
-        </section>
-
         <Button href="/components" variant="primary" size="sm">Explore UI</Button>
       </div>
     </aside>

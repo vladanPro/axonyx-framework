@@ -25,9 +25,17 @@ jobs:
       - name: Test framework workspace
         run: cargo test
 
-      - name: Smoke core loop
+      - name: Smoke static site template
         shell: pwsh
         run: ./scripts/smoke-core-loop.ps1 -Template site
+
+      - name: Smoke static blog template
+        shell: pwsh
+        run: ./scripts/smoke-core-loop.ps1 -Template blog
+
+      - name: Smoke static docs template
+        shell: pwsh
+        run: ./scripts/smoke-core-loop.ps1 -Template docs
 
   runtime:
     name: Runtime Tests

@@ -40,8 +40,10 @@ use axonyx_runtime::server_prelude::{
 };
 use axonyx_runtime::{
     backend_prelude as ax_backend_runtime, execute_preview_action_sources,
-    execute_preview_route_request_sources, execute_preview_route_request_sources_with_runtime,
-    preview_ax_route_with_request_context_and_imports, AxPreviewActionResult,
+    execute_preview_action_sources_with_runtime, execute_preview_route_request_sources,
+    execute_preview_route_request_sources_with_runtime,
+    preview_ax_route_with_request_context_and_imports,
+    preview_ax_route_with_request_context_and_runtime_and_imports, AxPreviewActionResult,
     AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
 };
 use clap::{Parser, Subcommand, ValueEnum};
@@ -181,6 +183,10 @@ struct BuildArgs {
     /// Remove the output directory before generating build artifacts.
     #[arg(long)]
     clean: bool,
+
+    /// Generate and compile the app-specific production server binary.
+    #[arg(long)]
+    compiled: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -262,6 +268,10 @@ struct DevArgs {
     /// Use the production-server path. Kept for deploy scripts; Tokio is now the default transport.
     #[arg(long)]
     production_server: bool,
+
+    /// Run the app-specific compiled production binary created by `cargo ax build --compiled`.
+    #[arg(long)]
+    compiled: bool,
 }
 
 impl DevArgs {
@@ -1196,6 +1206,9 @@ fn build_command(args: BuildArgs) -> Result<()> {
     ensure_no_melt_diagnostics_for(&root, "build")?;
     let status = compile_backend_from_app_root(&root)?;
     let static_status = build_static_site_from_app_root(&root, &args.out_dir, args.clean)?;
+    if args.compiled {
+        build_compiled_production_binary(&root, &args.out_dir, &status)?;
+    }
     print_backend_build_status(&status);
     print_static_build_status(&static_status);
     Ok(())
@@ -7893,14 +7906,47 @@ fn add_reserved_cms_module() -> Result<()> {
 }
 
 fn run_dev_server(args: DevArgs) -> Result<()> {
+    if args.compiled {
+        bail!("`--compiled` is a production-only option; use `cargo ax run start --compiled`");
+    }
     run_http_server(args, AxServerMode::Dev, false)
 }
 
 fn run_start_server(args: DevArgs) -> Result<()> {
+    if args.compiled {
+        return run_compiled_production_binary(args);
+    }
     run_http_server(args, AxServerMode::Start, false)
 }
 
+fn run_compiled_production_binary(args: DevArgs) -> Result<()> {
+    let root = app_root()?;
+    let binary = compiled_production_binary_path(&root);
+    if !binary.is_file() {
+        bail!(
+            "compiled production binary was not found at '{}'. Run `cargo ax build --clean --compiled` first",
+            binary.display()
+        );
+    }
+
+    let env_port = std::env::var("PORT").ok();
+    let port = resolve_server_port(AxServerMode::Start, args.port, env_port.as_deref())?;
+    let status = Command::new(&binary)
+        .current_dir(&root)
+        .env("AXONYX_HOST", &args.host)
+        .env("AXONYX_PORT", port.to_string())
+        .status()
+        .with_context(|| format!("failed to start compiled server '{}'", binary.display()))?;
+    if !status.success() {
+        bail!("compiled Axonyx server exited with status {status}");
+    }
+    Ok(())
+}
+
 fn run_stream_server(args: DevArgs) -> Result<()> {
+    if args.compiled {
+        bail!("`--compiled` is not available for the development stream probe");
+    }
     run_http_server(args, AxServerMode::Dev, true)
 }
 
@@ -8077,6 +8123,158 @@ fn compile_backend_from_app_root(root: &Path) -> Result<BackendBuildStatus> {
         source_count: source_refs.len(),
         output_path,
     })
+}
+
+fn build_compiled_production_binary(
+    root: &Path,
+    out_dir: &Path,
+    backend_status: &BackendBuildStatus,
+) -> Result<()> {
+    if matches!(backend_status, BackendBuildStatus::NoSources { .. }) {
+        bail!("compiled production mode requires at least one backend .ax source");
+    }
+
+    let source_path = root.join("src").join("bin").join("axonyx-production.rs");
+    if let Some(parent) = source_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create compiled server directory '{}'",
+                parent.display()
+            )
+        })?;
+    }
+
+    let dist = resolve_output_dir(root, out_dir);
+    let dist_relative = dist.strip_prefix(root).unwrap_or(&dist);
+    let dist_literal = format!("{:?}", dist_relative.to_string_lossy());
+    let source = compiled_production_source(&dist_literal);
+    fs::write(&source_path, source).with_context(|| {
+        format!(
+            "failed to write compiled production server '{}'",
+            source_path.display()
+        )
+    })?;
+
+    let status = Command::new("cargo")
+        .args(["build", "--release", "--bin", "axonyx-production"])
+        .current_dir(root)
+        .status()
+        .context("failed to invoke cargo for the compiled production server")?;
+    if !status.success() {
+        bail!("compiled production build failed. Ensure axonyx-runtime enables the `axum` feature");
+    }
+
+    println!(
+        "Compiled app-specific production server into {}",
+        compiled_production_binary_path(root).display()
+    );
+    Ok(())
+}
+
+fn compiled_production_binary_path(root: &Path) -> PathBuf {
+    let name = if cfg!(windows) {
+        "axonyx-production.exe"
+    } else {
+        "axonyx-production"
+    };
+    root.join("target").join("release").join(name)
+}
+
+fn compiled_production_source(dist_literal: &str) -> String {
+    format!(
+        r#"use std::path::{{Component, Path, PathBuf}};
+use std::sync::Arc;
+
+use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxEnv}};
+use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
+
+#[path = "../generated/backend.rs"]
+mod backend;
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
+    let host = std::env::var("AXONYX_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port = std::env::var("AXONYX_PORT").unwrap_or_else(|_| "3000".to_string());
+    let bind = format!("{{host}}:{{port}}");
+    let dist = PathBuf::from({dist_literal});
+    let handler: AxCompiledHandler = Arc::new(move |request| handle_request(&dist, request));
+    println!("Axonyx compiled production server listening at http://{{bind}}");
+    serve_compiled_axum(bind, 1024 * 1024, handler)
+}}
+
+fn handle_request(dist: &Path, request: AxHttpRequest) -> AxHttpResponse {{
+    if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/health") {{
+        return secure(AxHttpResponse::text(200, "ok"));
+    }}
+
+    if request.target.split('?').next() == Some("/__axonyx/action") {{
+        return secure(AxHttpResponse::text(501, "compiled actions are not enabled in this preview"));
+    }}
+
+    if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
+        let response = (|| {{
+            let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
+            backend::dispatch_api_route(&runtime, &request)
+        }})();
+        return secure(match response {{
+            Ok(Some(response)) => response,
+            Ok(None) => AxHttpResponse::text(404, "Not Found"),
+            Err(error) => {{
+                eprintln!("Axonyx compiled API error: {{error}}");
+                AxHttpResponse::text(500, "Internal Server Error")
+            }}
+        }});
+    }}
+
+    if !request.method.eq_ignore_ascii_case("GET") && !request.method.eq_ignore_ascii_case("HEAD") {{
+        return secure(AxHttpResponse::text(405, "Method Not Allowed"));
+    }}
+    let mut response = static_response(dist, &request.target)
+        .unwrap_or_else(|| AxHttpResponse::text(404, "Not Found"));
+    if request.method.eq_ignore_ascii_case("HEAD") {{
+        response.body = AxBody::fixed(Vec::new());
+    }}
+    secure(response)
+}}
+
+fn static_response(dist: &Path, target: &str) -> Option<AxHttpResponse> {{
+    let path = target.split('?').next().unwrap_or("/");
+    let relative = path.trim_start_matches('/');
+    let relative = if relative.is_empty() {{ "index.html" }} else {{ relative }};
+    let relative_path = Path::new(relative);
+    if relative_path.components().any(|part| !matches!(part, Component::Normal(_))) {{ return None; }}
+
+    let direct = dist.join(relative_path);
+    let file = if direct.is_file() {{ direct }} else {{ direct.join("index.html") }};
+    if !file.is_file() {{ return None; }}
+    let body = std::fs::read(&file).ok()?;
+    Some(AxHttpResponse::bytes(200, content_type(&file), body))
+}}
+
+fn content_type(path: &Path) -> &'static str {{
+    match path.extension().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {{
+        "html" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }}
+}}
+
+fn secure(response: AxHttpResponse) -> AxHttpResponse {{
+    response
+        .with_header("X-Content-Type-Options", "nosniff")
+        .with_header("X-Frame-Options", "SAMEORIGIN")
+        .with_header("Referrer-Policy", "strict-origin-when-cross-origin")
+}}
+"#
+    )
 }
 
 fn print_backend_build_status(status: &BackendBuildStatus) {
@@ -10941,11 +11139,14 @@ fn handle_http_request(
     }
 
     if request.method == "POST" && request.target.starts_with("/__axonyx/action") {
-        return handle_action_request(state, &request);
+        if let Some(response) = reject_cross_site_action_request(&request) {
+            return Ok(response);
+        }
+        return handle_action_request(state, mode, &request);
     }
 
     if request.method == "GET" && request.target.starts_with("/__axonyx/data") {
-        return handle_data_request(state, &request);
+        return handle_data_request(state, mode, &request);
     }
 
     if request.method == "GET" && request.target == "/favicon.ico" {
@@ -11104,16 +11305,12 @@ async fn axum_tokio_handler(
             let started = Instant::now();
             let response = match handle_http_request(&state.dev, state.mode, request.clone()) {
                 Ok(response) => response,
-                Err(error) => AxHttpResponse::text(500, format!("Axonyx server error: {error:#}"))
-                    .with_no_store(),
+                Err(error) => internal_server_error_response(state.mode, "request", &error),
             };
             let response =
                 match apply_server_response_policy(&state.dev, &request, response, suppress_body) {
                     Ok(response) => response,
-                    Err(error) => {
-                        AxHttpResponse::text(500, format!("Axonyx server policy error: {error:#}"))
-                            .with_no_store()
-                    }
+                    Err(error) => internal_server_error_response(state.mode, "policy", &error),
                 };
             log_request_if_enabled(&state.dev, &request, &response, started.elapsed());
             let mut response = axonyx_response_to_axum(response);
@@ -11124,6 +11321,20 @@ async fn axum_tokio_handler(
         }
         Err(error) => axonyx_response_to_axum(error),
     }
+}
+
+fn internal_server_error_response(
+    mode: AxServerMode,
+    context: &str,
+    error: &anyhow::Error,
+) -> AxHttpResponse {
+    eprintln!("Axonyx {} {context} error: {error:#}", mode.label());
+    let message = if mode == AxServerMode::Dev {
+        format!("Axonyx server {context} error: {error:#}")
+    } else {
+        "Internal Server Error".to_string()
+    };
+    AxHttpResponse::text(500, message).with_no_store()
 }
 
 async fn axum_request_to_dev_request(
@@ -11939,13 +12150,10 @@ fn format_bytes(bytes: usize) -> String {
 
 fn handle_action_request(
     state: &DevServerState,
+    mode: AxServerMode,
     request: &AxHttpRequest,
 ) -> Result<AxHttpResponse> {
-    let content_type = request
-        .headers
-        .get("content-type")
-        .map(String::as_str)
-        .unwrap_or("");
+    let content_type = request.header_value("Content-Type").unwrap_or("");
     if !content_type.starts_with("application/x-www-form-urlencoded") {
         return Ok(
             AxHttpResponse::text(415, "expected application/x-www-form-urlencoded").with_no_store(),
@@ -11973,16 +12181,31 @@ fn handle_action_request(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let input_fields = parse_form_body(&request.body);
-    let mut store = state
-        .preview_store
-        .lock()
-        .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
-    let result = execute_preview_action_sources(
-        &action_source_refs,
-        &action_name,
-        &input_fields,
-        &mut store,
-    )
+    let result = if mode == AxServerMode::Start
+        && backend_source_refs_use_database(&action_source_refs)?
+    {
+        let mut store = state
+            .preview_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
+            .clone();
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)
+            .with_context(|| "failed to initialize action database runtime from environment")?;
+        execute_preview_action_sources_with_runtime(
+            &action_source_refs,
+            &action_name,
+            &input_fields,
+            &runtime,
+            &mut store,
+        )
+    } else {
+        let mut store = state
+            .preview_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+        execute_preview_action_sources(&action_source_refs, &action_name, &input_fields, &mut store)
+    }
     .with_context(|| {
         format!(
             "failed to execute action '{}' from '{}'",
@@ -11997,6 +12220,65 @@ fn handle_action_request(
 
     let redirect_to = result.redirect_to.unwrap_or(route.request_path);
     Ok(redirect_response(303, &redirect_to))
+}
+
+fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
+    for source in sources {
+        let document = parse_backend_ax(source)?;
+        let plan = lower_backend_document(&document)?;
+        if backend_plan_uses_database(&plan) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn reject_cross_site_action_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
+    if request
+        .header_value("Sec-Fetch-Site")
+        .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
+    {
+        return Some(forbidden_action_response());
+    }
+
+    let claimed_origin = request
+        .header_value("Origin")
+        .or_else(|| request.header_value("Referer"));
+    let Some(claimed_origin) = claimed_origin else {
+        // Non-browser clients do not necessarily send browser origin metadata.
+        return None;
+    };
+    let expected_host = request
+        .header_value("X-Forwarded-Host")
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| request.header_value("Host"));
+
+    if !origin_matches_host(claimed_origin, expected_host) {
+        return Some(forbidden_action_response());
+    }
+
+    None
+}
+
+fn origin_matches_host(origin: &str, expected_host: Option<&str>) -> bool {
+    let Some(expected_host) = expected_host else {
+        return false;
+    };
+    let origin = origin.trim();
+    let Some((scheme, remainder)) = origin.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let authority = remainder.split('/').next().unwrap_or("").trim();
+    !authority.is_empty() && authority.eq_ignore_ascii_case(expected_host.trim())
+}
+
+fn forbidden_action_response() -> AxHttpResponse {
+    AxHttpResponse::text(403, "Forbidden: cross-site Axonyx action request").with_no_store()
 }
 
 fn wants_action_patch_response(
@@ -12071,7 +12353,11 @@ fn action_error_response(
     .with_no_store())
 }
 
-fn handle_data_request(state: &DevServerState, request: &AxHttpRequest) -> Result<AxHttpResponse> {
+fn handle_data_request(
+    state: &DevServerState,
+    mode: AxServerMode,
+    request: &AxHttpRequest,
+) -> Result<AxHttpResponse> {
     let request_path =
         extract_action_query_param(&request.target, "path").unwrap_or_else(|| "/".to_string());
     let binding_name = extract_action_query_param(&request.target, "name").unwrap_or_default();
@@ -12091,7 +12377,8 @@ fn handle_data_request(state: &DevServerState, request: &AxHttpRequest) -> Resul
     };
 
     let version = route_version(&state.root, &route)?;
-    let rendered_html = render_route_html(state, &route)?;
+    let rendered_html =
+        render_route_html_with_database_runtime(state, &route, mode == AxServerMode::Start)?;
     let page_fragment = extract_page_root_fragment(&rendered_html);
     let body = serde_json::to_vec(&serde_json::json!({
         "ok": true,
@@ -12876,6 +13163,14 @@ fn parse_dynamic_app_segment(segment: &str) -> Option<&str> {
 }
 
 fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<String> {
+    render_route_html_with_database_runtime(state, route, false)
+}
+
+fn render_route_html_with_database_runtime(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    use_database_runtime: bool,
+) -> Result<String> {
     let page_source = fs::read_to_string(&route.page_path)
         .with_context(|| format!("failed to read '{}'", route.page_path.display()))?;
     let layout_sources = route
@@ -12908,19 +13203,37 @@ fn render_route_html(state: &DevServerState, route: &ResolvedRoute) -> Result<St
     let store = state
         .preview_store
         .lock()
-        .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+        .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
+        .clone();
     let import_resolver = |source: &str| load_preview_import_source(&state.root, source);
 
-    let html = preview_ax_route_with_request_context_and_imports(
-        &layout_refs,
-        &loader_refs,
-        &action_refs,
-        &page_source,
-        &route.request_target,
-        &route.params,
-        &store,
-        &import_resolver,
-    )
+    let html = if use_database_runtime && backend_source_refs_use_database(&loader_refs)? {
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)
+            .with_context(|| "failed to initialize page database runtime from environment")?;
+        preview_ax_route_with_request_context_and_runtime_and_imports(
+            &layout_refs,
+            &loader_refs,
+            &action_refs,
+            &page_source,
+            &route.request_target,
+            &route.params,
+            &runtime,
+            &store,
+            &import_resolver,
+        )
+    } else {
+        preview_ax_route_with_request_context_and_imports(
+            &layout_refs,
+            &loader_refs,
+            &action_refs,
+            &page_source,
+            &route.request_target,
+            &route.params,
+            &store,
+            &import_resolver,
+        )
+    }
     .with_context(|| {
         format!(
             "failed to render route '{}' from '{}'",
@@ -13141,7 +13454,8 @@ fn render_route_response_with_status(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
-    let mut html = render_route_html(state, route)?;
+    let mut html =
+        render_route_html_with_database_runtime(state, route, !inject_dev_client_script)?;
     if inject_dev_client_script {
         html = inject_dev_client(&html, &route.request_path);
     }
@@ -13201,10 +13515,14 @@ fn render_error_response(
         }
     }
 
+    let detail = if inject_dev_client_script {
+        format!("<pre>{}</pre>", html_escape(&error.to_string()))
+    } else {
+        String::new()
+    };
     let html = format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx 500</title></head><body><h1>Application error</h1><p>Axonyx could not render <code>{}</code>.</p><pre>{}</pre></body></html>",
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx 500</title></head><body><h1>Application error</h1><p>Axonyx could not render <code>{}</code>.</p>{detail}</body></html>",
         html_escape(request_target),
-        html_escape(&error.to_string())
     );
     Ok(AxHttpResponse::html(500, html).with_no_store())
 }
@@ -16740,6 +17058,37 @@ page Home
     }
 
     #[test]
+    fn parses_compiled_build_and_start_flags() {
+        let build = Cli::try_parse_from(["cargo-ax", "build", "--compiled"])
+            .expect("compiled build should parse");
+        let Commands::Build(build) = build.command else {
+            panic!("expected build command");
+        };
+        assert!(build.compiled);
+
+        let start = Cli::try_parse_from(["cargo-ax", "run", "start", "--compiled"])
+            .expect("compiled start should parse");
+        let Commands::Run(start) = start.command else {
+            panic!("expected run command");
+        };
+        let RunCommands::Start(start) = start.command else {
+            panic!("expected start command");
+        };
+        assert!(start.compiled);
+    }
+
+    #[test]
+    fn compiled_production_source_uses_generated_dispatch_and_safe_static_paths() {
+        let source = compiled_production_source("\"dist\"");
+
+        assert!(source.contains("backend::dispatch_api_route"));
+        assert!(source.contains("serve_compiled_axum"));
+        assert!(source.contains("Component::Normal"));
+        assert!(source.contains("compiled actions are not enabled"));
+        assert!(!source.contains("read_to_string"));
+    }
+
+    #[test]
     fn doctor_cli_version_warns_when_installed_cli_is_old() {
         let check = doctor_cli_version_check_from_installed(Ok(Some("0.1.0".to_string())));
 
@@ -18719,6 +19068,93 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn action_origin_guard_rejects_cross_site_browser_posts() {
+        let request = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=Save")
+            .with_header("Host", "axonyx.dev")
+            .with_header("Origin", "https://attacker.example")
+            .with_header("Sec-Fetch-Site", "cross-site");
+
+        let response = reject_cross_site_action_request(&request)
+            .expect("cross-site browser action should be rejected");
+        assert_eq!(response.status, 403);
+    }
+
+    #[test]
+    fn action_origin_guard_allows_same_origin_and_non_browser_clients() {
+        let browser = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=Save")
+            .with_header("Host", "axonyx.dev")
+            .with_header("Origin", "https://axonyx.dev")
+            .with_header("Sec-Fetch-Site", "same-origin");
+        assert!(reject_cross_site_action_request(&browser).is_none());
+
+        let cli = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=Save");
+        assert!(reject_cross_site_action_request(&cli).is_none());
+    }
+
+    #[test]
+    fn production_action_request_writes_through_database_runtime() {
+        let root = make_temp_dir("production-action-database-runtime");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action CreatePost
+  input:
+    title: string
+
+  insert posts
+    title: input.title
+    excerpt: "Production runtime write"
+    slug: "production-runtime-write"
+    status: "published"
+    created_at: "2026-07-11"
+  return ok
+"#,
+        )
+        .expect("actions should write");
+        seed_test_sqlite_posts(&root);
+        let state = test_dev_state(&root);
+        let body = "title=Stored+through+runtime";
+        let request = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=CreatePost")
+            .with_header("Content-Type", "application/x-www-form-urlencoded")
+            .with_body(body.as_bytes().to_vec());
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("action should run");
+        assert_eq!(response.status, 303);
+
+        let connection = rusqlite::Connection::open(root.join("posts.sqlite"))
+            .expect("sqlite database should reopen");
+        let count: i64 = connection
+            .query_row(
+                "select count(*) from posts where title = 'Stored through runtime'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inserted post should be queryable");
+        assert_eq!(count, 1);
+
+        drop(connection);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn production_server_errors_hide_internal_details() {
+        let error = anyhow::anyhow!("database at C:\\secret\\posts.sqlite failed");
+        let production = internal_server_error_response(AxServerMode::Start, "request", &error);
+        let development = internal_server_error_response(AxServerMode::Dev, "request", &error);
+
+        assert_eq!(production.body.into_bytes(), b"Internal Server Error");
+        assert!(String::from_utf8(development.body.into_bytes())
+            .expect("development error should be UTF-8")
+            .contains("C:\\secret\\posts.sqlite"));
+    }
+
+    #[test]
     fn action_request_can_return_state_patch_response() {
         let root = make_temp_dir("action-patch-response");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
@@ -19419,6 +19855,40 @@ query loadFeatured(status: String) -> Post[]
         assert_eq!(response.status, 200);
         assert_eq!(response.content_type, "application/json; charset=utf-8");
         let body = String::from_utf8(response.body).expect("json response should be utf-8");
+        assert!(body.contains("SQLite Alpha"));
+        assert!(body.contains("SQLite Beta"));
+        assert!(!body.contains("SQLite Draft"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn renders_page_loader_through_database_runtime() {
+        let root = make_temp_dir("page-loader-database-runtime");
+        seed_test_sqlite_posts(&root);
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            "query loadPosts() -> Post[]\n  data posts = db.posts.all()\n    where status = \"published\"\n    order created_at desc\n  return posts\n",
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            "page Posts\n  data posts = loadPosts()\n  each post in posts\n    Copy -> post.title\n",
+        )
+        .expect("page should write");
+
+        let state = test_dev_state(&root);
+        let response = handle_http_request(
+            &state,
+            AxServerMode::Start,
+            AxHttpRequest::new("GET", "/posts"),
+        )
+        .expect("page request should run");
+        let body = String::from_utf8(response.body.into_bytes()).expect("HTML should be UTF-8");
+
         assert!(body.contains("SQLite Alpha"));
         assert!(body.contains("SQLite Beta"));
         assert!(!body.contains("SQLite Draft"));

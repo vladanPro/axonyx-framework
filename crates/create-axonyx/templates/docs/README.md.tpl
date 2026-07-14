@@ -49,9 +49,8 @@ The dev server runs at `http://127.0.0.1:3000`. The validation loop checks `.ax`
 sources, regenerates `src/generated/backend.rs`, and writes static HTML into
 `dist/`.
 
-`cargo ax actions` prints route-local action contracts from `app/**/actions.ax`.
-In this template it shows the `/feedback` action inputs, including optional
-defaults such as `name?: string = "anonymous"` and `tone?: string = "idea"`.
+This template is fully static. Add route actions later only when the documentation
+site genuinely needs a server-side interaction.
 
 ## Fast QA
 
@@ -73,7 +72,6 @@ dist/
   components/index.html
   reference/index.html
   examples/index.html
-  feedback/index.html
 ```
 
 Dynamic docs routes can be prerendered through `Axonyx.toml`:
@@ -104,7 +102,6 @@ Suggested first edit:
 
 - docs-first `app/page.ax`
 - section pages for `getting-started`, `components`, `reference`, and `examples`
-- feedback action demo in `app/feedback/page.ax`
 - reusable Foundry imports from `@axonyx/ui/...`
 - static brand assets in `public/`
 - room to add explicit `routes/` and `jobs/` later when the docs site needs APIs or automation
@@ -116,4 +113,3 @@ Suggested first edit:
 - `/components`
 - `/reference`
 - `/examples`
-- `/feedback`

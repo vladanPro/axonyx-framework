@@ -2,6 +2,7 @@
 pub enum AppTemplate {
     Minimal,
     Site,
+    Blog,
     Docs,
 }
 
@@ -33,21 +34,44 @@ const APP_GITIGNORE: &str = include_str!("../templates/minimal/.gitignore.tpl");
 const APP_ENV_EXAMPLE: &str = include_str!("../templates/minimal/.env.example.tpl");
 const APP_AEGIS_TOML: &str = include_str!("../templates/minimal/aegis.toml.tpl");
 const APP_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/minimal/public/favicon.svg.tpl");
+const STATIC_APP_MAIN_RS: &str = include_str!("../templates/static/src/main.rs.tpl");
+const STATIC_GENERATED_BACKEND_RS: &str =
+    include_str!("../templates/static/src/generated/backend.rs.tpl");
 
 const SITE_APP_LAYOUT_AX: &str = include_str!("../templates/site/app/layout.ax.tpl");
 const SITE_APP_PAGE_AX: &str = include_str!("../templates/site/app/page.ax.tpl");
 const SITE_APP_NOT_FOUND_AX: &str = include_str!("../templates/site/app/not-found.ax.tpl");
 const SITE_APP_ERROR_AX: &str = include_str!("../templates/site/app/error.ax.tpl");
-const SITE_APP_POSTS_PAGE_AX: &str = include_str!("../templates/site/app/posts/page.ax.tpl");
-const SITE_APP_POSTS_LOADER_AX: &str = include_str!("../templates/site/app/posts/loader.ax.tpl");
-const SITE_APP_POSTS_ACTIONS_AX: &str = include_str!("../templates/site/app/posts/actions.ax.tpl");
-const SITE_APP_ROUTE_POSTS_AX: &str = include_str!("../templates/site/routes/api/posts.ax.tpl");
-const SITE_APP_JOB_DIGEST_AX: &str = include_str!("../templates/site/jobs/digest.ax.tpl");
 const SITE_APP_README: &str = include_str!("../templates/site/README.md.tpl");
 const SITE_APP_AEGIS_TOML: &str = include_str!("../templates/site/aegis.toml.tpl");
 const SITE_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/site/public/favicon.svg.tpl");
 const SITE_PUBLIC_BRAND_MARK_SVG: &str =
     include_str!("../templates/site/public/brand-mark.svg.tpl");
+
+const SITE_APP_ABOUT_AX: &str = include_str!("../templates/site/app/about/page.ax.tpl");
+const SITE_APP_CONTACT_AX: &str = include_str!("../templates/site/app/contact/page.ax.tpl");
+
+const BLOG_AXONYX_TOML: &str = include_str!("../templates/blog/Axonyx.toml.tpl");
+const BLOG_APP_LAYOUT_AX: &str = include_str!("../templates/blog/app/layout.ax.tpl");
+const BLOG_APP_PAGE_AX: &str = include_str!("../templates/blog/app/page.ax.tpl");
+const BLOG_APP_LOADER_AX: &str = include_str!("../templates/blog/app/loader.ax.tpl");
+const BLOG_APP_ABOUT_AX: &str = include_str!("../templates/blog/app/about/page.ax.tpl");
+const BLOG_APP_POST_AX: &str = include_str!("../templates/blog/app/blog/[slug]/page.ax.tpl");
+const BLOG_APP_POST_LOADER_AX: &str =
+    include_str!("../templates/blog/app/blog/[slug]/loader.ax.tpl");
+const BLOG_APP_NOT_FOUND_AX: &str = include_str!("../templates/blog/app/not-found.ax.tpl");
+const BLOG_APP_ERROR_AX: &str = include_str!("../templates/blog/app/error.ax.tpl");
+const BLOG_CONTENT_HELLO_AXONYX: &str =
+    include_str!("../templates/blog/content/posts/hello-axonyx.md.tpl");
+const BLOG_CONTENT_FOUNDRY_NOTES: &str =
+    include_str!("../templates/blog/content/posts/foundry-notes.md.tpl");
+const BLOG_CONTENT_STATIC_RUST: &str =
+    include_str!("../templates/blog/content/posts/static-rust-sites.md.tpl");
+const BLOG_APP_README: &str = include_str!("../templates/blog/README.md.tpl");
+const BLOG_APP_AEGIS_TOML: &str = include_str!("../templates/blog/aegis.toml.tpl");
+const BLOG_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/blog/public/favicon.svg.tpl");
+const BLOG_PUBLIC_BRAND_MARK_SVG: &str =
+    include_str!("../templates/blog/public/brand-mark.svg.tpl");
 
 const DOCS_APP_LAYOUT_AX: &str = include_str!("../templates/docs/app/layout.ax.tpl");
 const DOCS_APP_PAGE_AX: &str = include_str!("../templates/docs/app/page.ax.tpl");
@@ -58,9 +82,6 @@ const DOCS_APP_GETTING_STARTED_AX: &str =
 const DOCS_APP_REFERENCE_AX: &str = include_str!("../templates/docs/app/reference/page.ax.tpl");
 const DOCS_APP_EXAMPLES_AX: &str = include_str!("../templates/docs/app/examples/page.ax.tpl");
 const DOCS_APP_COMPONENTS_AX: &str = include_str!("../templates/docs/app/components/page.ax.tpl");
-const DOCS_APP_FEEDBACK_PAGE_AX: &str = include_str!("../templates/docs/app/feedback/page.ax.tpl");
-const DOCS_APP_FEEDBACK_ACTIONS_AX: &str =
-    include_str!("../templates/docs/app/feedback/actions.ax.tpl");
 const DOCS_APP_README: &str = include_str!("../templates/docs/README.md.tpl");
 const DOCS_APP_AEGIS_TOML: &str = include_str!("../templates/docs/aegis.toml.tpl");
 const DOCS_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/docs/public/favicon.svg.tpl");
@@ -83,10 +104,12 @@ pub fn template_files(
     let axonyx_toml = match template {
         AppTemplate::Minimal => APP_AXONYX_TOML.to_string(),
         AppTemplate::Site | AppTemplate::Docs => ui_ready_axonyx_toml(),
+        AppTemplate::Blog => BLOG_AXONYX_TOML.to_string(),
     };
     let aegis_toml = match template {
         AppTemplate::Minimal => APP_AEGIS_TOML,
         AppTemplate::Site => SITE_APP_AEGIS_TOML,
+        AppTemplate::Blog => BLOG_APP_AEGIS_TOML,
         AppTemplate::Docs => DOCS_APP_AEGIS_TOML,
     };
 
@@ -96,24 +119,8 @@ pub fn template_files(
             contents: apply_vars(APP_CARGO_TOML, &vars),
         },
         TemplateFile {
-            relative_path: "src/main.rs",
-            contents: apply_vars(APP_MAIN_RS, &vars),
-        },
-        TemplateFile {
             relative_path: "src/generated/mod.rs",
             contents: apply_vars(APP_GENERATED_MOD_RS, &vars),
-        },
-        TemplateFile {
-            relative_path: "src/generated/backend.rs",
-            contents: apply_vars(APP_GENERATED_BACKEND_RS, &vars),
-        },
-        TemplateFile {
-            relative_path: "src/domain/posts.rs",
-            contents: apply_vars(APP_DOMAIN_POSTS_RS, &vars),
-        },
-        TemplateFile {
-            relative_path: "src/db/mod.rs",
-            contents: apply_vars(APP_DB_MOD_RS, &vars),
         },
         TemplateFile {
             relative_path: "Axonyx.toml",
@@ -124,14 +131,46 @@ pub fn template_files(
             contents: apply_vars(aegis_toml, &vars),
         },
         TemplateFile {
-            relative_path: ".env.example",
-            contents: apply_vars(APP_ENV_EXAMPLE, &vars),
-        },
-        TemplateFile {
             relative_path: ".gitignore",
             contents: apply_vars(APP_GITIGNORE, &vars),
         },
     ];
+
+    if template == AppTemplate::Minimal {
+        files.extend([
+            TemplateFile {
+                relative_path: "src/main.rs",
+                contents: apply_vars(APP_MAIN_RS, &vars),
+            },
+            TemplateFile {
+                relative_path: "src/generated/backend.rs",
+                contents: apply_vars(APP_GENERATED_BACKEND_RS, &vars),
+            },
+            TemplateFile {
+                relative_path: "src/domain/posts.rs",
+                contents: apply_vars(APP_DOMAIN_POSTS_RS, &vars),
+            },
+            TemplateFile {
+                relative_path: "src/db/mod.rs",
+                contents: apply_vars(APP_DB_MOD_RS, &vars),
+            },
+            TemplateFile {
+                relative_path: ".env.example",
+                contents: apply_vars(APP_ENV_EXAMPLE, &vars),
+            },
+        ]);
+    } else {
+        files.extend([
+            TemplateFile {
+                relative_path: "src/main.rs",
+                contents: apply_vars(STATIC_APP_MAIN_RS, &vars),
+            },
+            TemplateFile {
+                relative_path: "src/generated/backend.rs",
+                contents: apply_vars(STATIC_GENERATED_BACKEND_RS, &vars),
+            },
+        ]);
+    }
 
     match template {
         AppTemplate::Minimal => {
@@ -193,10 +232,6 @@ pub fn template_files(
                     contents: apply_vars(SITE_APP_LAYOUT_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/backend.ax",
-                    contents: apply_vars(APP_BACKEND_AX, &vars),
-                },
-                TemplateFile {
                     relative_path: "app/page.ax",
                     contents: apply_vars(SITE_APP_PAGE_AX, &vars),
                 },
@@ -209,24 +244,12 @@ pub fn template_files(
                     contents: apply_vars(SITE_APP_ERROR_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/posts/page.ax",
-                    contents: apply_vars(SITE_APP_POSTS_PAGE_AX, &vars),
+                    relative_path: "app/about/page.ax",
+                    contents: apply_vars(SITE_APP_ABOUT_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/posts/loader.ax",
-                    contents: apply_vars(SITE_APP_POSTS_LOADER_AX, &vars),
-                },
-                TemplateFile {
-                    relative_path: "app/posts/actions.ax",
-                    contents: apply_vars(SITE_APP_POSTS_ACTIONS_AX, &vars),
-                },
-                TemplateFile {
-                    relative_path: "routes/api/posts.ax",
-                    contents: apply_vars(SITE_APP_ROUTE_POSTS_AX, &vars),
-                },
-                TemplateFile {
-                    relative_path: "jobs/digest.ax",
-                    contents: apply_vars(SITE_APP_JOB_DIGEST_AX, &vars),
+                    relative_path: "app/contact/page.ax",
+                    contents: apply_vars(SITE_APP_CONTACT_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "public/favicon.svg",
@@ -242,15 +265,71 @@ pub fn template_files(
                 },
             ]);
         }
+        AppTemplate::Blog => {
+            files.extend([
+                TemplateFile {
+                    relative_path: "app/layout.ax",
+                    contents: apply_vars(BLOG_APP_LAYOUT_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/page.ax",
+                    contents: apply_vars(BLOG_APP_PAGE_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/loader.ax",
+                    contents: apply_vars(BLOG_APP_LOADER_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/about/page.ax",
+                    contents: apply_vars(BLOG_APP_ABOUT_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/blog/[slug]/page.ax",
+                    contents: apply_vars(BLOG_APP_POST_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/blog/[slug]/loader.ax",
+                    contents: apply_vars(BLOG_APP_POST_LOADER_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/not-found.ax",
+                    contents: apply_vars(BLOG_APP_NOT_FOUND_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "app/error.ax",
+                    contents: apply_vars(BLOG_APP_ERROR_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "content/posts/hello-axonyx.md",
+                    contents: apply_vars(BLOG_CONTENT_HELLO_AXONYX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "content/posts/foundry-notes.md",
+                    contents: apply_vars(BLOG_CONTENT_FOUNDRY_NOTES, &vars),
+                },
+                TemplateFile {
+                    relative_path: "content/posts/static-rust-sites.md",
+                    contents: apply_vars(BLOG_CONTENT_STATIC_RUST, &vars),
+                },
+                TemplateFile {
+                    relative_path: "public/favicon.svg",
+                    contents: apply_vars(BLOG_PUBLIC_FAVICON_SVG, &vars),
+                },
+                TemplateFile {
+                    relative_path: "public/brand-mark.svg",
+                    contents: apply_vars(BLOG_PUBLIC_BRAND_MARK_SVG, &vars),
+                },
+                TemplateFile {
+                    relative_path: "README.md",
+                    contents: apply_vars(BLOG_APP_README, &vars),
+                },
+            ]);
+        }
         AppTemplate::Docs => {
             files.extend([
                 TemplateFile {
                     relative_path: "app/layout.ax",
                     contents: apply_vars(DOCS_APP_LAYOUT_AX, &vars),
-                },
-                TemplateFile {
-                    relative_path: "app/backend.ax",
-                    contents: apply_vars(APP_BACKEND_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "app/page.ax",
@@ -279,14 +358,6 @@ pub fn template_files(
                 TemplateFile {
                     relative_path: "app/components/page.ax",
                     contents: apply_vars(DOCS_APP_COMPONENTS_AX, &vars),
-                },
-                TemplateFile {
-                    relative_path: "app/feedback/page.ax",
-                    contents: apply_vars(DOCS_APP_FEEDBACK_PAGE_AX, &vars),
-                },
-                TemplateFile {
-                    relative_path: "app/feedback/actions.ax",
-                    contents: apply_vars(DOCS_APP_FEEDBACK_ACTIONS_AX, &vars),
                 },
                 TemplateFile {
                     relative_path: "public/favicon.svg",

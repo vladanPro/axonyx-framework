@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("minimal", "site", "docs")]
+  [ValidateSet("minimal", "site", "blog", "docs")]
   [string] $Template = "site",
 
   [int] $Port = 3917,
@@ -132,8 +132,19 @@ function Invoke-TemplateRouteChecks {
 
   if ($Template -eq "docs") {
     Invoke-SmokeRequest -Url "$BaseUrl/getting-started" -ExpectedStatus 200 -Expect "Getting Started|getting started" | Out-Null
-    Invoke-SmokeRequest -Url "$BaseUrl/feedback" -ExpectedStatus 200 -Expect "Feedback" | Out-Null
-    Invoke-SmokeCurlRequest -Url "$BaseUrl/__axonyx/action?path=%2Ffeedback&name=SendFeedback" -Method "POST" -Body "name=Smoke&message=Great+docs&tone=idea" -Headers @("Accept: application/ax-patch+json", "Content-Type: application/x-www-form-urlencoded") -ExpectedStatus 200 -Expect "feedbackStatus|idea" | Out-Null
+    Invoke-SmokeRequest -Url "$BaseUrl/components" -ExpectedStatus 200 -Expect "Component showcase" | Out-Null
+    return
+  }
+
+  if ($Template -eq "site") {
+    Invoke-SmokeRequest -Url "$BaseUrl/about" -ExpectedStatus 200 -Expect "Small team" | Out-Null
+    Invoke-SmokeRequest -Url "$BaseUrl/contact" -ExpectedStatus 200 -Expect "Start with an email" | Out-Null
+    return
+  }
+
+  if ($Template -eq "blog") {
+    Invoke-SmokeRequest -Url "$BaseUrl/about" -ExpectedStatus 200 -Expect "public workbench" | Out-Null
+    Invoke-SmokeRequest -Url "$BaseUrl/blog/hello-axonyx" -ExpectedStatus 200 -Expect "Hello from the Axonyx workbench" | Out-Null
     return
   }
 
@@ -358,7 +369,7 @@ try {
   Invoke-SmokeCurlRequest -Url "$baseUrl/" -Headers @("Accept-Encoding: gzip") -ExpectedStatus 200 -Expect "Content-Encoding: gzip" | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/__axonyx/health" -ExpectedStatus 200 -Expect '"ok":true|"ok": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
   Invoke-OversizedHeaderSmoke -HostName "127.0.0.1" -Port $Port
-  if ($Template -ne "docs") {
+  if ($Template -eq "minimal") {
     Invoke-ChunkedPostSmoke -HostName "127.0.0.1" -Port $Port
   }
   Invoke-MalformedRequestSmoke -HostName "127.0.0.1" -Port $Port
@@ -369,7 +380,7 @@ try {
     Invoke-SmokeRequest -Url "$baseUrl/_ax/pkg/axonyx-ui/index.css" -ExpectedStatus 200 -ExpectHeader "Cache-Control" -ExpectHeaderValue "public, max-age=31536000, immutable" | Out-Null
   }
   Invoke-SmokeRequest -Url "$baseUrl/" -Method "HEAD" -ExpectedStatus 200 | Out-Null
-  Invoke-SmokeRequest -Url "$baseUrl/definitely-missing" -ExpectedStatus 404 -Expect "not found|Not found|Page not found|Back to home" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/definitely-missing" -ExpectedStatus 404 -Expect "404|not found|Not found|Page not found|Back to home" | Out-Null
 
   $serverLog = Get-Content -LiteralPath $stdout -Raw
   if ($serverLog -notmatch "using tokio transport") {

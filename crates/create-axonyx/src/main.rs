@@ -19,7 +19,7 @@ const DEFAULT_UI_VERSION: &str = "0.0.52";
 #[command(
     about = "Create a new Axonyx app",
     version,
-    long_about = "Create a new Axonyx app.\n\nCommon flow:\n  create-axonyx my-site --template site --yes\n  cd my-site\n  cargo ax run dev\n\nTemplates:\n  minimal  Smallest possible app\n  site     Foundry UI starter for marketing/docs-style sites\n  docs     Documentation starter with nested routes"
+    long_about = "Create a new Axonyx app.\n\nCommon flow:\n  create-axonyx my-site --template site --yes\n  cd my-site\n  cargo ax run dev\n\nTemplates:\n  site     Static product and company site\n  blog     Markdown blog with content collections\n  docs     Documentation site with sidebar navigation\n  minimal  Full-stack framework playground"
 )]
 struct Cli {
     /// Name or path of the app directory to create
@@ -38,7 +38,7 @@ struct Cli {
     git: bool,
 
     /// Starter template to use for the generated app
-    #[arg(long, value_enum, default_value_t = AppTemplate::Minimal)]
+    #[arg(long, value_enum, default_value_t = AppTemplate::Site)]
     template: AppTemplate,
 
     /// Where the generated app should load axonyx-runtime from
@@ -69,8 +69,10 @@ enum RuntimeSource {
 enum AppTemplate {
     /// Smallest possible Axonyx app.
     Minimal,
-    /// Foundry UI starter for marketing/docs-style sites.
+    /// Static Foundry starter for product and company sites.
     Site,
+    /// Markdown blog with content collections and prerendered articles.
+    Blog,
     /// Documentation starter with nested routes.
     Docs,
 }
@@ -240,6 +242,7 @@ fn create_app(target_dir: &PathBuf, project_name: &str, cli: &Cli) -> Result<()>
     let template = match cli.template {
         AppTemplate::Minimal => template::AppTemplate::Minimal,
         AppTemplate::Site => template::AppTemplate::Site,
+        AppTemplate::Blog => template::AppTemplate::Blog,
         AppTemplate::Docs => template::AppTemplate::Docs,
     };
 
@@ -267,7 +270,7 @@ fn create_app(target_dir: &PathBuf, project_name: &str, cli: &Cli) -> Result<()>
 
     if matches!(
         template,
-        template::AppTemplate::Site | template::AppTemplate::Docs
+        template::AppTemplate::Site | template::AppTemplate::Blog | template::AppTemplate::Docs
     ) {
         install_template_ui(target_dir)?;
     }
@@ -468,14 +471,16 @@ fn runtime_dependency_spec(cli: &Cli) -> Result<String> {
                 .context("failed to resolve axonyx-runtime crate path")?;
 
             let runtime_path = cargo_toml_path(&runtime_crate);
-            Ok(format!("axonyx-runtime = {{ path = \"{runtime_path}\" }}"))
+            Ok(format!(
+                "axonyx-runtime = {{ path = \"{runtime_path}\", features = [\"axum\"] }}"
+            ))
         }
         RuntimeSource::Git => Ok(format!(
-            "axonyx-runtime = {{ git = \"{}\" }}",
+            "axonyx-runtime = {{ git = \"{}\", features = [\"axum\"] }}",
             cli.runtime_git_url.trim()
         )),
         RuntimeSource::Registry => Ok(format!(
-            "{} = \"{}\"",
+            "{} = {{ version = \"{}\", features = [\"axum\"] }}",
             cli.runtime_package.trim(),
             cli.runtime_version.trim()
         )),
@@ -603,6 +608,12 @@ mod tests {
             "axonyx-runtime = \"0.1.0\"",
             "runtime note",
         );
+        let blog_files = template::template_files(
+            template::AppTemplate::Blog,
+            "demo-site",
+            "axonyx-runtime = \"0.1.0\"",
+            "runtime note",
+        );
 
         let minimal_aegis = minimal_files
             .iter()
@@ -616,12 +627,29 @@ mod tests {
             .iter()
             .find(|file| file.relative_path == "aegis.toml")
             .expect("docs template should include aegis.toml");
+        let blog_aegis = blog_files
+            .iter()
+            .find(|file| file.relative_path == "aegis.toml")
+            .expect("blog template should include aegis.toml");
 
         assert!(minimal_aegis.contents.contains("goto = \"/posts\""));
-        assert!(site_aegis.contents.contains("goto = \"/posts\""));
+        assert!(site_aegis.contents.contains("goto = \"/about\""));
+        assert!(site_aegis.contents.contains("goto = \"/contact\""));
+        assert!(!site_aegis.contents.contains("goto = \"/posts\""));
+        assert!(blog_aegis
+            .contents
+            .contains("goto = \"/blog/hello-axonyx\""));
         assert!(docs_aegis.contents.contains("goto = \"/getting-started\""));
         assert!(docs_aegis.contents.contains("goto = \"/reference\""));
         assert!(!docs_aegis.contents.contains("goto = \"/posts\""));
+    }
+
+    #[test]
+    fn site_is_the_default_template() {
+        let cli = Cli::try_parse_from(["create-axonyx", "demo-site"])
+            .expect("default create command should parse");
+
+        assert_eq!(cli.template, AppTemplate::Site);
     }
 
     #[test]
@@ -701,18 +729,22 @@ mod tests {
             fs::read_to_string(target_dir.join("app/layout.ax")).expect("layout should read");
         assert!(layout.contains("@axonyx/ui/foundry/SiteShell.ax"));
         assert!(layout.contains(
-            r#"<Theme storageKey="axonyx-site-theme" default="silver" preflight="true" />"#
+            r#"<Theme storageKey="demo-site-theme" default="silver" preflight="true" />"#
         ));
         assert!(layout.contains("@axonyx/ui/foundry/ThemeSwitcher.ax"));
         assert!(layout.contains("use \"@axonyx/ui\""));
 
-        let backend =
-            fs::read_to_string(target_dir.join("app/backend.ax")).expect("backend should read");
-        assert!(backend.contains("env DATABASE_URL: Secret<String>"));
+        assert!(!target_dir.join("app/backend.ax").exists());
+        assert!(!target_dir.join("routes").exists());
+        assert!(!target_dir.join("jobs").exists());
+        assert!(!target_dir.join("src/db").exists());
+        assert!(!target_dir.join(".env.example").exists());
 
         let cargo_toml =
             fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-runtime = \"0.1.45\""));
+        assert!(
+            cargo_toml.contains("axonyx-runtime = { version = \"0.1.45\", features = [\"axum\"] }")
+        );
         assert!(cargo_toml.contains("axonyx-ui = \"0.0.52\""));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
@@ -727,21 +759,61 @@ mod tests {
         assert!(axonyx_toml.contains("enabled = [\"ui\"]"));
         assert!(!axonyx_toml.contains("[package_overrides]"));
 
-        let posts_page = fs::read_to_string(target_dir.join("app/posts/page.ax"))
-            .expect("posts page should read");
-        assert!(posts_page.contains("page Posts() -> ASX"));
-        assert!(posts_page.contains("return {"));
-        assert!(posts_page.contains("type Post"));
-        assert!(posts_page.contains("data posts: List<Post> = loadPosts()"));
-        assert!(posts_page.contains("<If when={posts}>"));
-        assert!(posts_page.contains("<Each items={posts} as=\"post\">"));
-        assert!(posts_page.contains("<Else>"));
-
-        let posts_loader = fs::read_to_string(target_dir.join("app/posts/loader.ax"))
-            .expect("posts loader should read");
-        assert!(posts_loader.contains("query loadPosts() -> Post[] {"));
-        assert!(posts_loader.contains("return posts"));
+        assert!(target_dir.join("app/about/page.ax").exists());
+        assert!(target_dir.join("app/contact/page.ax").exists());
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn create_blog_template_scaffolds_content_collection_and_prerender_routes() {
+        let workspace = make_temp_dir("blog-template");
+        let target_dir = workspace.join("demo-blog");
+        let cli = Cli {
+            project_name: "demo-blog".to_string(),
+            yes: true,
+            force: false,
+            git: false,
+            template: AppTemplate::Blog,
+            runtime_source: RuntimeSource::Registry,
+            runtime_git_url: DEFAULT_RUNTIME_GIT_URL.to_string(),
+            runtime_package: DEFAULT_RUNTIME_PACKAGE.to_string(),
+            runtime_version: DEFAULT_RUNTIME_VERSION.to_string(),
+        };
+
+        create_app(&target_dir, "demo-blog", &cli).expect("blog template should scaffold");
+
+        let config =
+            fs::read_to_string(target_dir.join("Axonyx.toml")).expect("blog config should read");
+        assert!(config.contains("[content.collections.posts]"));
+        assert!(config.contains("[prerender.collections.posts]"));
+        assert!(config.contains("route = \"/blog/:slug\""));
+        assert!(target_dir.join("content/posts/hello-axonyx.md").exists());
+        assert!(target_dir.join("app/blog/[slug]/page.ax").exists());
+        assert!(target_dir.join("app/blog/[slug]/loader.ax").exists());
+        assert!(!target_dir.join("app/backend.ax").exists());
+        assert!(!target_dir.join(".env.example").exists());
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn docs_template_stays_static_and_has_no_action_scaffold() {
+        let files = template::template_files(
+            template::AppTemplate::Docs,
+            "demo-docs",
+            "axonyx-runtime = \"0.1.0\"",
+            "runtime note",
+        );
+        let paths = files
+            .iter()
+            .map(|file| file.relative_path)
+            .collect::<Vec<_>>();
+
+        assert!(!paths.contains(&"app/backend.ax"));
+        assert!(!paths.contains(&"app/feedback/actions.ax"));
+        assert!(!paths.contains(&"app/feedback/page.ax"));
+        assert!(paths.contains(&"app/getting-started/page.ax"));
+        assert!(paths.contains(&"app/reference/page.ax"));
     }
 }
