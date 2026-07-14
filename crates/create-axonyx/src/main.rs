@@ -468,14 +468,16 @@ fn runtime_dependency_spec(cli: &Cli) -> Result<String> {
                 .context("failed to resolve axonyx-runtime crate path")?;
 
             let runtime_path = cargo_toml_path(&runtime_crate);
-            Ok(format!("axonyx-runtime = {{ path = \"{runtime_path}\" }}"))
+            Ok(format!(
+                "axonyx-runtime = {{ path = \"{runtime_path}\", features = [\"axum\"] }}"
+            ))
         }
         RuntimeSource::Git => Ok(format!(
-            "axonyx-runtime = {{ git = \"{}\" }}",
+            "axonyx-runtime = {{ git = \"{}\", features = [\"axum\"] }}",
             cli.runtime_git_url.trim()
         )),
         RuntimeSource::Registry => Ok(format!(
-            "{} = \"{}\"",
+            "{} = {{ version = \"{}\", features = [\"axum\"] }}",
             cli.runtime_package.trim(),
             cli.runtime_version.trim()
         )),
@@ -712,7 +714,9 @@ mod tests {
 
         let cargo_toml =
             fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-runtime = \"0.1.45\""));
+        assert!(
+            cargo_toml.contains("axonyx-runtime = { version = \"0.1.45\", features = [\"axum\"] }")
+        );
         assert!(cargo_toml.contains("axonyx-ui = \"0.0.52\""));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
