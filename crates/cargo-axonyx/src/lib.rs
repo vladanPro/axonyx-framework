@@ -944,6 +944,8 @@ struct ComponentClientReport {
     target: String,
     source: String,
     path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -3207,6 +3209,7 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
                                 target,
                                 source: "inline".to_string(),
                                 path: Some(format!("{} bytes", source.len())),
+                                body: Some(source.clone()),
                             },
                             axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(
                                 path,
@@ -3214,6 +3217,7 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
                                 target,
                                 source: "file".to_string(),
                                 path: Some(path.clone()),
+                                body: None,
                             },
                         }
                     })
@@ -7709,6 +7713,7 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::HeadTagChildrenNotSupported { .. }
         | AxConvertV2Error::DuplicateClassAttr { .. }
         | AxConvertV2Error::InvalidStateInitializer { .. }
+        | AxConvertV2Error::UnsupportedComponentStateType { .. }
         | AxConvertV2Error::UnknownStateBinding { .. }
         | AxConvertV2Error::InvalidStateBinding { .. } => Some(1),
     }
@@ -7721,7 +7726,8 @@ fn line_from_semantic_error(error: &AxSemanticV2Error) -> Option<usize> {
         | AxSemanticV2Error::DuplicateComponentName { .. }
         | AxSemanticV2Error::ComponentNameConflictsWithImport { .. }
         | AxSemanticV2Error::HeadTagOutsideHead { .. }
-        | AxSemanticV2Error::HeadOutsideTopLevel => Some(1),
+        | AxSemanticV2Error::HeadOutsideTopLevel
+        | AxSemanticV2Error::InlineComponentWasm { .. } => Some(1),
     }
 }
 
@@ -8722,57 +8728,95 @@ fn collect_component_client_manifest(
         let component_dir = component_file.parent().unwrap_or(root);
         for component in file.components {
             for client in component.clients {
-                if client.source != "file" {
-                    continue;
-                }
-                let Some(source) = client.path else {
-                    continue;
-                };
-                let source_path = component_dir.join(&source);
-                if !source_path.exists() || !source_path.is_file() {
-                    bail!(
-                        "component `{}` references missing client {} file '{}'",
-                        component.name,
-                        client.target,
-                        source_path.display()
-                    );
-                }
-                let source_canonical = source_path.canonicalize().with_context(|| {
-                    format!(
-                        "failed to resolve component client file '{}'",
-                        source_path.display()
-                    )
-                })?;
-                if !source_canonical.starts_with(&root_canonical) {
-                    bail!(
-                        "component `{}` client file '{}' must stay inside app root '{}'",
-                        component.name,
-                        source_path.display(),
-                        root.display()
-                    );
-                }
+                match client.source.as_str() {
+                    "file" => {
+                        let Some(source) = client.path else {
+                            continue;
+                        };
+                        let source_path = component_dir.join(&source);
+                        if !source_path.exists() || !source_path.is_file() {
+                            bail!(
+                                "component `{}` references missing client {} file '{}'",
+                                component.name,
+                                client.target,
+                                source_path.display()
+                            );
+                        }
+                        let source_canonical = source_path.canonicalize().with_context(|| {
+                            format!(
+                                "failed to resolve component client file '{}'",
+                                source_path.display()
+                            )
+                        })?;
+                        if !source_canonical.starts_with(&root_canonical) {
+                            bail!(
+                                "component `{}` client file '{}' must stay inside app root '{}'",
+                                component.name,
+                                source_path.display(),
+                                root.display()
+                            );
+                        }
 
-                let output = component_client_output_path(&file.file, &component.name, &source)?;
-                let target = output_dir.join(&output);
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)
-                        .with_context(|| format!("failed to create '{}'", parent.display()))?;
-                }
-                fs::copy(&source_path, &target).with_context(|| {
-                    format!(
-                        "failed to copy component client '{}' to '{}'",
-                        source_path.display(),
-                        target.display()
-                    )
-                })?;
+                        let output =
+                            component_client_output_path(&file.file, &component.name, &source)?;
+                        let target = output_dir.join(&output);
+                        if let Some(parent) = target.parent() {
+                            fs::create_dir_all(parent).with_context(|| {
+                                format!("failed to create '{}'", parent.display())
+                            })?;
+                        }
+                        fs::copy(&source_path, &target).with_context(|| {
+                            format!(
+                                "failed to copy component client '{}' to '{}'",
+                                source_path.display(),
+                                target.display()
+                            )
+                        })?;
 
-                clients.push(ComponentClientManifestEntry {
-                    component: component.name.clone(),
-                    file: file.file.clone(),
-                    target: client.target,
-                    source,
-                    output: output.to_string_lossy().replace('\\', "/"),
-                });
+                        clients.push(ComponentClientManifestEntry {
+                            component: component.name.clone(),
+                            file: file.file.clone(),
+                            target: client.target,
+                            source,
+                            output: output.to_string_lossy().replace('\\', "/"),
+                        });
+                    }
+                    "inline" => {
+                        if client.target != "JS" {
+                            bail!(
+                                "component `{}` inline clients only support JS in v1",
+                                component.name
+                            );
+                        }
+                        let Some(body) = client.body else {
+                            continue;
+                        };
+                        let output =
+                            component_inline_client_output_path(&file.file, &component.name);
+                        let target = output_dir.join(&output);
+                        if let Some(parent) = target.parent() {
+                            fs::create_dir_all(parent).with_context(|| {
+                                format!("failed to create '{}'", parent.display())
+                            })?;
+                        }
+                        fs::write(&target, body).with_context(|| {
+                            format!(
+                                "failed to write inline component client '{}' to '{}'",
+                                component.name,
+                                target.display()
+                            )
+                        })?;
+
+                        clients.push(ComponentClientManifestEntry {
+                            component: component.name.clone(),
+                            file: file.file.clone(),
+                            target: client.target,
+                            source: "inline".to_string(),
+                            output: output.to_string_lossy().replace('\\', "/"),
+                        });
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -8808,6 +8852,16 @@ fn component_client_output_path(
     base.push(component_name);
     base.push(file_name);
     Ok(base)
+}
+
+fn component_inline_client_output_path(component_file: &str, component_name: &str) -> PathBuf {
+    let mut base = PathBuf::from("_ax").join("components");
+    let mut component_path = PathBuf::from(component_file);
+    component_path.set_extension("");
+    base.push(component_path);
+    base.push(component_name);
+    base.push(format!("{component_name}.inline.js"));
+    base
 }
 
 fn write_content_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize> {
@@ -13305,13 +13359,15 @@ fn collect_component_client_script_hrefs(
             ) {
                 continue;
             }
-            let axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(source) =
-                &client.source
-            else {
-                continue;
-            };
 
-            let output = component_client_output_path(&relative_file, &component.name, source)?;
+            let output = match &client.source {
+                axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::File(source) => {
+                    component_client_output_path(&relative_file, &component.name, source)?
+                }
+                axonyx_core::ax_ast_v2_prelude::AxComponentClientSourceV2::Inline(_) => {
+                    component_inline_client_output_path(&relative_file, &component.name)
+                }
+            };
             if root.join("dist").join(&output).exists() {
                 hrefs.insert(format!("/{}", output.to_string_lossy().replace('\\', "/")));
             }
@@ -15233,6 +15289,7 @@ component ThemeSwitcher(label: String = "Theme") {
                 target: "JS".to_string(),
                 source: "file".to_string(),
                 path: Some("./theme-switcher.client.js".to_string()),
+                body: None,
             }
         );
         assert_eq!(
@@ -15241,6 +15298,7 @@ component ThemeSwitcher(label: String = "Theme") {
                 target: "WASM".to_string(),
                 source: "file".to_string(),
                 path: Some("./theme-switcher.client.wasm".to_string()),
+                body: None,
             }
         );
         assert!(report
@@ -16608,6 +16666,64 @@ component ThemeSwitcher(label: String = "Theme") {
         let asset = load_dist_ax_asset(
             &root,
             "/_ax/components/app/components/theme-switcher/ThemeSwitcher/theme-switcher.client.js",
+        )
+        .expect("component client asset lookup should work")
+        .expect("component client asset should exist");
+        assert_eq!(asset.content_type, "application/javascript; charset=utf-8");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_writes_inline_component_js_client() {
+        let root = make_temp_dir("static-build-inline-component-client");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/page.ax"),
+            "import { ThemeSwitch } from \"@/components/theme-switch.ax\"\n\npage Home\n<ThemeSwitch />\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switch.ax"),
+            r#"
+component ThemeSwitch() {
+  client JS {
+    window.__inlineThemeSwitch = true;
+  }
+
+  render ASX {
+    <button data-ax-behavior="theme">Theme</button>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+
+        build_static_site_from_app_root(&root, Path::new("dist"), true)
+            .expect("static build should write inline component client");
+
+        let output = "_ax/components/app/components/theme-switch/ThemeSwitch/ThemeSwitch.inline.js";
+        let manifest = fs::read_to_string(root.join("dist/_ax/components/manifest.json"))
+            .expect("component client manifest should exist");
+        assert!(manifest.contains("\"component\": \"ThemeSwitch\""));
+        assert!(manifest.contains("\"source\": \"inline\""));
+        assert!(manifest.contains(output));
+
+        let inline_js = fs::read_to_string(root.join("dist").join(output))
+            .expect("inline client js should exist");
+        assert!(inline_js.contains("window.__inlineThemeSwitch = true;"));
+
+        let html =
+            fs::read_to_string(root.join("dist/index.html")).expect("home html should exist");
+        assert!(html.contains(
+            "<script src=\"/_ax/components/app/components/theme-switch/ThemeSwitch/ThemeSwitch.inline.js\" defer=\"true\"></script>"
+        ));
+
+        let asset = load_dist_ax_asset(
+            &root,
+            "/_ax/components/app/components/theme-switch/ThemeSwitch/ThemeSwitch.inline.js",
         )
         .expect("component client asset lookup should work")
         .expect("component client asset should exist");
