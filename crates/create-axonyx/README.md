@@ -21,9 +21,20 @@ cargo ax run dev
 
 Available templates:
 
-- `minimal`
-- `site`
-- `docs`
+- `site` - the default static product/company site with Home, About, and Contact routes
+- `blog` - a static Markdown blog with a content collection and prerendered `/blog/:slug` articles
+- `docs` - a static documentation site with a persistent docs shell and reference routes
+- `minimal` - the full-stack technical playground for loaders, actions, API routes, jobs, and database work
+
+Each static template includes Foundry UI, error boundaries, Aegis route checks,
+and production-ready static output through `cargo ax build --clean`. They are
+separate starting points rather than the same demo with a different title.
+
+```bash
+create-axonyx company-site --yes --template site
+create-axonyx engineering-notes --yes --template blog
+create-axonyx product-docs --yes --template docs
+```
 
 ## Architecture Direction
 

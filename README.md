@@ -129,9 +129,14 @@ cargo ax build --clean
 
 Available templates today:
 
-- `minimal`
-- `site`
-- `docs`
+- `site` - the default static product/company site
+- `blog` - a Markdown content collection with prerendered article routes
+- `docs` - a static documentation shell with Getting Started, Components, Reference, and Examples
+- `minimal` - the full-stack playground with loaders, actions, API routes, jobs, and database examples
+
+The three static templates intentionally have different information
+architectures, route trees, and output contracts. All of them build without a
+database or application backend and include Aegis route/link checks.
 
 From this repository, contributors can also run the scaffold locally:
 

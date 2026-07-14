@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("minimal", "site", "docs")]
+  [ValidateSet("minimal", "site", "blog", "docs")]
   [string] $Template = "site",
 
   [string] $WorkDir = ""
@@ -49,20 +49,33 @@ try {
   }
 
   if ($Template -eq "site") {
-    $posts = Join-Path $appRoot "dist/posts/index.html"
-    if (!(Test-Path -LiteralPath $posts)) {
-      throw "Expected posts route output was not generated: $posts"
+    $about = Join-Path $appRoot "dist/about/index.html"
+    $contact = Join-Path $appRoot "dist/contact/index.html"
+    if (!(Test-Path -LiteralPath $about) -or !(Test-Path -LiteralPath $contact)) {
+      throw "Expected site about/contact route output"
     }
+  }
 
-    $postsHtml = Get-Content -LiteralPath $posts -Raw
-    if (!$postsHtml.Contains("Hello Axonyx")) {
-      throw "Expected posts route to render loader data: Hello Axonyx"
+  if ($Template -eq "blog") {
+    $article = Join-Path $appRoot "dist/blog/hello-axonyx/index.html"
+    $manifest = Join-Path $appRoot "dist/_ax/content/manifest.json"
+    if (!(Test-Path -LiteralPath $article)) {
+      throw "Expected blog article to be prerendered: $article"
     }
-    if (!$postsHtml.Contains("Docs Without Bloat")) {
-      throw "Expected posts route to render loader data: Docs Without Bloat"
+    if (!(Test-Path -LiteralPath $manifest)) {
+      throw "Expected blog content manifest: $manifest"
     }
-    if ($postsHtml.Contains("Draft Preview")) {
-      throw "Expected posts route to filter unpublished loader data"
+    $articleHtml = Get-Content -LiteralPath $article -Raw
+    if (!$articleHtml.Contains("Hello from the Axonyx workbench")) {
+      throw "Expected prerendered blog article content"
+    }
+  }
+
+  if ($Template -eq "docs") {
+    $gettingStarted = Join-Path $appRoot "dist/getting-started/index.html"
+    $reference = Join-Path $appRoot "dist/reference/index.html"
+    if (!(Test-Path -LiteralPath $gettingStarted) -or !(Test-Path -LiteralPath $reference)) {
+      throw "Expected docs route output"
     }
   }
 

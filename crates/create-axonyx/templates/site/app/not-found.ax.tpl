@@ -18,7 +18,7 @@ return {
       Add a new app folder with page.ax, or head back to the homepage.
     </Copy>
     <Button slot="actions" href="/" variant="primary">Back to home</Button>
-    <Button slot="actions" href="/posts" variant="ghost">Open posts</Button>
+    <Button slot="actions" href="/contact" variant="ghost">Contact us</Button>
   </PageHeader>
 </Container>
 }
