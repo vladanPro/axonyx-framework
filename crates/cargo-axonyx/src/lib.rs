@@ -6544,32 +6544,109 @@ fn collect_project_type_schemas(root: &Path) -> Result<Vec<ApiSchemaReport>> {
     for file in files {
         let source = fs::read_to_string(&file)
             .with_context(|| format!("failed to read .ax file '{}'", file.display()))?;
-        let Ok(document) = parse_ax_v2(&source) else {
-            continue;
-        };
-
-        for ty in document.types {
-            schemas
-                .entry(ty.name.clone())
-                .or_insert_with(|| ApiSchemaReport {
-                    name: ty.name,
-                    fields: ty
-                        .fields
-                        .into_iter()
-                        .map(|field| {
-                            let (ty, optional) = normalize_api_schema_field_type(&field.ty);
-                            ApiSchemaFieldReport {
-                                name: field.name,
-                                ty,
-                                optional,
-                            }
-                        })
-                        .collect(),
-                });
+        for ty in collect_type_schemas_from_source(&source) {
+            schemas.entry(ty.name.clone()).or_insert_with(|| ty);
         }
     }
 
     Ok(schemas.into_values().collect())
+}
+
+fn collect_type_schemas_from_source(source: &str) -> Vec<ApiSchemaReport> {
+    if let Ok(document) = parse_ax_v2(source) {
+        return document
+            .types
+            .into_iter()
+            .map(|ty| ApiSchemaReport {
+                name: ty.name,
+                fields: ty
+                    .fields
+                    .into_iter()
+                    .map(|field| {
+                        let (ty, optional) = normalize_api_schema_field_type(&field.ty);
+                        ApiSchemaFieldReport {
+                            name: field.name,
+                            ty,
+                            optional,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+    }
+
+    collect_backend_type_schemas_from_source(source)
+}
+
+fn collect_backend_type_schemas_from_source(source: &str) -> Vec<ApiSchemaReport> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut schemas = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index].trim();
+        let Some(header) = line
+            .strip_prefix("export type ")
+            .or_else(|| line.strip_prefix("type "))
+        else {
+            index += 1;
+            continue;
+        };
+
+        let Some(name) = header.strip_suffix('{').map(str::trim) else {
+            index += 1;
+            continue;
+        };
+        if !is_ax_type_identifier(name) {
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        let mut fields = Vec::new();
+        while index < lines.len() {
+            let field_line = lines[index].trim();
+            index += 1;
+            if field_line == "}" {
+                break;
+            }
+            if field_line.is_empty() || field_line.starts_with("//") || field_line.starts_with('#')
+            {
+                continue;
+            }
+            let Some((raw_name, raw_ty)) = field_line.split_once(':') else {
+                continue;
+            };
+            let raw_name = raw_name.trim();
+            let field_optional = raw_name.ends_with('?');
+            let field_name = raw_name.trim_end_matches('?').trim();
+            if !is_backend_identifier_like(field_name) {
+                continue;
+            }
+            let (ty, wrapped_optional) = normalize_api_schema_field_type(raw_ty.trim());
+            fields.push(ApiSchemaFieldReport {
+                name: field_name.to_string(),
+                ty,
+                optional: field_optional || wrapped_optional,
+            });
+        }
+
+        schemas.push(ApiSchemaReport {
+            name: name.to_string(),
+            fields,
+        });
+    }
+
+    schemas
+}
+
+fn is_backend_identifier_like(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn normalize_api_schema_field_type(ty: &str) -> (String, bool) {
@@ -21912,6 +21989,46 @@ type Post {
             r#"
 route GET "/api/posts" -> Post[]
   return json(posts)
+"#,
+        )
+        .expect("route should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_accepts_backend_loader_return_contract_type() {
+        let root = make_temp_dir("backend-loader-return-contract-type");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+        fs::write(
+            root.join("app/loader.ax"),
+            r#"
+export type Post {
+  title: String
+  summary?: String
+}
+
+query loadPosts() -> Post[] {
+  return posts
+}
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts" -> Post[] {
+  return json(posts)
+}
 "#,
         )
         .expect("route should write");
