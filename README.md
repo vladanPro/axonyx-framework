@@ -174,7 +174,7 @@ Legacy indentation-first `.ax` syntax still exists for compatibility and referen
 Typed data is available in the JSX-like path:
 
 ```ax
-page Blog() -> ASX {
+page Blog() {
 
 type Post {
   title: String
@@ -184,7 +184,7 @@ type Post {
 
 data posts: List<Post> = loadPosts()
 
-return {
+return ASX {
 <Each items={posts} as="post">
   <Card title={post.title} />
 </Each>
@@ -208,12 +208,12 @@ Use `summary?: String` in the type when the field is part of the schema but opti
 Early UI state authoring is also available in JSX-like `.ax`:
 
 ```ax
-page Settings() -> ASX {
+page Settings() {
 
 state theme = "silver"
 state count: Number = 0
 
-return {
+return ASX {
 <select bind:value={theme}>
   <option value="silver">Silver</option>
   <option value="bronze">Bronze</option>

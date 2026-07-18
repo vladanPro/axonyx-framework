@@ -1,5 +1,5 @@
-page RootLayout() -> ASX {
-return {
+page RootLayout() {
+return ASX {
   <Head>
     <Title>{{APP_NAME}}</Title>
     <Meta name="description" content="{{APP_NAME}} is a fresh Axonyx app scaffold." />

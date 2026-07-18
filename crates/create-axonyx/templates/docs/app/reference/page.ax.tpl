@@ -3,9 +3,9 @@ import { DocsSection } from "@axonyx/ui/foundry/DocsSection.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
-page Reference() -> ASX {
+page Reference() {
 
-return {
+return ASX {
 <Head>
   <Title>Reference | {{APP_NAME}}</Title>
 </Head>

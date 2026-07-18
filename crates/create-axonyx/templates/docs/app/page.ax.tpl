@@ -6,9 +6,9 @@ import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page DocsHome() -> ASX {
+page DocsHome() {
 
-return {
+return ASX {
   <Head>
     <Title>{{APP_NAME}} | Docs</Title>
   </Head>

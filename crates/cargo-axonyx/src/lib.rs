@@ -32,7 +32,7 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
-use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
+use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext, AxRecordType, AxType};
 use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
 use axonyx_runtime::server_prelude::{
     axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
@@ -60,7 +60,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.47";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.48";
 const AXONYX_UI_VERSION: &str = "0.0.52";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -5736,7 +5736,7 @@ fn check_ax_source_with_root(
     };
 
     let mut diagnostics = Vec::new();
-    diagnostics.extend(check_type_annotations(path, source, &document));
+    diagnostics.extend(check_type_annotations(path, source, root, &document));
     if let Some(root) = root {
         diagnostics.extend(check_imports(root, path, source, &document.imports));
     }
@@ -6544,32 +6544,109 @@ fn collect_project_type_schemas(root: &Path) -> Result<Vec<ApiSchemaReport>> {
     for file in files {
         let source = fs::read_to_string(&file)
             .with_context(|| format!("failed to read .ax file '{}'", file.display()))?;
-        let Ok(document) = parse_ax_v2(&source) else {
-            continue;
-        };
-
-        for ty in document.types {
-            schemas
-                .entry(ty.name.clone())
-                .or_insert_with(|| ApiSchemaReport {
-                    name: ty.name,
-                    fields: ty
-                        .fields
-                        .into_iter()
-                        .map(|field| {
-                            let (ty, optional) = normalize_api_schema_field_type(&field.ty);
-                            ApiSchemaFieldReport {
-                                name: field.name,
-                                ty,
-                                optional,
-                            }
-                        })
-                        .collect(),
-                });
+        for ty in collect_type_schemas_from_source(&source) {
+            schemas.entry(ty.name.clone()).or_insert_with(|| ty);
         }
     }
 
     Ok(schemas.into_values().collect())
+}
+
+fn collect_type_schemas_from_source(source: &str) -> Vec<ApiSchemaReport> {
+    if let Ok(document) = parse_ax_v2(source) {
+        return document
+            .types
+            .into_iter()
+            .map(|ty| ApiSchemaReport {
+                name: ty.name,
+                fields: ty
+                    .fields
+                    .into_iter()
+                    .map(|field| {
+                        let (ty, optional) = normalize_api_schema_field_type(&field.ty);
+                        ApiSchemaFieldReport {
+                            name: field.name,
+                            ty,
+                            optional,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+    }
+
+    collect_backend_type_schemas_from_source(source)
+}
+
+fn collect_backend_type_schemas_from_source(source: &str) -> Vec<ApiSchemaReport> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut schemas = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index].trim();
+        let Some(header) = line
+            .strip_prefix("export type ")
+            .or_else(|| line.strip_prefix("type "))
+        else {
+            index += 1;
+            continue;
+        };
+
+        let Some(name) = header.strip_suffix('{').map(str::trim) else {
+            index += 1;
+            continue;
+        };
+        if !is_ax_type_identifier(name) {
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        let mut fields = Vec::new();
+        while index < lines.len() {
+            let field_line = lines[index].trim();
+            index += 1;
+            if field_line == "}" {
+                break;
+            }
+            if field_line.is_empty() || field_line.starts_with("//") || field_line.starts_with('#')
+            {
+                continue;
+            }
+            let Some((raw_name, raw_ty)) = field_line.split_once(':') else {
+                continue;
+            };
+            let raw_name = raw_name.trim();
+            let field_optional = raw_name.ends_with('?');
+            let field_name = raw_name.trim_end_matches('?').trim();
+            if !is_backend_identifier_like(field_name) {
+                continue;
+            }
+            let (ty, wrapped_optional) = normalize_api_schema_field_type(raw_ty.trim());
+            fields.push(ApiSchemaFieldReport {
+                name: field_name.to_string(),
+                ty,
+                optional: field_optional || wrapped_optional,
+            });
+        }
+
+        schemas.push(ApiSchemaReport {
+            name: name.to_string(),
+            fields,
+        });
+    }
+
+    schemas
+}
+
+fn is_backend_identifier_like(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn normalize_api_schema_field_type(ty: &str) -> (String, bool) {
@@ -7019,6 +7096,7 @@ fn line_for_scope_render(source: &str, occurrence: usize) -> usize {
 fn check_type_annotations(
     path: &Path,
     source: &str,
+    root: Option<&Path>,
     document: &axonyx_core::ax_ast_prelude::AxDocument,
 ) -> Vec<CheckDiagnostic> {
     let Ok(file) = parse_ax_v2(source) else {
@@ -7028,7 +7106,7 @@ fn check_type_annotations(
         return Vec::new();
     }
 
-    let context = match AxDataContext::from_v2_let_types(&file) {
+    let mut context = match AxDataContext::from_v2_let_types(&file) {
         Ok(context) => context,
         Err(error) => {
             return vec![CheckDiagnostic {
@@ -7041,6 +7119,24 @@ fn check_type_annotations(
             }];
         }
     };
+    if let Some(root) = root {
+        match add_project_type_schemas_to_context(&mut context, root) {
+            Ok(()) => {}
+            Err(error) => {
+                return vec![CheckDiagnostic {
+                    file: display_path(path),
+                    line: 1,
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-type",
+                    message: error.to_string(),
+                }]
+            }
+        }
+    }
+    if context.records.is_empty() && context.bindings.is_empty() {
+        return Vec::new();
+    }
 
     check_document_types(document, &context)
         .errors
@@ -7059,6 +7155,26 @@ fn check_type_annotations(
             },
         })
         .collect()
+}
+
+fn add_project_type_schemas_to_context(context: &mut AxDataContext, root: &Path) -> Result<()> {
+    for schema in collect_project_type_schemas(root)? {
+        if context.records.contains_key(&schema.name) {
+            continue;
+        }
+
+        let mut record = AxRecordType::new(schema.name);
+        for field in schema.fields {
+            let mut ty = AxType::parse_annotation(&field.ty)?;
+            if field.optional {
+                ty = AxType::optional(ty);
+            }
+            record = record.field(field.name, ty);
+        }
+        context.records.insert(record.name.clone(), record);
+    }
+
+    Ok(())
 }
 
 fn type_error_line(source: &str, expression: Option<&str>) -> Option<usize> {
@@ -19278,12 +19394,27 @@ action CreatePost
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
         fs::write(
             root.join("app/page.ax"),
-            "page Home\npage state theme: String = \"silver\"\ndata status = \"published\"\ndata posts = loadPosts(status)\n<Copy>Home</Copy>\n",
+            r#"
+page Home() {
+  page state theme: String = "silver"
+  data status = "published"
+  data posts = loadPosts(status)
+
+  return ASX {
+    <Copy>Home</Copy>
+  }
+}
+"#,
         )
         .expect("page should write");
         fs::write(
             root.join("app/loader.ax"),
-            "query loadPosts() -> Post[] {\n  data posts = db.posts.all()\n  return posts\n}\n",
+            r#"
+query loadPosts() -> Post[] {
+  data posts = db.posts.all()
+  return posts
+}
+"#,
         )
         .expect("loader should write");
         fs::write(
@@ -19786,19 +19917,24 @@ action SetCount
         fs::write(
             root.join("app/posts/page.ax"),
             r#"
-page Posts
+page Posts() {
   data posts = loadPosts()
-  Copy -> "Posts"
+
+  return ASX {
+    <Copy>Posts</Copy>
+  }
+}
 "#,
         )
         .expect("page should write");
         fs::write(
             root.join("app/posts/loader.ax"),
             r#"
-query loadPosts(status: String = "published") -> Post[]
+query loadPosts(status: String = "published") -> Post[] {
   data posts = db.posts.all()
     where status = input.status
   return posts
+}
 "#,
         )
         .expect("loader should write");
@@ -19824,23 +19960,29 @@ query loadPosts(status: String = "published") -> Post[]
         fs::write(
             root.join("app/posts/page.ax"),
             r#"
-page Posts
+page Posts() {
   data posts = loadPosts()
   data featured = loadFeatured("published", true)
-  Copy -> "Posts"
+
+  return ASX {
+    <Copy>Posts</Copy>
+  }
+}
 "#,
         )
         .expect("page should write");
         fs::write(
             root.join("app/posts/loader.ax"),
             r#"
-query loadPosts(status: String) -> Post[]
+query loadPosts(status: String) -> Post[] {
   data posts = db.posts.all()
   return posts
+}
 
-query loadFeatured(status: String) -> Post[]
+query loadFeatured(status: String) -> Post[] {
   data posts = db.posts.all()
   return posts
+}
 "#,
         )
         .expect("loader should write");
@@ -19987,12 +20129,29 @@ query loadFeatured(status: String) -> Post[]
         fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
         fs::write(
             root.join("app/posts/loader.ax"),
-            "query loadPosts() -> Post[]\n  data posts = db.posts.all()\n    where status = \"published\"\n    order created_at desc\n  return posts\n",
+            r#"
+query loadPosts() -> Post[] {
+  data posts = db.posts.all()
+    where status = "published"
+    order created_at desc
+  return posts
+}
+"#,
         )
         .expect("loader should write");
         fs::write(
             root.join("app/posts/page.ax"),
-            "page Posts\n  data posts = loadPosts()\n  each post in posts\n    Copy -> post.title\n",
+            r#"
+page Posts() {
+  data posts = loadPosts()
+
+  return ASX {
+    <Each items={posts} as="post">
+      <Copy>{post.title}</Copy>
+    </Each>
+  }
+}
+"#,
         )
         .expect("page should write");
 
@@ -21104,24 +21263,27 @@ page Posts() {
         let diagnostics = check_ax_source_with_root(
             &path,
             r#"
-page Blog
+page Blog() {
 
 type Post {
   title: String
 }
 
-let posts: List<Post> = load PostsList
+data posts: List<Post> = loadPosts()
 
-<Each items={posts} as="post">
-  <Card title={post.summary} />
-</Each>
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.summary} />
+  </Each>
+}
+}
 "#,
             None,
         );
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "axonyx-type");
-        assert_eq!(diagnostics[0].line, 11);
+        assert_eq!(diagnostics[0].line, 12);
         assert!(diagnostics[0].message.contains("post.summary"));
         assert!(diagnostics[0].message.contains("summary"));
         assert!(diagnostics[0].message.contains("unknown field"));
@@ -21133,17 +21295,20 @@ let posts: List<Post> = load PostsList
         let diagnostics = check_ax_source_with_root(
             &path,
             r#"
-page Blog
+page Blog() {
 
 type Post {
   title: String
 }
 
-let posts: List<Post> = load PostsList
+data posts: List<Post> = loadPosts()
 
-<Each items={posts} as="post">
-  <Card title={post?.summary} />
-</Each>
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post?.summary} />
+  </Each>
+}
+}
 "#,
             None,
         );
@@ -21157,23 +21322,71 @@ let posts: List<Post> = load PostsList
         let diagnostics = check_ax_source_with_root(
             &path,
             r#"
-page Blog
+page Blog() {
 
 type Post {
   title: String
   summary?: String
 }
 
-let posts: List<Post> = load PostsList
+data posts: List<Post> = loadPosts()
 
-<Each items={posts} as="post">
-  <Card title={post.summary} />
-</Each>
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.summary} />
+  </Each>
+}
+}
 "#,
             None,
         );
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_app_sources_uses_backend_type_contracts_for_typed_each() {
+        let root = make_temp_dir("backend-type-contract-typed-each");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+export type Post {
+  title: String
+  excerpt: String
+}
+
+query loadPosts() -> Post[] {
+  return posts
+}
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts() {
+data posts: List<Post> = loadPosts()
+
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.title}>
+      <Copy>{post.excerpt}</Copy>
+    </Card>
+  </Each>
+}
+}
+"#,
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
@@ -21860,6 +22073,46 @@ type Post {
             r#"
 route GET "/api/posts" -> Post[]
   return json(posts)
+"#,
+        )
+        .expect("route should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_accepts_backend_loader_return_contract_type() {
+        let root = make_temp_dir("backend-loader-return-contract-type");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(root.join("routes/api")).expect("api dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+        fs::write(
+            root.join("app/loader.ax"),
+            r#"
+export type Post {
+  title: String
+  summary?: String
+}
+
+query loadPosts() -> Post[] {
+  return posts
+}
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("routes/api/posts.ax"),
+            r#"
+route GET "/api/posts" -> Post[] {
+  return json(posts)
+}
 "#,
         )
         .expect("route should write");
