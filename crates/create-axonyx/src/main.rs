@@ -748,8 +748,8 @@ mod tests {
         assert!(cargo_toml.contains("axonyx-ui = \"0.0.52\""));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
-        assert!(page.contains("page Home() -> ASX"));
-        assert!(page.contains("return {"));
+        assert!(page.contains("page Home()"));
+        assert!(page.contains("return ASX {"));
         assert!(page.contains("@axonyx/ui/foundry/SectionCard.ax"));
         assert!(target_dir.join("app/not-found.ax").exists());
         assert!(target_dir.join("app/error.ax").exists());

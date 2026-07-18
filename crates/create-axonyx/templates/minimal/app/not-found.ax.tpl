@@ -1,5 +1,5 @@
-page NotFound() -> ASX {
-return {
+page NotFound() {
+return ASX {
   <Container max="xl" recipe="hello-shell">
     <Card title="Page not found" recipe="hero-card">
       <Copy tone="eyebrow">404</Copy>

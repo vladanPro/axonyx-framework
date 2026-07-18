@@ -1,9 +1,9 @@
 import { Button } from "@axonyx/ui/foundry/Button.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 
-page NotFound() -> ASX {
+page NotFound() {
 
-return {
+return ASX {
 <Head>
   <Title>{{APP_NAME}} Docs | Page not found</Title>
 </Head>

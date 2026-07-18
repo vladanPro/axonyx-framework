@@ -1,5 +1,5 @@
-page Home() -> ASX {
-return {
+page Home() {
+return ASX {
   <Container max="xl" recipe="hello-shell">
     <Card title="Hello Axonyx" recipe="hero-card">
       <Copy tone="eyebrow">{{APP_NAME}}</Copy>

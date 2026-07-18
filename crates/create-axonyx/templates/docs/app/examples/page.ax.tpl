@@ -1,9 +1,9 @@
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
-page Examples() -> ASX {
+page Examples() {
 
-return {
+return ASX {
 <Head>
   <Title>Examples | {{APP_NAME}}</Title>
 </Head>

@@ -5,10 +5,10 @@ import { Copy } from "@axonyx/ui/foundry/Copy.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page BlogHome() -> ASX {
+page BlogHome() {
   data posts = loadPosts()
 
-  return {
+  return ASX {
     <Head><Title>{{APP_NAME}} | Field Notes</Title></Head>
     <Container max="lg">
       <Stack gap="xl">

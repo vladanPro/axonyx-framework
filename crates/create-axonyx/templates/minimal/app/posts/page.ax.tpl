@@ -1,4 +1,4 @@
-page Posts() -> ASX {
+page Posts() {
 
 type Post {
   id: String
@@ -10,7 +10,7 @@ type Post {
 page state draftStatus: String = "ready"
 data posts: List<Post> = loadPosts()
 
-return {
+return ASX {
 <Container max="xl">
   <Card title="Create post" recipe="hero-card">
     <Copy tone="muted">

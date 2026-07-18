@@ -1,5 +1,5 @@
-page Error() -> ASX {
-return {
+page Error() {
+return ASX {
   <Container max="xl" recipe="hello-shell">
     <Card title="Application error" recipe="hero-card">
       <Copy tone="eyebrow">500</Copy>

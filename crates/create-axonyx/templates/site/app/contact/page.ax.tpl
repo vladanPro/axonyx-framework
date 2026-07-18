@@ -4,8 +4,8 @@ import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page Contact() -> ASX {
-  return {
+page Contact() {
+  return ASX {
     <Head><Title>{{APP_NAME}} | Contact</Title></Head>
     <Container max="md">
       <Stack gap="xl">
