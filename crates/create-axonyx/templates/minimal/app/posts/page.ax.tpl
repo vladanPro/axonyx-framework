@@ -1,12 +1,5 @@
 page Posts() {
 
-type Post {
-  id: String
-  title: String
-  excerpt: String
-  status: String
-}
-
 page state draftStatus: String = "ready"
 data posts: List<Post> = loadPosts()
 

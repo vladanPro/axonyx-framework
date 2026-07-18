@@ -32,7 +32,7 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
-use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext};
+use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext, AxRecordType, AxType};
 use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
 use axonyx_runtime::server_prelude::{
     axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
@@ -5736,7 +5736,7 @@ fn check_ax_source_with_root(
     };
 
     let mut diagnostics = Vec::new();
-    diagnostics.extend(check_type_annotations(path, source, &document));
+    diagnostics.extend(check_type_annotations(path, source, root, &document));
     if let Some(root) = root {
         diagnostics.extend(check_imports(root, path, source, &document.imports));
     }
@@ -7096,6 +7096,7 @@ fn line_for_scope_render(source: &str, occurrence: usize) -> usize {
 fn check_type_annotations(
     path: &Path,
     source: &str,
+    root: Option<&Path>,
     document: &axonyx_core::ax_ast_prelude::AxDocument,
 ) -> Vec<CheckDiagnostic> {
     let Ok(file) = parse_ax_v2(source) else {
@@ -7105,7 +7106,7 @@ fn check_type_annotations(
         return Vec::new();
     }
 
-    let context = match AxDataContext::from_v2_let_types(&file) {
+    let mut context = match AxDataContext::from_v2_let_types(&file) {
         Ok(context) => context,
         Err(error) => {
             return vec![CheckDiagnostic {
@@ -7118,6 +7119,24 @@ fn check_type_annotations(
             }];
         }
     };
+    if let Some(root) = root {
+        match add_project_type_schemas_to_context(&mut context, root) {
+            Ok(()) => {}
+            Err(error) => {
+                return vec![CheckDiagnostic {
+                    file: display_path(path),
+                    line: 1,
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-type",
+                    message: error.to_string(),
+                }]
+            }
+        }
+    }
+    if context.records.is_empty() && context.bindings.is_empty() {
+        return Vec::new();
+    }
 
     check_document_types(document, &context)
         .errors
@@ -7136,6 +7155,26 @@ fn check_type_annotations(
             },
         })
         .collect()
+}
+
+fn add_project_type_schemas_to_context(context: &mut AxDataContext, root: &Path) -> Result<()> {
+    for schema in collect_project_type_schemas(root)? {
+        if context.records.contains_key(&schema.name) {
+            continue;
+        }
+
+        let mut record = AxRecordType::new(schema.name);
+        for field in schema.fields {
+            let mut ty = AxType::parse_annotation(&field.ty)?;
+            if field.optional {
+                ty = AxType::optional(ty);
+            }
+            record = record.field(field.name, ty);
+        }
+        context.records.insert(record.name.clone(), record);
+    }
+
+    Ok(())
 }
 
 fn type_error_line(source: &str, expression: Option<&str>) -> Option<usize> {
@@ -21303,6 +21342,51 @@ return ASX {
         );
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_app_sources_uses_backend_type_contracts_for_typed_each() {
+        let root = make_temp_dir("backend-type-contract-typed-each");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+export type Post {
+  title: String
+  excerpt: String
+}
+
+query loadPosts() -> Post[] {
+  return posts
+}
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts() {
+data posts: List<Post> = loadPosts()
+
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.title}>
+      <Copy>{post.excerpt}</Copy>
+    </Card>
+  </Each>
+}
+}
+"#,
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]

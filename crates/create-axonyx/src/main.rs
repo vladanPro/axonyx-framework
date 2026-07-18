@@ -766,6 +766,37 @@ mod tests {
     }
 
     #[test]
+    fn create_minimal_template_scaffolds_route_local_type_contracts() {
+        let workspace = make_temp_dir("minimal-template");
+        let target_dir = workspace.join("demo-minimal");
+        let cli = Cli {
+            project_name: "demo-minimal".to_string(),
+            yes: true,
+            force: false,
+            git: false,
+            template: AppTemplate::Minimal,
+            runtime_source: RuntimeSource::Registry,
+            runtime_git_url: DEFAULT_RUNTIME_GIT_URL.to_string(),
+            runtime_package: DEFAULT_RUNTIME_PACKAGE.to_string(),
+            runtime_version: DEFAULT_RUNTIME_VERSION.to_string(),
+        };
+
+        create_app(&target_dir, "demo-minimal", &cli).expect("minimal template should scaffold");
+
+        let loader = fs::read_to_string(target_dir.join("app/posts/loader.ax"))
+            .expect("posts loader should read");
+        let page = fs::read_to_string(target_dir.join("app/posts/page.ax"))
+            .expect("posts page should read");
+
+        assert!(loader.contains("export type Post {"));
+        assert!(loader.contains("query loadPosts() -> Post[]"));
+        assert!(page.contains("data posts: List<Post> = loadPosts()"));
+        assert!(!page.contains("type Post {"));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn create_blog_template_scaffolds_content_collection_and_prerender_routes() {
         let workspace = make_temp_dir("blog-template");
         let target_dir = workspace.join("demo-blog");
