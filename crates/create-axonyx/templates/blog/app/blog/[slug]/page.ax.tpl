@@ -4,10 +4,10 @@ import { Card } from "@axonyx/ui/foundry/Card.ax"
 import { Copy } from "@axonyx/ui/foundry/Copy.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page BlogPost() -> ASX {
+page BlogPost() {
   data posts = loadPost(params.slug)
 
-  return {
+  return ASX {
     <Container max="md">
       <Stack gap="xl">
         <Button href="/" variant="ghost" size="sm">Back to all notes</Button>

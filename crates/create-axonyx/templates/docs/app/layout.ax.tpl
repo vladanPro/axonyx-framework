@@ -6,9 +6,9 @@ import { Navbar } from "@axonyx/ui/foundry/Navbar.ax"
 import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
 import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
 
-page DocsLayout() -> ASX {
+page DocsLayout() {
 
-return {
+return ASX {
 <Head>
   <Title>{{APP_NAME}} | Axonyx Docs Starter</Title>
   <Theme default="silver" storageKey="{{APP_SLUG}}-theme" preflight="true" />

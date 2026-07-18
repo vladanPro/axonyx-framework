@@ -5,8 +5,8 @@ import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
 import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
 import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
 
-page RootLayout() -> ASX {
-  return {
+page RootLayout() {
+  return ASX {
     <Head>
       <Title>{{APP_NAME}}</Title>
       <Theme storageKey="{{APP_SLUG}}-theme" default="silver" preflight="true" />

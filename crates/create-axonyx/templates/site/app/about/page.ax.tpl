@@ -5,8 +5,8 @@ import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page About() -> ASX {
-  return {
+page About() {
+  return ASX {
     <Head><Title>{{APP_NAME}} | About</Title></Head>
     <Container max="lg">
       <Stack gap="xl">

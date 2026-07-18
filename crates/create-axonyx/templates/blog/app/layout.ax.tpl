@@ -5,8 +5,8 @@ import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
 import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
 import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
 
-page BlogLayout() -> ASX {
-  return {
+page BlogLayout() {
+  return ASX {
     <Head>
       <Title>{{APP_NAME}} | Field Notes</Title>
       <Theme storageKey="{{APP_SLUG}}-theme" default="bronze" preflight="true" />

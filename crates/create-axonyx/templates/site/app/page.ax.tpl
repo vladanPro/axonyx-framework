@@ -8,8 +8,8 @@ import { HeroCard } from "@axonyx/ui/foundry/HeroCard.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
-page Home() -> ASX {
-  return {
+page Home() {
+  return ASX {
     <Head>
       <Title>{{APP_NAME}} | Built for the next move</Title>
     </Head>

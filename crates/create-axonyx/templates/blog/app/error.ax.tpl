@@ -2,8 +2,8 @@ import { Button } from "@axonyx/ui/foundry/Button.ax"
 import { Copy } from "@axonyx/ui/foundry/Copy.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 
-page Error() -> ASX {
-  return {
+page Error() {
+  return ASX {
     <Container max="md">
       <PageHeader title="The press stopped">
         <Copy slot="eyebrow">Build error</Copy>

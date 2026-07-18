@@ -2,8 +2,8 @@ import { Button } from "@axonyx/ui/foundry/Button.ax"
 import { Copy } from "@axonyx/ui/foundry/Copy.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 
-page NotFound() -> ASX {
-  return {
+page NotFound() {
+  return ASX {
     <Container max="md">
       <PageHeader title="This note is not on the workbench">
         <Copy slot="eyebrow">404</Copy>

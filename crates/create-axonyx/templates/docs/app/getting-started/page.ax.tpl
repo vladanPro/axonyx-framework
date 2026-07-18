@@ -5,9 +5,9 @@ import { DocsCodeBlock } from "@axonyx/ui/foundry/DocsCodeBlock.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
-page GettingStarted() -> ASX {
+page GettingStarted() {
 
-return {
+return ASX {
 <Head>
   <Title>Getting Started | {{APP_NAME}}</Title>
 </Head>
