@@ -19278,12 +19278,27 @@ action CreatePost
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
         fs::write(
             root.join("app/page.ax"),
-            "page Home\npage state theme: String = \"silver\"\ndata status = \"published\"\ndata posts = loadPosts(status)\n<Copy>Home</Copy>\n",
+            r#"
+page Home() {
+  page state theme: String = "silver"
+  data status = "published"
+  data posts = loadPosts(status)
+
+  return ASX {
+    <Copy>Home</Copy>
+  }
+}
+"#,
         )
         .expect("page should write");
         fs::write(
             root.join("app/loader.ax"),
-            "query loadPosts() -> Post[] {\n  data posts = db.posts.all()\n  return posts\n}\n",
+            r#"
+query loadPosts() -> Post[] {
+  data posts = db.posts.all()
+  return posts
+}
+"#,
         )
         .expect("loader should write");
         fs::write(
@@ -19786,19 +19801,24 @@ action SetCount
         fs::write(
             root.join("app/posts/page.ax"),
             r#"
-page Posts
+page Posts() {
   data posts = loadPosts()
-  Copy -> "Posts"
+
+  return ASX {
+    <Copy>Posts</Copy>
+  }
+}
 "#,
         )
         .expect("page should write");
         fs::write(
             root.join("app/posts/loader.ax"),
             r#"
-query loadPosts(status: String = "published") -> Post[]
+query loadPosts(status: String = "published") -> Post[] {
   data posts = db.posts.all()
     where status = input.status
   return posts
+}
 "#,
         )
         .expect("loader should write");
@@ -19824,23 +19844,29 @@ query loadPosts(status: String = "published") -> Post[]
         fs::write(
             root.join("app/posts/page.ax"),
             r#"
-page Posts
+page Posts() {
   data posts = loadPosts()
   data featured = loadFeatured("published", true)
-  Copy -> "Posts"
+
+  return ASX {
+    <Copy>Posts</Copy>
+  }
+}
 "#,
         )
         .expect("page should write");
         fs::write(
             root.join("app/posts/loader.ax"),
             r#"
-query loadPosts(status: String) -> Post[]
+query loadPosts(status: String) -> Post[] {
   data posts = db.posts.all()
   return posts
+}
 
-query loadFeatured(status: String) -> Post[]
+query loadFeatured(status: String) -> Post[] {
   data posts = db.posts.all()
   return posts
+}
 "#,
         )
         .expect("loader should write");
@@ -19987,12 +20013,29 @@ query loadFeatured(status: String) -> Post[]
         fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
         fs::write(
             root.join("app/posts/loader.ax"),
-            "query loadPosts() -> Post[]\n  data posts = db.posts.all()\n    where status = \"published\"\n    order created_at desc\n  return posts\n",
+            r#"
+query loadPosts() -> Post[] {
+  data posts = db.posts.all()
+    where status = "published"
+    order created_at desc
+  return posts
+}
+"#,
         )
         .expect("loader should write");
         fs::write(
             root.join("app/posts/page.ax"),
-            "page Posts\n  data posts = loadPosts()\n  each post in posts\n    Copy -> post.title\n",
+            r#"
+page Posts() {
+  data posts = loadPosts()
+
+  return ASX {
+    <Each items={posts} as="post">
+      <Copy>{post.title}</Copy>
+    </Each>
+  }
+}
+"#,
         )
         .expect("page should write");
 
@@ -21104,24 +21147,27 @@ page Posts() {
         let diagnostics = check_ax_source_with_root(
             &path,
             r#"
-page Blog
+page Blog() {
 
 type Post {
   title: String
 }
 
-let posts: List<Post> = load PostsList
+data posts: List<Post> = loadPosts()
 
-<Each items={posts} as="post">
-  <Card title={post.summary} />
-</Each>
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.summary} />
+  </Each>
+}
+}
 "#,
             None,
         );
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, "axonyx-type");
-        assert_eq!(diagnostics[0].line, 11);
+        assert_eq!(diagnostics[0].line, 12);
         assert!(diagnostics[0].message.contains("post.summary"));
         assert!(diagnostics[0].message.contains("summary"));
         assert!(diagnostics[0].message.contains("unknown field"));
@@ -21133,17 +21179,20 @@ let posts: List<Post> = load PostsList
         let diagnostics = check_ax_source_with_root(
             &path,
             r#"
-page Blog
+page Blog() {
 
 type Post {
   title: String
 }
 
-let posts: List<Post> = load PostsList
+data posts: List<Post> = loadPosts()
 
-<Each items={posts} as="post">
-  <Card title={post?.summary} />
-</Each>
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post?.summary} />
+  </Each>
+}
+}
 "#,
             None,
         );
@@ -21157,18 +21206,21 @@ let posts: List<Post> = load PostsList
         let diagnostics = check_ax_source_with_root(
             &path,
             r#"
-page Blog
+page Blog() {
 
 type Post {
   title: String
   summary?: String
 }
 
-let posts: List<Post> = load PostsList
+data posts: List<Post> = loadPosts()
 
-<Each items={posts} as="post">
-  <Card title={post.summary} />
-</Each>
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.summary} />
+  </Each>
+}
+}
 "#,
             None,
         );
