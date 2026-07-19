@@ -33,7 +33,9 @@ use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext, AxRecordType, AxType};
-use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
+use axonyx_core::state_prelude::{
+    build_state_manifest_with_scope, build_state_manifest_with_scope_mapper, AxStateValue,
+};
 use axonyx_runtime::server_prelude::{
     axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
     AxSseEvent,
@@ -826,6 +828,7 @@ struct ActionInputReport {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct StateReport {
     files: Vec<StateReportFile>,
+    graph: StateGraphReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -842,6 +845,42 @@ struct StateReportSignal {
     owner: String,
     ty: String,
     initial: AxStateValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphReport {
+    scopes: Vec<StateGraphScopeReport>,
+    routes: Vec<StateGraphRouteReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphScopeReport {
+    owner: String,
+    scope: String,
+    signals: Vec<StateGraphSignalReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphSignalReport {
+    name: String,
+    key: String,
+    ty: String,
+    file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphRouteReport {
+    route: String,
+    file: String,
+    signals: Vec<StateGraphRouteSignalReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphRouteSignalReport {
+    owner: String,
+    name: String,
+    key: String,
+    ty: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -3245,13 +3284,18 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
 }
 
 fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_prelude::AxFileV2> {
-    if let Ok(file) = parse_ax_v2(source) {
-        return Some(file);
-    }
-    if !source
+    let has_component_decl = source
         .lines()
-        .any(|line| line.trim_start().starts_with("component "))
-    {
+        .any(|line| line.trim_start().starts_with("component "));
+    if let Ok(file) = parse_ax_v2(source) {
+        if has_component_decl && file.components.is_empty() {
+            // Component-only modules can look like loose page body to older syntax paths.
+            // Reparse them through a synthetic page so declarations stay declarations.
+        } else {
+            return Some(file);
+        }
+    }
+    if !has_component_decl {
         return None;
     }
 
@@ -3277,8 +3321,27 @@ fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_
     }
     synthetic.push_str("page ComponentModule\n\n");
     synthetic.push_str(&body.join("\n"));
+    synthetic.push_str("\n\n");
+    for component_name in component_names_from_source(source) {
+        synthetic.push_str(&format!("<{component_name} />\n"));
+    }
 
     parse_ax_v2(&synthetic).ok()
+}
+
+fn component_names_from_source(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let rest = trimmed.strip_prefix("component ")?;
+            let name = rest
+                .split(|char: char| !(char.is_ascii_alphanumeric() || char == '_'))
+                .next()
+                .unwrap_or_default();
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
 }
 
 fn collect_component_usage_report(
@@ -3365,6 +3428,61 @@ fn collect_component_usage_scripts(
         if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
             if import_path.exists() && import_path.starts_with(root) {
                 collect_component_usage_scripts(root, &import_path, visited, scripts)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_component_files_for_route(
+    root: &Path,
+    route: &RouteManifestItem,
+) -> Result<std::collections::BTreeSet<String>> {
+    let Some(resolved) = resolve_route(root, &route.route)? else {
+        return Ok(std::collections::BTreeSet::new());
+    };
+
+    let mut visited = std::collections::BTreeSet::new();
+    let mut files = std::collections::BTreeSet::new();
+    for path in resolved
+        .layout_paths
+        .iter()
+        .chain(std::iter::once(&resolved.page_path))
+    {
+        collect_component_usage_files(root, path, &mut visited, &mut files)?;
+    }
+
+    Ok(files)
+}
+
+fn collect_component_usage_files(
+    root: &Path,
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+    files: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let Some(document) = parse_component_report_source(&source) else {
+        return Ok(());
+    };
+
+    if !document.components.is_empty() {
+        if let Ok(relative_file) = path.strip_prefix(root) {
+            files.insert(relative_file.to_string_lossy().replace('\\', "/"));
+        }
+    }
+
+    for import_decl in document.imports {
+        if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
+            if import_path.exists() && import_path.starts_with(root) {
+                collect_component_usage_files(root, &import_path, visited, files)?;
             }
         }
     }
@@ -5361,11 +5479,11 @@ fn collect_route_state_manifest_from_paths<'a>(
     for path in paths {
         let source = fs::read_to_string(path)
             .with_context(|| format!("failed to read '{}'", path.display()))?;
-        if !source_has_state_declaration(&source) {
+        if !source_may_have_state_declaration(&source) {
             continue;
         }
 
-        let file = parse_ax_v2(&source).with_context(|| {
+        let file = parse_component_report_source(&source).with_context(|| {
             format!(
                 "failed to parse state declarations from '{}'",
                 path.display()
@@ -10516,11 +10634,11 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
         if looks_like_backend_ax(&source) {
             continue;
         }
-        if !source_has_state_declaration(&source) {
+        if !source_may_have_state_declaration(&source) {
             continue;
         }
 
-        let file = parse_ax_v2(&source).with_context(|| {
+        let file = parse_component_report_source(&source).with_context(|| {
             format!(
                 "failed to parse state declarations from '{}'",
                 path.display()
@@ -10533,11 +10651,7 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
                     .unwrap_or_else(|| default_scope.to_string())
             })
             .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
-        if manifest.is_empty() {
-            continue;
-        }
-
-        let signals = manifest
+        let mut signals = manifest
             .signals
             .into_iter()
             .zip(file.states.iter())
@@ -10550,7 +10664,51 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
                 ty: signal.ty,
                 initial: signal.initial,
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        for component in &file.components {
+            for (index, state) in component.states.iter().enumerate() {
+                let mut component_file = file.clone();
+                component_file.states = vec![state.clone()];
+                component_file.components.clear();
+                let component_scope = format!("component:{}", component.name);
+                let component_manifest =
+                    build_state_manifest_with_scope(&component_file, &component_scope)
+                        .with_context(|| {
+                            format!(
+                                "failed to build component state manifest for '{}.{}' in '{}'",
+                                component.name,
+                                state.name,
+                                path.display()
+                            )
+                        })?;
+
+                let Some(signal) = component_manifest.signals.into_iter().next() else {
+                    continue;
+                };
+                signals.push(StateReportSignal {
+                    name: signal.name,
+                    key: format!(
+                        "__ax_component_state__:{}:{}:{}",
+                        component.name,
+                        state.name,
+                        index + 1
+                    ),
+                    scope: component_scope.clone(),
+                    owner: component_scope.clone(),
+                    ty: signal.ty,
+                    initial: signal.initial,
+                });
+            }
+        }
+
+        signals.extend(component_state_signals_from_source(&source));
+        let mut seen_signal_keys = std::collections::BTreeSet::new();
+        signals.retain(|signal| seen_signal_keys.insert(signal.key.clone()));
+
+        if signals.is_empty() {
+            continue;
+        }
 
         files.push(StateReportFile {
             file: display_relative_path(root, &path),
@@ -10558,33 +10716,209 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
         });
     }
 
-    Ok(StateReport { files })
+    let graph = build_state_graph_report(root, &files)?;
+    Ok(StateReport { files, graph })
 }
 
-fn source_has_state_declaration(source: &str) -> bool {
-    let mut component_depth = 0usize;
-    for raw_line in source.lines() {
+fn build_state_graph_report(root: &Path, files: &[StateReportFile]) -> Result<StateGraphReport> {
+    let routes = collect_page_route_manifest(root)?;
+    let mut route_component_files = std::collections::BTreeMap::new();
+    for route in routes.iter().filter(|route| route.kind == "page") {
+        route_component_files.insert(
+            route.route.clone(),
+            collect_component_files_for_route(root, route)?,
+        );
+    }
+    Ok(state_graph_report_from_routes(
+        files,
+        &routes,
+        &route_component_files,
+    ))
+}
+
+fn state_graph_report_from_routes(
+    files: &[StateReportFile],
+    routes: &[RouteManifestItem],
+    route_component_files: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> StateGraphReport {
+    let mut scope_map: std::collections::BTreeMap<(String, String), Vec<StateGraphSignalReport>> =
+        std::collections::BTreeMap::new();
+
+    for file in files {
+        for signal in &file.signals {
+            scope_map
+                .entry((signal.owner.clone(), signal.scope.clone()))
+                .or_default()
+                .push(StateGraphSignalReport {
+                    name: signal.name.clone(),
+                    key: signal.key.clone(),
+                    ty: signal.ty.clone(),
+                    file: file.file.clone(),
+                });
+        }
+    }
+
+    let scopes = scope_map
+        .into_iter()
+        .map(|((owner, scope), mut signals)| {
+            signals.sort_by(|left, right| {
+                left.name
+                    .cmp(&right.name)
+                    .then_with(|| left.key.cmp(&right.key))
+            });
+            StateGraphScopeReport {
+                owner,
+                scope,
+                signals,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let route_reports = routes
+        .iter()
+        .filter(|route| route.kind == "page")
+        .map(|route| {
+            let mut signals = files
+                .iter()
+                .flat_map(|file| file.signals.iter().map(move |signal| (file, signal)))
+                .filter(|(file, signal)| {
+                    state_signal_is_visible_to_route(signal, &route.route)
+                        || state_signal_is_component_used_by_route(
+                            signal,
+                            &file.file,
+                            route_component_files.get(&route.route),
+                        )
+                })
+                .map(|(_, signal)| StateGraphRouteSignalReport {
+                    owner: signal.owner.clone(),
+                    name: signal.name.clone(),
+                    key: signal.key.clone(),
+                    ty: signal.ty.clone(),
+                })
+                .collect::<Vec<_>>();
+            signals.sort_by(|left, right| {
+                left.owner
+                    .cmp(&right.owner)
+                    .then_with(|| left.name.cmp(&right.name))
+                    .then_with(|| left.key.cmp(&right.key))
+            });
+            signals.dedup();
+
+            StateGraphRouteReport {
+                route: route.route.clone(),
+                file: route.file.clone(),
+                signals,
+            }
+        })
+        .filter(|route| !route.signals.is_empty())
+        .collect::<Vec<_>>();
+
+    StateGraphReport {
+        scopes,
+        routes: route_reports,
+    }
+}
+
+fn source_may_have_state_declaration(source: &str) -> bool {
+    source.lines().any(|raw_line| {
         let line = raw_line.trim_start();
-        if component_depth > 0 {
-            component_depth = update_component_block_depth(component_depth, line);
-            continue;
-        }
-        if line.starts_with("component ") {
-            component_depth = update_component_block_depth(0, line);
-            continue;
-        }
-        if line.starts_with("state ")
+        line.starts_with("state ")
             || line.starts_with("app state ")
             || line.starts_with("layout state ")
             || line.starts_with("page state ")
-        {
-            return true;
-        }
-    }
-    false
+    })
 }
 
-fn update_component_block_depth(depth: usize, line: &str) -> usize {
+fn component_state_signals_from_source(source: &str) -> Vec<StateReportSignal> {
+    let mut signals = Vec::new();
+    let mut current_component: Option<(String, usize, usize)> = None;
+
+    for raw_line in source.lines() {
+        let line = raw_line.trim_start();
+        if current_component.is_none() {
+            if let Some(name) = component_name_from_line(line) {
+                let depth = update_block_depth(0, line);
+                current_component = Some((name, depth, 0));
+            }
+            continue;
+        }
+
+        let Some((component_name, depth, state_index)) = current_component.as_mut() else {
+            continue;
+        };
+
+        if let Some((name, ty, initial)) = parse_component_state_line(line) {
+            *state_index += 1;
+            let scope = format!("component:{component_name}");
+            signals.push(StateReportSignal {
+                name: name.clone(),
+                key: format!("__ax_component_state__:{component_name}:{name}:{state_index}"),
+                scope: scope.clone(),
+                owner: scope,
+                ty,
+                initial,
+            });
+        }
+
+        *depth = update_block_depth(*depth, line);
+        if *depth == 0 {
+            current_component = None;
+        }
+    }
+
+    signals
+}
+
+fn component_name_from_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("component ")?;
+    let name = rest
+        .split(|char: char| !(char.is_ascii_alphanumeric() || char == '_'))
+        .next()
+        .unwrap_or_default();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn parse_component_state_line(line: &str) -> Option<(String, String, AxStateValue)> {
+    let rest = line.strip_prefix("state ")?.trim();
+    let equals = rest.find('=')?;
+    let left = rest[..equals].trim();
+    let value = rest[equals + 1..].trim();
+    let (name, explicit_ty) = left
+        .split_once(':')
+        .map(|(name, ty)| (name.trim(), Some(ty.trim())))
+        .unwrap_or((left, None));
+    if name.is_empty() {
+        return None;
+    }
+
+    let initial = parse_state_literal_value(value)?;
+    let ty = explicit_ty
+        .map(str::to_string)
+        .unwrap_or_else(|| initial.type_name().to_string());
+    Some((name.to_string(), ty, initial))
+}
+
+fn parse_state_literal_value(source: &str) -> Option<AxStateValue> {
+    let source = source.trim();
+    let literal = source
+        .strip_prefix("signal(")
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(source)
+        .trim();
+
+    if let Ok(value) = serde_json::from_str::<String>(literal) {
+        return Some(AxStateValue::String(value));
+    }
+    if literal == "true" {
+        return Some(AxStateValue::Bool(true));
+    }
+    if literal == "false" {
+        return Some(AxStateValue::Bool(false));
+    }
+    literal.parse::<f64>().ok().map(AxStateValue::Number)
+}
+
+fn update_block_depth(depth: usize, line: &str) -> usize {
     let open_count = line.chars().filter(|char| *char == '{').count();
     let close_count = line.chars().filter(|char| *char == '}').count();
     depth.saturating_add(open_count).saturating_sub(close_count)
@@ -10723,6 +11057,40 @@ fn print_state_text(report: &StateReport) {
             );
         }
     }
+
+    if !report.graph.scopes.is_empty() {
+        println!();
+        println!("State graph scopes:");
+        for scope in &report.graph.scopes {
+            let labels = scope
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{} ({})", signal.name, signal.key, signal.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {:<24} scope={} signals={}",
+                scope.owner, scope.scope, labels
+            );
+        }
+    }
+
+    if !report.graph.routes.is_empty() {
+        println!();
+        println!("State graph routes:");
+        for route in &report.graph.routes {
+            let labels = route
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.owner, signal.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {:<24} file={} signals={}",
+                route.route, route.file, labels
+            );
+        }
+    }
 }
 
 fn format_state_value(value: &AxStateValue) -> String {
@@ -10768,6 +11136,15 @@ fn state_signal_is_visible_to_route(signal: &StateReportSignal, route: &str) -> 
     };
 
     layout_route != "/" && route.starts_with(&format!("{layout_route}/"))
+}
+
+fn state_signal_is_component_used_by_route(
+    signal: &StateReportSignal,
+    file: &str,
+    route_component_files: Option<&std::collections::BTreeSet<String>>,
+) -> bool {
+    signal.owner.starts_with("component:")
+        && route_component_files.is_some_and(|files| files.contains(file))
 }
 
 fn format_max_body_bytes_for_root(root: &Path) -> String {
@@ -15542,6 +15919,10 @@ scope Blog <Domain> {
                     },
                 ],
             }],
+            graph: StateGraphReport {
+                scopes: Vec::new(),
+                routes: Vec::new(),
+            },
         };
 
         let labels = state_signal_labels_for_route(&report, "/docs/getting-started");
@@ -15916,6 +16297,107 @@ page state enabled = signal(true)
         assert_eq!(report.files[3].signals[0].scope, "page:settings");
         assert_eq!(report.files[3].signals[0].owner, "page:/settings");
         assert_eq!(report.files[3].signals[0].initial, AxStateValue::Bool(true));
+
+        assert_eq!(report.graph.scopes.len(), 4);
+        assert_eq!(report.graph.routes.len(), 2);
+
+        let root_route = report
+            .graph
+            .routes
+            .iter()
+            .find(|route| route.route == "/")
+            .expect("root route should have state graph entry");
+        assert_eq!(
+            root_route
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.owner, signal.name))
+                .collect::<Vec<_>>(),
+            vec![
+                "app:language".to_string(),
+                "page:/:count".to_string(),
+                "page:/:theme".to_string(),
+            ]
+        );
+
+        let settings_route = report
+            .graph
+            .routes
+            .iter()
+            .find(|route| route.route == "/settings")
+            .expect("settings route should have state graph entry");
+        assert_eq!(
+            settings_route
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.owner, signal.name))
+                .collect::<Vec<_>>(),
+            vec![
+                "app:language".to_string(),
+                "layout:/settings:sidebarOpen".to_string(),
+                "page:/settings:enabled".to_string(),
+            ]
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn state_graph_maps_component_local_state_to_importing_routes() {
+        let root = make_temp_dir("component-state-graph");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { ThemeSwitch } from "@/components/ThemeSwitch.ax"
+
+page Home() {
+  return ASX {
+    <ThemeSwitch />
+  }
+}
+"#,
+        )
+        .expect("home page should write");
+        fs::write(
+            root.join("app/components/ThemeSwitch.ax"),
+            r#"
+component ThemeSwitch() {
+  state theme: String = "silver"
+  style { recipe = "theme-switch" }
+
+  render ASX {
+    <span>{theme}</span>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+
+        let report = collect_state_report(&root).expect("state report should collect");
+
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].file, "app/components/ThemeSwitch.ax");
+        assert_eq!(report.files[0].signals[0].owner, "component:ThemeSwitch");
+        assert_eq!(
+            report.files[0].signals[0].key,
+            "__ax_component_state__:ThemeSwitch:theme:1"
+        );
+
+        let root_route = report
+            .graph
+            .routes
+            .iter()
+            .find(|route| route.route == "/")
+            .expect("root route should include component state");
+        assert_eq!(
+            root_route
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.owner, signal.name))
+                .collect::<Vec<_>>(),
+            vec!["component:ThemeSwitch:theme".to_string()]
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
