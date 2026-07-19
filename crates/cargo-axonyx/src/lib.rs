@@ -343,6 +343,10 @@ struct StateArgs {
     /// Output format for the state manifest.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
+
+    /// Show only state signals visible to a specific page route.
+    #[arg(long)]
+    route: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -881,6 +885,12 @@ struct StateGraphRouteSignalReport {
     name: String,
     key: String,
     ty: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateRouteFocusReport {
+    route: String,
+    signals: Vec<StateGraphRouteSignalReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -4157,6 +4167,17 @@ fn schema_command(args: SchemaArgs) -> Result<()> {
 fn state_command(args: StateArgs) -> Result<()> {
     let root = app_root()?;
     let report = collect_state_report(&root)?;
+
+    if let Some(route) = args.route.as_deref() {
+        let focus = state_route_focus_report(&report, route);
+        match args.format {
+            CheckFormat::Text => print_state_route_text(&focus),
+            CheckFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&focus)?);
+            }
+        }
+        return Ok(());
+    }
 
     match args.format {
         CheckFormat::Text => print_state_text(&report),
@@ -11093,6 +11114,48 @@ fn print_state_text(report: &StateReport) {
     }
 }
 
+fn state_route_focus_report(report: &StateReport, route: &str) -> StateRouteFocusReport {
+    let route = normalize_state_route_filter(route);
+    let signals = report
+        .graph
+        .routes
+        .iter()
+        .find(|entry| entry.route == route)
+        .map(|entry| entry.signals.clone())
+        .unwrap_or_default();
+
+    StateRouteFocusReport { route, signals }
+}
+
+fn normalize_state_route_filter(route: &str) -> String {
+    let route = route.trim();
+    if route.is_empty() || route == "/" {
+        return "/".to_string();
+    }
+
+    let route = route.trim_end_matches('/');
+    if route.starts_with('/') {
+        route.to_string()
+    } else {
+        format!("/{route}")
+    }
+}
+
+fn print_state_route_text(report: &StateRouteFocusReport) {
+    println!("State graph route: {}", report.route);
+    if report.signals.is_empty() {
+        println!("  No visible state signals.");
+        return;
+    }
+
+    for signal in &report.signals {
+        println!(
+            "  {:<28} key={} owner={} type={}",
+            signal.name, signal.key, signal.owner, signal.ty
+        );
+    }
+}
+
 fn format_state_value(value: &AxStateValue) -> String {
     match value {
         AxStateValue::Null => "null".to_string(),
@@ -15930,6 +15993,57 @@ scope Blog <Domain> {
         assert!(labels.contains(&"app:language".to_string()));
         assert!(labels.contains(&"layout:/docs:sidebarOpen".to_string()));
         assert!(labels.contains(&"page:/docs/getting-started:filter".to_string()));
+    }
+
+    #[test]
+    fn state_route_focus_reports_only_visible_route_signals() {
+        let report = StateReport {
+            files: Vec::new(),
+            graph: StateGraphReport {
+                scopes: Vec::new(),
+                routes: vec![StateGraphRouteReport {
+                    route: "/docs/getting-started".to_string(),
+                    file: "app/docs/getting-started/page.ax".to_string(),
+                    signals: vec![
+                        StateGraphRouteSignalReport {
+                            owner: "app".to_string(),
+                            name: "language".to_string(),
+                            key: "app:language:1".to_string(),
+                            ty: "String".to_string(),
+                        },
+                        StateGraphRouteSignalReport {
+                            owner: "page:/docs/getting-started".to_string(),
+                            name: "filter".to_string(),
+                            key: "page:docs.getting-started:filter:1".to_string(),
+                            ty: "String".to_string(),
+                        },
+                    ],
+                }],
+            },
+        };
+
+        let focus = state_route_focus_report(&report, "docs/getting-started/");
+
+        assert_eq!(focus.route, "/docs/getting-started");
+        assert_eq!(focus.signals.len(), 2);
+        assert_eq!(focus.signals[0].name, "language");
+        assert_eq!(focus.signals[1].name, "filter");
+    }
+
+    #[test]
+    fn state_route_focus_returns_empty_report_for_routes_without_state() {
+        let report = StateReport {
+            files: Vec::new(),
+            graph: StateGraphReport {
+                scopes: Vec::new(),
+                routes: Vec::new(),
+            },
+        };
+
+        let focus = state_route_focus_report(&report, "/empty");
+
+        assert_eq!(focus.route, "/empty");
+        assert!(focus.signals.is_empty());
     }
 
     #[test]
