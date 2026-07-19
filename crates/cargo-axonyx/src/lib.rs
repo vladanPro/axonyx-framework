@@ -13106,6 +13106,12 @@ fn validate_action_patches(route: &ResolvedRoute, patches: &[AxPreviewStatePatch
     }
 
     for patch in patches {
+        if !manifest.owns_signal_key(&patch.signal) {
+            bail!(
+                "state patch for '{}' is not visible to this route",
+                patch.signal
+            );
+        }
         let Some(expected_ty) = manifest.signal_types.get(&patch.signal) else {
             continue;
         };
@@ -13196,10 +13202,12 @@ fn collect_route_state_manifest(route: &ResolvedRoute) -> Result<RouteStateManif
 struct RouteStateManifest {
     signal_types: std::collections::BTreeMap<String, String>,
     aliases: std::collections::BTreeMap<String, String>,
+    owned_keys: std::collections::BTreeSet<String>,
 }
 
 impl RouteStateManifest {
     fn insert(&mut self, name: String, key: String, legacy_key: String, ty: String) {
+        self.owned_keys.insert(key.clone());
         self.signal_types.insert(key.clone(), ty.clone());
         self.signal_types.insert(legacy_key.clone(), ty);
         self.aliases.entry(name).or_insert_with(|| key.clone());
@@ -13217,6 +13225,10 @@ impl RouteStateManifest {
 
     fn signal_type(&self, signal: &str) -> Option<&str> {
         self.signal_types.get(signal).map(String::as_str)
+    }
+
+    fn owns_signal_key(&self, signal: &str) -> bool {
+        self.owned_keys.contains(signal)
     }
 }
 
@@ -20150,6 +20162,72 @@ action SetTheme(theme: string) {
         assert!(raw.contains("Content-Type: application/ax-patch+json; charset=utf-8"));
         assert!(raw.contains("\"signal\":\"page:root:theme:1\""));
         assert!(raw.contains("\"value\":\"gold\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn action_patch_response_rejects_route_invisible_state_signal() {
+        let root = make_temp_dir("action-patch-route-ownership");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home() {
+  page state theme: String = "silver"
+
+  return ASX {
+    <Copy>Home</Copy>
+  }
+}
+"#,
+        )
+        .expect("home page should write");
+        fs::write(
+            root.join("app/settings/page.ax"),
+            r#"
+page Settings() {
+  page state theme: String = "silver"
+
+  return ASX {
+    <Copy>Settings</Copy>
+  }
+}
+"#,
+        )
+        .expect("settings page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetTheme(theme: string) {
+  patch "page:settings:theme:1" = input.theme
+  return ok
+}
+"#,
+        )
+        .expect("actions should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route should resolve")
+            .expect("route should exist");
+        let result = AxPreviewActionResult {
+            redirect_to: None,
+            value: AxValue::Null,
+            patches: vec![AxPreviewStatePatch::set(
+                "page:settings:theme:1",
+                AxValue::from("gold"),
+            )],
+            invalidations: Vec::new(),
+            error: None,
+        };
+        let error = action_patch_response(&route, &result).expect_err("patch should be rejected");
+        let error = error.to_string();
+        assert!(
+            error.contains("not visible to this route"),
+            "error was: {error}"
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
