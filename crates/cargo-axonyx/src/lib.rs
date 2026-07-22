@@ -899,6 +899,7 @@ struct StateGraphRouteSignalReport {
 struct StateRouteFocusReport {
     route: String,
     signals: Vec<StateGraphRouteSignalReport>,
+    patches: Vec<StatePatchUsageReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -11264,8 +11265,18 @@ fn state_route_focus_report(report: &StateReport, route: &str) -> StateRouteFocu
         .find(|entry| entry.route == route)
         .map(|entry| entry.signals.clone())
         .unwrap_or_default();
+    let patches = report
+        .patches
+        .iter()
+        .filter(|patch| patch.route == route)
+        .cloned()
+        .collect();
 
-    StateRouteFocusReport { route, signals }
+    StateRouteFocusReport {
+        route,
+        signals,
+        patches,
+    }
 }
 
 fn normalize_state_route_filter(route: &str) -> String {
@@ -11284,16 +11295,29 @@ fn normalize_state_route_filter(route: &str) -> String {
 
 fn print_state_route_text(report: &StateRouteFocusReport) {
     println!("State graph route: {}", report.route);
-    if report.signals.is_empty() {
+    if report.signals.is_empty() && report.patches.is_empty() {
         println!("  No visible state signals.");
         return;
     }
 
-    for signal in &report.signals {
-        println!(
-            "  {:<28} key={} owner={} type={}",
-            signal.name, signal.key, signal.owner, signal.ty
-        );
+    if !report.signals.is_empty() {
+        println!("  Signals:");
+        for signal in &report.signals {
+            println!(
+                "    {:<26} key={} owner={} type={}",
+                signal.name, signal.key, signal.owner, signal.ty
+            );
+        }
+    }
+
+    if !report.patches.is_empty() {
+        println!("  Patch sources:");
+        for patch in &report.patches {
+            println!(
+                "    action={} patch {} = {}",
+                patch.action, patch.target, patch.value
+            );
+        }
     }
 }
 
@@ -16199,6 +16223,7 @@ scope Blog <Domain> {
         assert_eq!(focus.signals.len(), 2);
         assert_eq!(focus.signals[0].name, "language");
         assert_eq!(focus.signals[1].name, "filter");
+        assert!(focus.patches.is_empty());
     }
 
     #[test]
@@ -16216,6 +16241,7 @@ scope Blog <Domain> {
 
         assert_eq!(focus.route, "/empty");
         assert!(focus.signals.is_empty());
+        assert!(focus.patches.is_empty());
     }
 
     #[test]
@@ -16717,6 +16743,8 @@ action SetTheme(theme: String) {
                 value: "input.theme".to_string(),
             }]
         );
+        let focus = state_route_focus_report(&report, "/settings");
+        assert_eq!(focus.patches, report.patches);
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
