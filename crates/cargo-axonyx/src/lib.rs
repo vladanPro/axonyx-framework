@@ -1094,6 +1094,7 @@ struct MeltSummary {
     component_client_scripts: usize,
     query_keys: usize,
     query_invalidations: usize,
+    state_patches: usize,
     content_collections: usize,
     content_entries: usize,
     diagnostics: usize,
@@ -2247,11 +2248,12 @@ fn doctor_melt_graph_check(root: &Path) -> DoctorCheck {
             code: "melt-graph",
             severity: DoctorSeverity::Ok,
             message: format!(
-                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
+                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} state patch(es), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.state_patches,
                 report.summary.scopes,
                 report.summary.data_bindings,
                 report.summary.query_keys,
@@ -2947,11 +2949,12 @@ fn melt_command(args: MeltArgs) -> Result<()> {
     if args.check {
         if report.diagnostics.is_empty() {
             println!(
-                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
+                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} state patch(es), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.state_patches,
                 report.summary.scopes,
                 report.summary.data_bindings,
                 report.summary.query_keys,
@@ -3054,6 +3057,12 @@ fn melt_summary(
         .flat_map(|route| &route.actions)
         .map(|action| action.invalidates.len())
         .sum();
+    let state_patches = actions
+        .routes
+        .iter()
+        .flat_map(|route| &route.actions)
+        .map(|action| action.patches.len())
+        .sum();
     let component_count = components
         .files
         .iter()
@@ -3089,6 +3098,7 @@ fn melt_summary(
         component_client_scripts,
         query_keys: data_bindings,
         query_invalidations,
+        state_patches,
         content_collections: content.collections.len(),
         content_entries: content
             .collections
@@ -3132,8 +3142,8 @@ fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport
                 "empty"
             },
             detail: format!(
-                "{} state signal(s), {} scope state(s) declared.",
-                summary.state_signals, summary.scope_states
+                "{} state signal(s), {} scope state(s), {} state patch(es) declared.",
+                summary.state_signals, summary.scope_states, summary.state_patches
             ),
         },
         MeltLayerReport {
@@ -9723,12 +9733,13 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} state_patches={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.state_patches,
         report.summary.scopes,
         report.summary.scope_states,
         report.summary.components,
@@ -9908,11 +9919,12 @@ fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} state_patches={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.state_patches,
         report.summary.scopes,
         report.summary.scope_states,
         report.summary.components,
@@ -15901,6 +15913,7 @@ scope Layout <RenderLayout, setTheme> {
         assert_eq!(report.summary.data_bindings, 1);
         assert_eq!(report.summary.query_keys, 1);
         assert_eq!(report.summary.query_invalidations, 1);
+        assert_eq!(report.summary.state_patches, 1);
         assert_eq!(report.summary.diagnostics, 0);
         assert_eq!(report.data.routes.len(), 1);
         assert_eq!(report.data.routes[0].route, "/");
@@ -15971,6 +15984,7 @@ scope Layout <RenderLayout, setTheme> {
         assert!(json.contains("\"query_key\""));
         assert!(json.contains("\"invalidates\""));
         assert!(json.contains("\"patches\""));
+        assert!(json.contains("\"state_patches\":1"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
