@@ -812,7 +812,14 @@ struct ActionItemReport {
     name: String,
     returns: Option<String>,
     inputs: Vec<ActionInputReport>,
+    patches: Vec<ActionPatchReport>,
     invalidates: Vec<ActionInvalidationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActionPatchReport {
+    target: String,
+    value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -4047,12 +4054,14 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
                         default: field.default.as_ref().map(format_ax_expr),
                     })
                     .collect();
+                let patches = collect_action_patches_from_body(&action.body);
                 let invalidates = collect_action_invalidations_from_body(&action.body);
 
                 Some(ActionItemReport {
                     name: action.name,
                     returns: action.returns,
                     inputs,
+                    patches,
                     invalidates,
                 })
             })
@@ -4068,6 +4077,21 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
     }
 
     Ok(ActionReport { routes })
+}
+
+fn collect_action_patches_from_body(body: &[AxBackendStmt]) -> Vec<ActionPatchReport> {
+    body.iter()
+        .filter_map(|statement| {
+            let AxBackendStmt::Patch(patch) = statement else {
+                return None;
+            };
+
+            Some(ActionPatchReport {
+                target: format_action_patch_target(&patch.signal),
+                value: format_ax_expr(&patch.value),
+            })
+        })
+        .collect()
 }
 
 fn collect_action_invalidations_from_body(body: &[AxBackendStmt]) -> Vec<ActionInvalidationReport> {
@@ -4094,6 +4118,13 @@ fn collect_action_invalidations_from_body(body: &[AxBackendStmt]) -> Vec<ActionI
         }
     }
     invalidations
+}
+
+fn format_action_patch_target(expr: &AxExpr) -> String {
+    match expr {
+        AxExpr::String(value) | AxExpr::Identifier(value) => value.clone(),
+        _ => format_ax_expr(expr),
+    }
 }
 
 fn push_auto_action_invalidation(
@@ -10519,6 +10550,16 @@ fn print_actions_text(report: &ActionReport) {
                 }
             }
 
+            if !action.patches.is_empty() {
+                let labels = action
+                    .patches
+                    .iter()
+                    .map(|patch| format!("{} = {}", patch.target, patch.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("      patches: {labels}");
+            }
+
             if !action.invalidates.is_empty() {
                 let labels = action
                     .invalidates
@@ -16211,6 +16252,13 @@ action saveProfile(email: string, public?: bool = true) -> ProfilePatch {
             }]
         );
         assert_eq!(
+            report.routes[0].actions[0].patches,
+            vec![ActionPatchReport {
+                target: "theme".to_string(),
+                value: "input.theme".to_string(),
+            }]
+        );
+        assert_eq!(
             report.routes[0].actions[0].invalidates,
             vec![ActionInvalidationReport {
                 target: "posts".to_string(),
@@ -16311,6 +16359,48 @@ action SavePost
     }
 
     #[test]
+    fn action_report_collects_component_state_patch_targets() {
+        let root = make_temp_dir("action-report-component-patches");
+        fs::create_dir_all(root.join("app/docs")).expect("docs dir should exist");
+        fs::write(
+            root.join("app/docs/page.ax"),
+            "page Docs\n<Copy>Docs</Copy>\n",
+        )
+        .expect("docs page should write");
+        fs::write(
+            root.join("app/docs/actions.ax"),
+            r#"
+action SetDocsTheme(theme: string) {
+  patch docsTheme = input.theme
+  patch StatePatchProbe.mode = input.theme
+  return ok()
+}
+"#,
+        )
+        .expect("actions should write");
+
+        let report = collect_action_report(&root).expect("action report should collect");
+
+        assert_eq!(report.routes.len(), 1);
+        assert_eq!(report.routes[0].route, "/docs");
+        assert_eq!(
+            report.routes[0].actions[0].patches,
+            vec![
+                ActionPatchReport {
+                    target: "docsTheme".to_string(),
+                    value: "input.theme".to_string(),
+                },
+                ActionPatchReport {
+                    target: "StatePatchProbe.mode".to_string(),
+                    value: "input.theme".to_string(),
+                },
+            ]
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn action_report_filters_by_route_and_name() {
         let report = ActionReport {
             routes: vec![
@@ -16322,12 +16412,14 @@ action SavePost
                             name: "SetTheme".to_string(),
                             returns: None,
                             inputs: Vec::new(),
+                            patches: Vec::new(),
                             invalidates: Vec::new(),
                         },
                         ActionItemReport {
                             name: "ClearTheme".to_string(),
                             returns: None,
                             inputs: Vec::new(),
+                            patches: Vec::new(),
                             invalidates: Vec::new(),
                         },
                     ],
@@ -16339,6 +16431,7 @@ action SavePost
                         name: "SendFeedback".to_string(),
                         returns: None,
                         inputs: Vec::new(),
+                        patches: Vec::new(),
                         invalidates: Vec::new(),
                     }],
                 },
