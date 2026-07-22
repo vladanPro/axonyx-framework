@@ -40,3 +40,14 @@ server with `cargo ax run start --host 0.0.0.0 --port 3000`.
 2. Update `public/brand-mark.svg` and `public/favicon.svg`.
 3. Replace `hello@example.com` in `app/contact/page.ax`.
 4. Choose the default theme in `app/layout.ax`.
+5. Keep the site static until you truly need a server action.
+
+## Template contract
+
+This template should stay boring in the best way:
+
+- no database
+- no API route
+- no job worker
+- no custom JavaScript unless a component needs it
+- Foundry UI through `use "@axonyx/ui"`

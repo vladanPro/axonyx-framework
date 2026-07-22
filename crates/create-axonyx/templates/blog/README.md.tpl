@@ -47,3 +47,21 @@ cargo ax build --clean
 
 Generated output includes the home page, about page, content manifest, and one
 static route for every Markdown entry.
+
+## First edits
+
+1. Replace the intro copy in `app/page.ax`.
+2. Add or edit Markdown files in `content/posts`.
+3. Update `app/about/page.ax` with your publishing point of view.
+4. Choose the default reading theme in `app/layout.ax`.
+5. Run `cargo ax content` before deploy when a post is missing.
+
+## Template contract
+
+This template is still static:
+
+- content comes from Markdown files
+- articles are prerendered during `cargo ax build --clean`
+- no database is required
+- no API route is required
+- Foundry UI is loaded through `use "@axonyx/ui"`

@@ -19,6 +19,13 @@ page About() {
           <SectionCard title="Craft"><Badge>02</Badge><Copy>Sweat the details that make a product calm and trustworthy.</Copy></SectionCard>
           <SectionCard title="Momentum"><Badge>03</Badge><Copy>Ship useful steps early and improve them with evidence.</Copy></SectionCard>
         </ContentGrid>
+        <SectionCard title="How to make this page yours">
+          <Copy>
+            Replace these values with your real operating principles, add a
+            short founder note, and link to proof when you have it. Keep the
+            page focused on trust, not every detail about the company.
+          </Copy>
+        </SectionCard>
       </Stack>
     </Container>
   }

@@ -68,6 +68,27 @@ page Home() {
           </Copy>
           <Button href="/contact" variant="primary">Make the first move</Button>
         </SectionCard>
+
+        <ContentGrid cols={3} gap="lg">
+          <SectionCard title="1. Replace the promise">
+            <Copy>
+              Start with the hero title and lead copy. Make the first screen
+              say what you do, who it helps, and why it matters.
+            </Copy>
+          </SectionCard>
+          <SectionCard title="2. Prove the shape">
+            <Copy>
+              Use the about page for trust: team, values, process, proof, or a
+              short story that makes the site feel real.
+            </Copy>
+          </SectionCard>
+          <SectionCard title="3. Ship the first version">
+            <Copy>
+              Run `cargo ax check`, `cargo ax test`, and `cargo ax build --clean`
+              before deploying the generated `dist/` output.
+            </Copy>
+          </SectionCard>
+        </ContentGrid>
       </Stack>
     </Container>
   }
