@@ -29,10 +29,19 @@ The filename becomes the slug. `a-new-field-note.md` is published at
 
 ## Develop
 
+Start the local server:
+
 ```bash
 cargo ax run dev
+```
+
+Inspect content and validate before deploy:
+
+```bash
 cargo ax content
 cargo ax check
+cargo ax doctor
+cargo ax test
 cargo ax build --clean
 ```
 

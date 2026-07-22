@@ -847,4 +847,28 @@ mod tests {
         assert!(paths.contains(&"app/getting-started/page.ax"));
         assert!(paths.contains(&"app/reference/page.ax"));
     }
+
+    #[test]
+    fn docs_template_uses_route_aware_cli_loop() {
+        let files = template::template_files(
+            template::AppTemplate::Docs,
+            "demo-docs",
+            "axonyx-runtime = \"0.1.0\"",
+            "runtime note",
+        );
+        let readme = files
+            .iter()
+            .find(|file| file.relative_path == "README.md")
+            .expect("docs template should include README");
+        let reference = files
+            .iter()
+            .find(|file| file.relative_path == "app/reference/page.ax")
+            .expect("docs template should include reference page");
+
+        assert!(readme.contents.contains("cargo ax run dev"));
+        assert!(readme.contents.contains("cargo ax test"));
+        assert!(!readme.contents.contains("cargo run preview"));
+        assert!(!readme.contents.contains("target/axonyx-preview.html"));
+        assert!(!reference.contents.contains("{ return ASX { ... } }"));
+    }
 }

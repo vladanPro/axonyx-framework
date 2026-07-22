@@ -30,7 +30,7 @@ should be authored in JSX-like `.ax`.
 
 ## Build And Run
 
-Start the local server first:
+Start the local server:
 
 ```bash
 cargo ax run dev
@@ -40,14 +40,14 @@ Then, in a second terminal, run the validation loop before sharing or deploying:
 
 ```bash
 cargo ax check
-cargo ax actions
 cargo ax doctor
+cargo ax test
 cargo ax build --clean
 ```
 
-The dev server runs at `http://127.0.0.1:3000`. The validation loop checks `.ax`
-sources, regenerates `src/generated/backend.rs`, and writes static HTML into
-`dist/`.
+The dev server runs at `http://127.0.0.1:3000`. The validation loop checks
+`.ax` sources, verifies the starter routes, regenerates
+`src/generated/backend.rs`, and writes static HTML into `dist/`.
 
 This template is fully static. Add route actions later only when the documentation
 site genuinely needs a server-side interaction.
@@ -87,9 +87,8 @@ routes = [
 cargo ax run start --host 0.0.0.0 --port 3000
 ```
 
-Use `run start` for a production-style process without the dev live-reload client. On hosted platforms, pass the platform `PORT` value to `--port`.
-
-The older `cargo run` preview loop still generates `target/axonyx-preview.html`, but new docs work should prefer the `cargo ax` route-aware loop.
+Use `run start` for a production-style process without the dev live-reload
+client. On hosted platforms, pass the platform `PORT` value to `--port`.
 
 Suggested first edit:
 

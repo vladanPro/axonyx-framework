@@ -6,97 +6,96 @@ import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 
 page GettingStarted() {
+  return ASX {
+    <Head>
+      <Title>Getting Started | {{APP_NAME}}</Title>
+    </Head>
 
-return ASX {
-<Head>
-  <Title>Getting Started | {{APP_NAME}}</Title>
-</Head>
+    <Container max="xl">
+      <PageHeader title="Getting Started">
+        <Copy slot="eyebrow">Quick Start</Copy>
+        <Copy tone="lead">
+          Generate the app, run the Axonyx dev server, edit a route file, then
+          check and build the static output.
+        </Copy>
+        <Copy>
+          This template already includes Foundry UI, theme preflight, sidebar
+          navigation, route checks, and a docs-shaped folder structure.
+        </Copy>
+        <a slot="actions" href="/reference">Read reference</a>
+        <a slot="actions" href="/examples">See examples</a>
+      </PageHeader>
 
-<Container max="xl">
-  <PageHeader title="Getting Started">
-    <Copy slot="eyebrow">Quick Start</Copy>
-    <Copy tone="lead">
-      Start by generating the app, running cargo ax run dev, and editing
-      app/page.ax or a nested route page.
-    </Copy>
-    <Copy>
-      This docs template already includes the vendored UI package, silver theme,
-      and route structure so the first edits can stay focused on content.
-    </Copy>
-    <a slot="actions" href="/reference">Read reference</a>
-    <a slot="actions" href="/examples">See examples</a>
-    <ContentGrid cols={2} gap="md">
-      <SectionCard title="Scaffold">
-        <Copy>
-          create-axonyx already wires the runtime, UI vendor snapshot, and
-          silver theme starter shell for this template.
-        </Copy>
-      </SectionCard>
-      <SectionCard title="Preview">
-        <Copy>
-          Use cargo run for quick preview generation or cargo ax run dev for
-          route-aware local serving.
-        </Copy>
-      </SectionCard>
-      <SectionCard title="Edit">
-        <Copy>
-          Start with app/layout.ax for the shell, then move through app/page.ax
-          and nested route pages as the docs grow.
-        </Copy>
-      </SectionCard>
-      <SectionCard title="Expand">
-        <Copy>
-          Add routes/ or jobs/ later if your docs app needs APIs, ingestion, or
-          scheduled work.
-        </Copy>
-      </SectionCard>
-    </ContentGrid>
-  </PageHeader>
+      <ContentGrid cols={2} gap="lg">
+        <CommandList title="First five commands">
+          <Copy slot="eyebrow">CLI loop</Copy>
+          <ol>
+            <li>
+              Create a docs app.
+              <code>create-axonyx {{APP_SLUG}} --template docs</code>
+            </li>
+            <li>
+              Move into the app directory.
+              <code>cd {{APP_SLUG}}</code>
+            </li>
+            <li>
+              Start local development.
+              <code>cargo ax run dev</code>
+            </li>
+            <li>
+              Check the project before sharing it.
+              <code>cargo ax check</code>
+            </li>
+            <li>
+              Build deployable output.
+              <code>cargo ax build --clean</code>
+            </li>
+          </ol>
+          <a slot="actions" href="/reference">See CLI reference</a>
+        </CommandList>
 
-  <DocsSection title="Good First Files">
-    <Copy slot="eyebrow">Route Shape</Copy>
-    <Copy>app/layout.ax defines the shell, metadata, and shared navigation.</Copy>
-    <Copy>app/page.ax is the main homepage route.</Copy>
-    <Copy>
-      app/*/page.ax extends the site with route folders that stay easy to scan.
-    </Copy>
-    <Copy slot="aside" tone="muted">Start in layout, then move into page-level routes.</Copy>
-    <Copy slot="aside" tone="muted">Keep assets in public/ and backend handlers in routes/ or jobs/ only when needed.</Copy>
-    <a slot="actions" href="/reference">Open route reference</a>
-  </DocsSection>
+        <DocsCodeBlock title="Starter page shape">
+          <Copy slot="eyebrow">ASX</Copy>
+          {"import { PageHeader } from \"@axonyx/ui/foundry/PageHeader.ax\"\n\npage Guide() {\n  return ASX {\n    <Container max=\"xl\">\n      <PageHeader title=\"Guide\">\n        <Copy tone=\"lead\">Write docs in .ax.</Copy>\n      </PageHeader>\n    </Container>\n  }\n}"}
+        </DocsCodeBlock>
+      </ContentGrid>
 
-  <ContentGrid cols={2} gap="lg">
-    <CommandList title="Core Commands">
-      <Copy slot="eyebrow">CLI Loop</Copy>
-      <ol>
-        <li>
-          Generate the project.
-          <code>create-axonyx {{APP_SLUG}} --template docs</code>
-        </li>
-        <li>
-          Move into the app directory.
-          <code>cd {{APP_SLUG}}</code>
-        </li>
-        <li>
-          Start local development.
-          <code>cargo ax run dev</code>
-        </li>
-        <li>
-          Inspect route-local actions.
-          <code>cargo ax actions</code>
-        </li>
-        <li>
-          Or generate a quick preview file.
-          <code>cargo run</code>
-        </li>
-      </ol>
-      <a slot="actions" href="/reference">See CLI reference</a>
-    </CommandList>
-    <DocsCodeBlock title="Starter Layout Shape">
-      <Copy slot="eyebrow">Example</Copy>
-      {"import { SiteShell } from \"@axonyx/ui/foundry/SiteShell.ax\"\n\npage SiteLayout\n\n<Head>\n  <Title>{{APP_NAME}}</Title>\n  <Theme>silver</Theme>\n</Head>\n\n<SiteShell max=\"xl\">\n  <Slot />\n</SiteShell>"}
-    </DocsCodeBlock>
-  </ContentGrid>
-</Container>
-}
+      <DocsSection title="Good first files">
+        <Copy slot="eyebrow">Route shape</Copy>
+        <Copy>`app/layout.ax` defines the shell, metadata, theme, nav, and sidebar.</Copy>
+        <Copy>`app/page.ax` is the overview route at `/`.</Copy>
+        <Copy>`app/getting-started/page.ax` is this page.</Copy>
+        <Copy slot="aside" tone="muted">Add `app/guides/page.ax` to create `/guides`.</Copy>
+        <Copy slot="aside" tone="muted">Keep `routes/` and `jobs/` out until your docs need server behavior.</Copy>
+        <a slot="actions" href="/reference">Open route reference</a>
+      </DocsSection>
+
+      <ContentGrid cols={2} gap="md">
+        <SectionCard title="Edit">
+          <Copy>
+            Change one title in `app/page.ax`, reload the browser, then move
+            into nested pages as your docs grow.
+          </Copy>
+        </SectionCard>
+        <SectionCard title="Validate">
+          <Copy>
+            Use `cargo ax check`, `cargo ax doctor`, and `cargo ax test` before
+            deploy. The starter already includes route QA in `aegis.toml`.
+          </Copy>
+        </SectionCard>
+        <SectionCard title="Style">
+          <Copy>
+            Foundry UI is activated by `use "@axonyx/ui"` in `app/layout.ax`.
+            Change the default theme from silver to bronze or gold there.
+          </Copy>
+        </SectionCard>
+        <SectionCard title="Deploy">
+          <Copy>
+            `cargo ax build --clean` writes `dist/`. Serve it statically, or run
+            `cargo ax run start` for the Axonyx production server path.
+          </Copy>
+        </SectionCard>
+      </ContentGrid>
+    </Container>
+  }
 }

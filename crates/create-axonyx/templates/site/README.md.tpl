@@ -16,10 +16,18 @@ runtime. Foundry UI and theme preflight are already configured.
 
 ## Develop
 
+Start the local server:
+
 ```bash
 cargo ax run dev
+```
+
+Before sharing or deploying:
+
+```bash
 cargo ax check
 cargo ax doctor
+cargo ax test
 cargo ax build --clean
 ```
 
