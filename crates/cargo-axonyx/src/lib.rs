@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use axonyx_core::ax_ast_prelude::{
-    AxBinaryOp, AxDocument, AxExpr, AxImport, AxStatement, AxUnaryOp,
+    AxBinaryOp, AxDocument, AxExpr, AxImport, AxImportBinding, AxStatement, AxUnaryOp,
 };
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
@@ -5497,7 +5497,7 @@ fn collect_route_state_manifest_from_paths<'a>(
     let mut paths = layout_paths.map(PathBuf::as_path).collect::<Vec<&Path>>();
     paths.push(page_path);
 
-    for path in paths {
+    for path in &paths {
         let source = fs::read_to_string(path)
             .with_context(|| format!("failed to read '{}'", path.display()))?;
         if !source_may_have_state_declaration(&source) {
@@ -5521,6 +5521,28 @@ fn collect_route_state_manifest_from_paths<'a>(
         for signal in manifest.signals {
             let legacy_key = format!("root:{}:{}", signal.name, signal.id.index);
             signals.insert(signal.name, signal.key, legacy_key, signal.ty);
+        }
+    }
+
+    let mut visited = std::collections::BTreeSet::new();
+    let mut component_files = std::collections::BTreeSet::new();
+    for path in paths {
+        collect_component_usage_files(root, path, &mut visited, &mut component_files)?;
+    }
+    for file in component_files {
+        let component_path = root.join(&file);
+        let source = fs::read_to_string(&component_path)
+            .with_context(|| format!("failed to read '{}'", component_path.display()))?;
+        for signal in component_state_signals_from_source(&source) {
+            let Some(component_name) = signal.owner.strip_prefix("component:") else {
+                continue;
+            };
+            signals.insert_component(
+                component_name.to_string(),
+                signal.name,
+                signal.key,
+                signal.ty,
+            );
         }
     }
 
@@ -5862,6 +5884,28 @@ fn check_ax_source_with_root(
                 CheckParseError::Backend(error),
             )],
         };
+    }
+
+    if let Some(component_file) =
+        parse_component_report_source(source).filter(|file| !file.components.is_empty())
+    {
+        let mut diagnostics = Vec::new();
+        if let Some(root) = root {
+            let imports = component_file
+                .imports
+                .iter()
+                .map(|import| {
+                    AxImport::new(
+                        import.bindings.iter().map(|binding| {
+                            AxImportBinding::new(binding.imported.clone(), binding.local.clone())
+                        }),
+                        import.source.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            diagnostics.extend(check_imports(root, path, source, &imports));
+        }
+        return diagnostics;
     }
 
     let document = match parse_ax_auto(source) {
@@ -13215,6 +13259,14 @@ impl RouteStateManifest {
         self.aliases.insert(key.clone(), key);
     }
 
+    fn insert_component(&mut self, component: String, name: String, key: String, ty: String) {
+        self.owned_keys.insert(key.clone());
+        self.signal_types.insert(key.clone(), ty);
+        self.aliases
+            .insert(format!("{component}.{name}"), key.clone());
+        self.aliases.insert(key.clone(), key);
+    }
+
     fn is_empty(&self) -> bool {
         self.signal_types.is_empty()
     }
@@ -20095,6 +20147,59 @@ action SetTheme
     }
 
     #[test]
+    fn route_state_manifest_resolves_imported_component_state_aliases() {
+        let root = make_temp_dir("component-action-binding");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { ThemeSwitch } from "@/components/theme-switch.ax"
+
+page Home() {
+  return ASX {
+    <ThemeSwitch />
+  }
+}
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switch.ax"),
+            r#"
+component ThemeSwitch() {
+  state theme: String = "silver"
+  style { recipe = "theme-switch" }
+
+  render ASX {
+    <span>{theme}</span>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route should resolve")
+            .expect("route should exist");
+        let manifest = collect_route_state_manifest(&route).expect("state manifest should collect");
+
+        assert_eq!(
+            manifest.resolve_signal_key("ThemeSwitch.theme").as_deref(),
+            Some("__ax_component_state__:ThemeSwitch:theme:1")
+        );
+        assert_eq!(
+            manifest.signal_type("__ax_component_state__:ThemeSwitch:theme:1"),
+            Some("String")
+        );
+        assert!(manifest.owns_signal_key("__ax_component_state__:ThemeSwitch:theme:1"));
+        assert_eq!(manifest.resolve_signal_key("theme"), None);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn action_request_can_use_shared_app_domain_helpers() {
         let root = make_temp_dir("action-shared-domain-helper");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
@@ -20537,6 +20642,58 @@ action SetTheme
         assert_eq!(diagnostics[0].code, "axonyx-action-patch-target");
         assert_eq!(diagnostics[0].line, 6);
         assert!(diagnostics[0].message.contains("missingTheme"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_accepts_imported_component_state_patch_alias() {
+        let root = make_temp_dir("action-patch-component-alias");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { ThemeSwitch } from "@/components/theme-switch.ax"
+
+page Home() {
+  return ASX {
+    <ThemeSwitch />
+  }
+}
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switch.ax"),
+            r#"
+component ThemeSwitch() {
+  state theme: String = "silver"
+
+  render ASX {
+    <span>{theme}</span>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetTheme
+  input:
+    theme: string
+
+  patch ThemeSwitch.theme = input.theme
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 0, "{diagnostics:#?}");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
