@@ -840,6 +840,7 @@ struct ActionInputReport {
 struct StateReport {
     files: Vec<StateReportFile>,
     graph: StateGraphReport,
+    patches: Vec<StatePatchUsageReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -898,6 +899,14 @@ struct StateGraphRouteSignalReport {
 struct StateRouteFocusReport {
     route: String,
     signals: Vec<StateGraphRouteSignalReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StatePatchUsageReport {
+    route: String,
+    action: String,
+    target: String,
+    value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -10831,7 +10840,35 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
     }
 
     let graph = build_state_graph_report(root, &files)?;
-    Ok(StateReport { files, graph })
+    let patches = collect_state_patch_usage_report(root)?;
+    Ok(StateReport {
+        files,
+        graph,
+        patches,
+    })
+}
+
+fn collect_state_patch_usage_report(root: &Path) -> Result<Vec<StatePatchUsageReport>> {
+    let actions = collect_action_report(root)?;
+    Ok(actions
+        .routes
+        .into_iter()
+        .flat_map(|route| {
+            route.actions.into_iter().flat_map(move |action| {
+                let route_path = route.route.clone();
+                let action_name = action.name;
+                action
+                    .patches
+                    .into_iter()
+                    .map(move |patch| StatePatchUsageReport {
+                        route: route_path.clone(),
+                        action: action_name.clone(),
+                        target: patch.target,
+                        value: patch.value,
+                    })
+            })
+        })
+        .collect())
 }
 
 fn build_state_graph_report(root: &Path, files: &[StateReportFile]) -> Result<StateGraphReport> {
@@ -11202,6 +11239,17 @@ fn print_state_text(report: &StateReport) {
             println!(
                 "  {:<24} file={} signals={}",
                 route.route, route.file, labels
+            );
+        }
+    }
+
+    if !report.patches.is_empty() {
+        println!();
+        println!("State patch sources:");
+        for patch in &report.patches {
+            println!(
+                "  {:<24} action={} patch {} = {}",
+                patch.route, patch.action, patch.target, patch.value
             );
         }
     }
@@ -16107,6 +16155,7 @@ scope Blog <Domain> {
                 scopes: Vec::new(),
                 routes: Vec::new(),
             },
+            patches: Vec::new(),
         };
 
         let labels = state_signal_labels_for_route(&report, "/docs/getting-started");
@@ -16141,6 +16190,7 @@ scope Blog <Domain> {
                     ],
                 }],
             },
+            patches: Vec::new(),
         };
 
         let focus = state_route_focus_report(&report, "docs/getting-started/");
@@ -16159,6 +16209,7 @@ scope Blog <Domain> {
                 scopes: Vec::new(),
                 routes: Vec::new(),
             },
+            patches: Vec::new(),
         };
 
         let focus = state_route_focus_report(&report, "/empty");
@@ -16624,6 +16675,47 @@ page state enabled = signal(true)
                 "layout:/settings:sidebarOpen".to_string(),
                 "page:/settings:enabled".to_string(),
             ]
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn state_report_collects_action_patch_sources() {
+        let root = make_temp_dir("state-report-action-patches");
+        fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::write(
+            root.join("app/settings/page.ax"),
+            r#"
+page Settings
+
+page state theme: String = "silver"
+
+<Copy>{theme}</Copy>
+"#,
+        )
+        .expect("settings page should write");
+        fs::write(
+            root.join("app/settings/actions.ax"),
+            r#"
+action SetTheme(theme: String) {
+  patch theme = input.theme
+  return ok()
+}
+"#,
+        )
+        .expect("settings actions should write");
+
+        let report = collect_state_report(&root).expect("state report should collect");
+
+        assert_eq!(
+            report.patches,
+            vec![StatePatchUsageReport {
+                route: "/settings".to_string(),
+                action: "SetTheme".to_string(),
+                target: "theme".to_string(),
+                value: "input.theme".to_string(),
+            }]
         );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
