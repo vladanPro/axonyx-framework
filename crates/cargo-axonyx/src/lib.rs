@@ -9972,27 +9972,35 @@ fn print_graph_text(report: &MeltReport) {
                 .join(",");
             println!("  {:<28} actions={}", route.route, action_names);
             for action in &route.actions {
-                if action.invalidates.is_empty() {
-                    continue;
+                if !action.patches.is_empty() {
+                    let labels = action
+                        .patches
+                        .iter()
+                        .map(|patch| format!("{} = {}", patch.target, patch.value))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    {} patches={}", action.name, labels);
                 }
-                let labels = action
-                    .invalidates
-                    .iter()
-                    .map(|invalidation| {
-                        format!(
-                            "{}:[{}]",
-                            invalidation.target,
-                            invalidation
-                                .query_key
-                                .iter()
-                                .map(|part| format!("{part:?}"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!("    {} invalidates={}", action.name, labels);
+                if !action.invalidates.is_empty() {
+                    let labels = action
+                        .invalidates
+                        .iter()
+                        .map(|invalidation| {
+                            format!(
+                                "{}:[{}]",
+                                invalidation.target,
+                                invalidation
+                                    .query_key
+                                    .iter()
+                                    .map(|part| format!("{part:?}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    {} invalidates={}", action.name, labels);
+                }
             }
         }
     }
@@ -15794,12 +15802,12 @@ scope Layout <RenderLayout, setTheme> {
         .expect("scope should write");
         fs::write(
             root.join("app/settings/page.ax"),
-            "page Settings\n<Copy>Settings</Copy>\n",
+            "page Settings\npage state settingsTheme: String = \"bronze\"\n<Copy>Settings</Copy>\n",
         )
         .expect("settings page should write");
         fs::write(
             root.join("app/settings/actions.ax"),
-            "action Save\n  insert posts\n    title: \"Hello\"\n  return ok\n",
+            "action Save\n  patch settingsTheme = \"silver\"\n  insert posts\n    title: \"Hello\"\n  return ok\n",
         )
         .expect("actions should write");
         fs::write(
@@ -15815,7 +15823,7 @@ scope Layout <RenderLayout, setTheme> {
         assert_eq!(report.summary.api_routes, 1);
         assert_eq!(report.summary.action_routes, 1);
         assert_eq!(report.summary.actions, 1);
-        assert_eq!(report.summary.state_signals, 1);
+        assert_eq!(report.summary.state_signals, 2);
         assert_eq!(report.summary.scopes, 1);
         assert_eq!(report.summary.scope_states, 1);
         assert_eq!(report.summary.data_bindings, 1);
@@ -15834,6 +15842,13 @@ scope Layout <RenderLayout, setTheme> {
             vec![ActionInvalidationReport {
                 target: "posts".to_string(),
                 query_key: vec!["posts".to_string()],
+            }]
+        );
+        assert_eq!(
+            report.actions.routes[0].actions[0].patches,
+            vec![ActionPatchReport {
+                target: "settingsTheme".to_string(),
+                value: "\"silver\"".to_string(),
             }]
         );
         assert_eq!(report.scopes.files.len(), 1);
@@ -15883,6 +15898,7 @@ scope Layout <RenderLayout, setTheme> {
         assert!(json.contains("\"scope_states\":1"));
         assert!(json.contains("\"query_key\""));
         assert!(json.contains("\"invalidates\""));
+        assert!(json.contains("\"patches\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
