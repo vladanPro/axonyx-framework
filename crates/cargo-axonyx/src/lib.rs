@@ -176,6 +176,9 @@ struct ActionsArgs {
 struct AddArgs {
     #[arg(value_enum)]
     module: ModuleKind,
+
+    /// Optional target for grouped modules, for example `cargo ax add block marketing-01`.
+    target: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -441,6 +444,7 @@ impl ServerTransport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModuleKind {
+    Block,
     Blockbit,
     Cms,
     Docs,
@@ -1235,7 +1239,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse_from(normalized_cli_args());
 
     match cli.command {
-        Commands::Add(args) => add_module(args.module),
+        Commands::Add(args) => add_module(args),
         Commands::Actions(args) => actions_command(args),
         Commands::Api(args) => api_command(args),
         Commands::Build(args) => build_command(args),
@@ -8431,23 +8435,76 @@ fn app_root() -> Result<PathBuf> {
     Ok(root)
 }
 
-fn add_module(module: ModuleKind) -> Result<()> {
+fn add_module(args: AddArgs) -> Result<()> {
     let root = app_root()?;
     let axonyx_toml = root.join("Axonyx.toml");
 
-    match module {
+    match args.module {
+        ModuleKind::Block => {
+            let name = args.target.as_deref().context(
+                "`cargo ax add block` needs a block name, for example `cargo ax add block marketing-01`. Run `cargo ax registry` to list blocks.",
+            )?;
+            add_registry_block(&root, name)?;
+        }
         ModuleKind::Docs => {
+            ensure_no_add_target(args.target.as_deref(), "docs")?;
             scaffold_docs_module(&root)?;
             enable_module(&axonyx_toml, "docs")?;
             println!("Added docs module.");
         }
         ModuleKind::Ui => {
+            ensure_no_add_target(args.target.as_deref(), "ui")?;
             add_ui_module(&root, &axonyx_toml)?;
             println!("Added ui module.");
         }
-        ModuleKind::Cms | ModuleKind::Blockbit => add_reserved_cms_module()?,
+        ModuleKind::Cms | ModuleKind::Blockbit => {
+            ensure_no_add_target(args.target.as_deref(), "cms")?;
+            add_reserved_cms_module()?
+        }
     }
 
+    Ok(())
+}
+
+fn ensure_no_add_target(target: Option<&str>, module: &str) -> Result<()> {
+    if let Some(target) = target {
+        bail!("`cargo ax add {module}` does not accept `{target}` yet");
+    }
+
+    Ok(())
+}
+
+fn add_registry_block(root: &Path, name: &str) -> Result<()> {
+    add_ui_module(root, &root.join("Axonyx.toml"))?;
+
+    let report = collect_registry_report(root)?;
+    let block = report
+        .blocks
+        .iter()
+        .find(|block| block.name == name)
+        .with_context(|| {
+            format!(
+                "unknown Axonyx UI block `{name}`. Run `cargo ax registry` to list available blocks."
+            )
+        })?;
+    let package_root = cargo_package_root(root, AXONYX_UI_PACKAGE_NAME)
+        .or_else(|| resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME))
+        .context("unable to resolve axonyx-ui package after adding UI")?;
+    let source_path = package_root.join(&block.path);
+    let source = fs::read_to_string(&source_path)
+        .with_context(|| format!("failed to read block source '{}'", source_path.display()))?;
+
+    let target_relative = format!("app/components/blocks/{}.ax", block.name);
+    write_if_missing(root, &target_relative, &source)?;
+
+    println!("Added block {}.", block.name);
+    println!("  source: {}", block.import);
+    println!("  copied: {target_relative}");
+    println!(
+        "  import: import {{ {} }} from \"@/components/blocks/{}\"",
+        block.title.replace(' ', ""),
+        block.name
+    );
     Ok(())
 }
 
@@ -18823,6 +18880,99 @@ description = "Action primitive."
         assert_eq!(report.components.len(), 1);
         assert_eq!(report.components[0].import, "@axonyx/ui/foundry/Button");
         assert_eq!(report.components[0].tags, vec!["action", "cta"]);
+    }
+
+    #[test]
+    fn add_registry_block_copies_block_source_from_ui_package() {
+        let workspace = make_temp_dir("add-registry-block");
+        let app_root = workspace.join("demo-app");
+        let ui_root = app_root.join("vendor/axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(app_root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/blocks")).expect("ui block dir should exist");
+        fs::write(
+            app_root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[modules]\nenabled = []\n",
+        )
+        .expect("config should write");
+        fs::write(
+            app_root.join("app/layout.ax"),
+            "page RootLayout\n  title \"Demo\"\n  Slot\n",
+        )
+        .expect("layout should write");
+        fs::write(
+            app_root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.0"
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("cargo manifest should write");
+        fs::write(
+            ui_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .expect("ui cargo manifest should write");
+        fs::write(ui_root.join("src/lib.rs"), "").expect("ui lib should write");
+        fs::write(
+            ui_root.join("Axonyx.registry.toml"),
+            r#"
+[registry]
+name = "Axonyx UI"
+namespace = "@axonyx/ui"
+version = 1
+
+[[blocks]]
+name = "marketing-01"
+title = "Marketing 01"
+path = "src/blocks/marketing-01.ax"
+import = "@axonyx/ui/blocks/marketing-01"
+preview = "/blocks/marketing-01"
+category = "marketing"
+status = "v0"
+install = "cargo ax add ui"
+copy = "cargo ax add block marketing-01"
+tags = ["landing"]
+description = "Marketing block."
+"#,
+        )
+        .expect("registry should write");
+        fs::write(
+            ui_root.join("src/blocks/marketing-01.ax"),
+            "component Marketing01 {\n  <Card title=\"Copied block\" />\n}\n",
+        )
+        .expect("block source should write");
+
+        add_registry_block(&app_root, "marketing-01").expect("block should add");
+
+        let copied = fs::read_to_string(app_root.join("app/components/blocks/marketing-01.ax"))
+            .expect("copied block should read");
+        assert!(copied.contains("component Marketing01"));
+        assert!(copied.contains("Copied block"));
+
+        let layout =
+            fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read back");
+        assert!(layout.contains("theme \"silver\""));
+        assert!(layout.contains(AXONYX_UI_STYLESHEET_HREF));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
 
     #[test]

@@ -137,6 +137,27 @@ axonyx-ui = "0.0.54"
 
 Local path and package override flows are still supported for framework development and UI dogfooding.
 
+Inspect the installed UI registry:
+
+```bash
+cargo ax registry
+cargo ax registry --format json
+```
+
+Use components and blocks from the package by default:
+
+```ax
+use "@axonyx/ui"
+import { Button } from "@axonyx/ui/foundry/Button"
+import { Marketing01 } from "@axonyx/ui/blocks/marketing-01"
+```
+
+Copy a block into the app when you want to customize it locally:
+
+```bash
+cargo ax add block marketing-01
+```
+
 ## Architecture Direction
 
 Axonyx is not intended to be another React wrapper. It is aiming to become a Rust-first framework for sites, docs, CMS products, and full-stack apps where HTML-first output, explicit compilation, low JavaScript, and packageable themes/templates matter more than React compatibility.
