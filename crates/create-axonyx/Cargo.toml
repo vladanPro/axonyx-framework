@@ -1,6 +1,6 @@
 [package]
 name = "create-axonyx"
-version = "0.1.59"
+version = "0.1.60"
 edition.workspace = true
 license.workspace = true
 description = "Scaffold a new Axonyx app"

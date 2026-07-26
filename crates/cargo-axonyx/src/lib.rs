@@ -63,7 +63,7 @@ const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/referen
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.49";
-const AXONYX_UI_VERSION: &str = "0.0.53";
+const AXONYX_UI_VERSION: &str = "0.0.54";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -130,6 +130,8 @@ enum Commands {
     Test(TestArgs),
     #[command(about = "Upgrade registry dependencies and optionally reinstall the CLI.")]
     Upgrade(UpgradeArgs),
+    #[command(about = "Inspect the Axonyx UI registry manifest.")]
+    Registry(RegistryArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -174,6 +176,13 @@ struct ActionsArgs {
 struct AddArgs {
     #[arg(value_enum)]
     module: ModuleKind,
+}
+
+#[derive(Debug, Parser)]
+struct RegistryArgs {
+    /// Output format for the registry report.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
 }
 
 #[derive(Debug, Parser, Default)]
@@ -747,6 +756,32 @@ struct RoutesReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RegistryReport {
+    name: String,
+    namespace: String,
+    description: Option<String>,
+    mode: Option<String>,
+    version: Option<i64>,
+    components: Vec<RegistryItemReport>,
+    blocks: Vec<RegistryItemReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RegistryItemReport {
+    name: String,
+    title: String,
+    path: String,
+    import: String,
+    preview: String,
+    category: String,
+    status: String,
+    install: String,
+    copy: String,
+    tags: Vec<String>,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ApiReport {
     routes: Vec<ApiRouteReport>,
     schemas: Vec<ApiSchemaReport>,
@@ -1212,6 +1247,7 @@ fn run() -> Result<()> {
         Commands::Graph(args) => graph_command(args),
         Commands::Melt(args) => melt_command(args),
         Commands::Routes(args) => routes_command(args),
+        Commands::Registry(args) => registry_command(args),
         Commands::Run(args) => run_command(args),
         Commands::Schema(args) => schema_command(args),
         Commands::State(args) => state_command(args),
@@ -1219,6 +1255,18 @@ fn run() -> Result<()> {
         Commands::Test(args) => test_command(args),
         Commands::Upgrade(args) => upgrade_command(args),
     }
+}
+
+fn registry_command(args: RegistryArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_registry_report(&root)?;
+
+    match args.format {
+        CheckFormat::Text => print_registry_text(&report),
+        CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+    }
+
+    Ok(())
 }
 
 fn normalized_cli_args() -> Vec<OsString> {
@@ -8218,6 +8266,155 @@ fn display_path(path: &Path) -> String {
         .strip_prefix("//?/")
         .unwrap_or(&normalized)
         .to_string()
+}
+
+fn collect_registry_report(root: &Path) -> Result<RegistryReport> {
+    let package_root = cargo_package_root(root, AXONYX_UI_PACKAGE_NAME)
+        .or_else(|| resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME))
+        .with_context(|| {
+            format!(
+                "unable to resolve {AXONYX_UI_PACKAGE_NAME}; run `cargo ax add ui` or add axonyx-ui to Cargo.toml"
+            )
+        })?;
+    let manifest_path = package_root.join("Axonyx.registry.toml");
+    let source = fs::read_to_string(&manifest_path).with_context(|| {
+        format!(
+            "failed to read registry manifest '{}'",
+            manifest_path.display()
+        )
+    })?;
+    parse_registry_manifest(&source).with_context(|| {
+        format!(
+            "failed to parse registry manifest '{}'",
+            manifest_path.display()
+        )
+    })
+}
+
+fn parse_registry_manifest(source: &str) -> Result<RegistryReport> {
+    let value = source
+        .parse::<toml::Value>()
+        .context("registry manifest is not valid TOML")?;
+    let registry = value
+        .get("registry")
+        .and_then(|value| value.as_table())
+        .context("registry manifest is missing [registry]")?;
+
+    Ok(RegistryReport {
+        name: toml_required_string(registry, "name")?.to_string(),
+        namespace: toml_required_string(registry, "namespace")?.to_string(),
+        description: toml_optional_string(registry, "description").map(str::to_string),
+        mode: toml_optional_string(registry, "mode").map(str::to_string),
+        version: registry.get("version").and_then(|value| value.as_integer()),
+        components: parse_registry_items(&value, "components")?,
+        blocks: parse_registry_items(&value, "blocks")?,
+    })
+}
+
+fn parse_registry_items(value: &toml::Value, key: &str) -> Result<Vec<RegistryItemReport>> {
+    let Some(items) = value.get(key) else {
+        return Ok(Vec::new());
+    };
+    let items = items
+        .as_array()
+        .with_context(|| format!("registry `{key}` must be an array"))?;
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| parse_registry_item(item, key, index))
+        .collect()
+}
+
+fn parse_registry_item(
+    item: &toml::Value,
+    group: &str,
+    index: usize,
+) -> Result<RegistryItemReport> {
+    let table = item
+        .as_table()
+        .with_context(|| format!("registry `{group}` item {index} must be a table"))?;
+    let name = toml_required_string(table, "name")?.to_string();
+
+    Ok(RegistryItemReport {
+        title: toml_optional_string(table, "title")
+            .unwrap_or(&name)
+            .to_string(),
+        name,
+        path: toml_required_string(table, "path")?.to_string(),
+        import: toml_required_string(table, "import")?.to_string(),
+        preview: toml_required_string(table, "preview")?.to_string(),
+        category: toml_required_string(table, "category")?.to_string(),
+        status: toml_required_string(table, "status")?.to_string(),
+        install: toml_required_string(table, "install")?.to_string(),
+        copy: toml_required_string(table, "copy")?.to_string(),
+        tags: toml_string_array(table, "tags")?,
+        description: toml_required_string(table, "description")?.to_string(),
+    })
+}
+
+fn toml_required_string<'a>(
+    table: &'a toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<&'a str> {
+    table
+        .get(key)
+        .and_then(|value| value.as_str())
+        .with_context(|| format!("registry field `{key}` must be a string"))
+}
+
+fn toml_optional_string<'a>(
+    table: &'a toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    table.get(key).and_then(|value| value.as_str())
+}
+
+fn toml_string_array(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<Vec<String>> {
+    let Some(value) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .with_context(|| format!("registry field `{key}` must be an array"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .with_context(|| format!("registry field `{key}` must contain strings"))
+        })
+        .collect()
+}
+
+fn print_registry_text(report: &RegistryReport) {
+    println!("{} ({})", report.name, report.namespace);
+    if let Some(description) = &report.description {
+        println!("{description}");
+    }
+    println!();
+    print_registry_items_text("Components", &report.components);
+    println!();
+    print_registry_items_text("Blocks", &report.blocks);
+}
+
+fn print_registry_items_text(label: &str, items: &[RegistryItemReport]) {
+    println!("{label}:");
+    if items.is_empty() {
+        println!("  none");
+        return;
+    }
+
+    for item in items {
+        println!("  {} [{}]", item.name, item.status);
+        println!("    import: {}", item.import);
+        println!("    preview: {}", item.preview);
+        println!("    copy: {}", item.copy);
+    }
 }
 
 fn app_root() -> Result<PathBuf> {
@@ -18590,9 +18787,42 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.53\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.54\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn registry_manifest_report_accepts_v1_entries() {
+        let report = parse_registry_manifest(
+            r#"
+[registry]
+name = "Axonyx UI"
+namespace = "@axonyx/ui"
+description = "Foundry registry"
+mode = "native"
+version = 1
+
+[[components]]
+name = "Button"
+title = "Button"
+path = "src/foundry/Button.ax"
+import = "@axonyx/ui/foundry/Button"
+preview = "/components/button"
+category = "actions"
+status = "v0"
+install = "cargo ax add ui"
+copy = "cargo ax add button"
+tags = ["action", "cta"]
+description = "Action primitive."
+"#,
+        )
+        .expect("registry manifest should parse");
+
+        assert_eq!(report.version, Some(1));
+        assert_eq!(report.components.len(), 1);
+        assert_eq!(report.components[0].import, "@axonyx/ui/foundry/Button");
+        assert_eq!(report.components[0].tags, vec!["action", "cta"]);
     }
 
     #[test]
@@ -19150,7 +19380,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
-        assert!(updated.contains("version = \"0.0.53\""));
+        assert!(updated.contains("version = \"0.0.54\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
