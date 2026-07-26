@@ -11510,7 +11510,7 @@ fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     println!("Ensured Cargo dependency: axonyx-ui = \"{AXONYX_UI_VERSION}\".");
     println!("Updated app/layout.ax with silver theme and Axonyx UI package use when possible.");
     println!("You can now import components such as:");
-    println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard.ax\"");
+    println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard\"");
     Ok(())
 }
 
@@ -21731,7 +21731,7 @@ page SectionCard
         fs::write(
             root.join("app/page.ax"),
             r#"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard"
 
 page Home
 
@@ -21779,7 +21779,7 @@ page SectionCard
         fs::write(
             root.join("app/page.ax"),
             r#"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard"
 
 page Home
 
