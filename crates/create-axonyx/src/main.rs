@@ -12,7 +12,7 @@ const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runti
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
 const DEFAULT_RUNTIME_VERSION: &str = "0.1.49";
 const DEFAULT_UI_PACKAGE: &str = "axonyx-ui";
-const DEFAULT_UI_VERSION: &str = "0.0.56";
+const DEFAULT_UI_VERSION: &str = "0.0.58";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonyx")]
@@ -745,7 +745,7 @@ mod tests {
         assert!(
             cargo_toml.contains("axonyx-runtime = { version = \"0.1.49\", features = [\"axum\"] }")
         );
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.56\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.58\""));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
         assert!(page.contains("page Home()"));
