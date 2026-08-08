@@ -77,6 +77,7 @@ const DEFAULT_SECURITY_HEADERS_ENABLED: bool = true;
 const DEFAULT_REQUEST_LOGGING_ENABLED: bool = true;
 const DEFAULT_LOG_FORMAT: &str = "text";
 const IMMUTABLE_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+const REVALIDATE_ASSET_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -9287,8 +9288,8 @@ fn copy_hashed_package_entry(entry: &Path, target_dir: &Path) -> Result<()> {
 
     fs::create_dir_all(target_dir)
         .with_context(|| format!("failed to create '{}'", target_dir.display()))?;
-    fs::copy(entry, target_dir.join(file_name))
-        .with_context(|| format!("failed to copy hashed package asset '{}'", entry.display()))?;
+    fs::write(target_dir.join(file_name), package_asset_body(entry)?)
+        .with_context(|| format!("failed to write hashed package asset '{}'", entry.display()))?;
 
     Ok(())
 }
@@ -12183,7 +12184,7 @@ fn handle_http_request(
         }
 
         if let Some(asset) = load_package_asset(&state.root, &request.target)? {
-            return Ok(cacheable_asset_response(asset));
+            return Ok(package_asset_response(asset, &request.target));
         }
 
         if let Some(asset) = load_public_asset(&state.root, &request.target)? {
@@ -13773,6 +13774,35 @@ fn cacheable_asset_response(asset: StaticAsset) -> AxHttpResponse {
         .with_header("Cache-Control", IMMUTABLE_ASSET_CACHE_CONTROL)
 }
 
+fn package_asset_response(asset: StaticAsset, request_path: &str) -> AxHttpResponse {
+    let cache_control = if request_path_has_content_hash(request_path) {
+        IMMUTABLE_ASSET_CACHE_CONTROL
+    } else {
+        REVALIDATE_ASSET_CACHE_CONTROL
+    };
+    AxHttpResponse::bytes(200, asset.content_type, asset.body)
+        .with_header("Cache-Control", cache_control)
+}
+
+fn request_path_has_content_hash(request_path: &str) -> bool {
+    let file_name = request_path
+        .split(['?', '#'])
+        .next()
+        .and_then(|path| path.rsplit('/').next())
+        .unwrap_or_default();
+    let mut segments = file_name.split('.');
+    let _stem = segments.next();
+    let Some(hash) = segments.next() else {
+        return false;
+    };
+    let Some(_extension) = segments.next() else {
+        return false;
+    };
+    segments.next().is_none()
+        && hash.len() == 12
+        && hash.chars().all(|character| character.is_ascii_hexdigit())
+}
+
 fn internal_asset_response(asset: StaticAsset) -> AxHttpResponse {
     AxHttpResponse::bytes(200, asset.content_type, asset.body).with_no_store()
 }
@@ -13854,8 +13884,7 @@ fn load_package_asset(root: &Path, request_path: &str) -> Result<Option<StaticAs
         return Ok(None);
     }
 
-    let body = fs::read(&asset_path)
-        .with_context(|| format!("failed to read package asset '{}'", asset_path.display()))?;
+    let body = package_asset_body(&asset_path)?;
 
     Ok(Some(StaticAsset {
         content_type: content_type_for(&asset_path),
@@ -13987,14 +14016,64 @@ fn hashed_asset_file_name(entry: &Path) -> Result<Option<OsString>> {
         return Ok(None);
     };
 
-    let body = fs::read(entry).with_context(|| {
-        format!(
-            "failed to read package asset '{}' for hashing",
-            entry.display()
-        )
-    })?;
+    let body = package_asset_body(entry)?;
     let hash = short_content_hash(&body);
     Ok(Some(OsString::from(format!("{stem}.{hash}.{extension}"))))
+}
+
+fn package_asset_body(entry: &Path) -> Result<Vec<u8>> {
+    if entry
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("css"))
+    {
+        return bundle_css_file(entry, &mut std::collections::BTreeSet::new())
+            .map(String::into_bytes);
+    }
+
+    fs::read(entry).with_context(|| format!("failed to read package asset '{}'", entry.display()))
+}
+
+fn bundle_css_file(
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<String> {
+    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(normalized) {
+        return Ok(String::new());
+    }
+
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read package CSS asset '{}'", path.display()))?;
+    let mut output = String::new();
+    for line in source.split_inclusive('\n') {
+        if let Some(import_path) = local_css_import_path(path, line) {
+            output.push_str(&bundle_css_file(&import_path, visited)?);
+        } else {
+            output.push_str(line);
+        }
+    }
+    Ok(output)
+}
+
+fn local_css_import_path(source_path: &Path, line: &str) -> Option<PathBuf> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("@import") {
+        return None;
+    }
+    let quote = if trimmed.contains('\'') { '\'' } else { '"' };
+    let start = trimmed.find(quote)? + 1;
+    let end = trimmed[start..].find(quote)? + start;
+    let import = &trimmed[start..end];
+    if import.starts_with("http:")
+        || import.starts_with("https:")
+        || import.starts_with("//")
+        || import.starts_with("data:")
+    {
+        return None;
+    }
+    let path = source_path.parent()?.join(import);
+    path.is_file().then_some(path)
 }
 
 fn short_content_hash(bytes: &[u8]) -> String {
@@ -17358,6 +17437,33 @@ route GET "/api/posts"
     }
 
     #[test]
+    fn package_assets_only_use_immutable_cache_for_hashed_paths() {
+        let plain = package_asset_response(
+            StaticAsset {
+                content_type: "text/css; charset=utf-8",
+                body: b"body {}".to_vec(),
+            },
+            "/_ax/pkg/axonyx-ui/primitives.css",
+        );
+        let hashed = package_asset_response(
+            StaticAsset {
+                content_type: "text/css; charset=utf-8",
+                body: b"body {}".to_vec(),
+            },
+            "/_ax/pkg/axonyx-ui/index.012345abcdef.css",
+        );
+
+        assert_eq!(
+            plain.header_value("Cache-Control"),
+            Some(REVALIDATE_ASSET_CACHE_CONTROL)
+        );
+        assert_eq!(
+            hashed.header_value("Cache-Control"),
+            Some(IMMUTABLE_ASSET_CACHE_CONTROL)
+        );
+    }
+
+    #[test]
     fn start_server_serves_state_snapshot_from_dist_ax_with_no_store() {
         let root = make_temp_dir("state-snapshot-asset");
         fs::create_dir_all(root.join("dist/_ax/state")).expect("state dir should exist");
@@ -17474,6 +17580,32 @@ axonyx-ui = {{ path = "{ui_path}" }}
         assert_eq!(asset.body, b"body { color: silver; }");
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn css_entry_hash_changes_when_a_package_stylesheet_changes() {
+        let root = make_temp_dir("transitive-css-hash");
+        let index = root.join("index.css");
+        let primitive = root.join("primitives.css");
+        fs::write(&index, "@import './primitives.css';\n").expect("CSS entry should write");
+        fs::write(&primitive, ".ax-bleed { width: 100vw; }\n")
+            .expect("CSS dependency should write");
+
+        let before = hashed_asset_file_name(&index)
+            .expect("entry hash should compute")
+            .expect("entry should exist");
+        fs::write(&primitive, ".ax-bleed { width: auto; }\n")
+            .expect("CSS dependency should update");
+        let after = hashed_asset_file_name(&index)
+            .expect("updated entry hash should compute")
+            .expect("entry should exist");
+        let bundled = String::from_utf8(package_asset_body(&index).expect("CSS should bundle"))
+            .expect("bundled CSS should remain UTF-8");
+
+        assert_ne!(before, after);
+        assert!(!bundled.contains("@import"));
+        assert!(bundled.contains(".ax-bleed { width: auto; }"));
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
