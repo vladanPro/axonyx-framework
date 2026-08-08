@@ -17,6 +17,13 @@ page Contact() {
           <Copy>Replace the address below with your real inbox before publishing.</Copy>
           <Button href="mailto:hello@example.com" variant="primary">hello@example.com</Button>
         </SectionCard>
+        <SectionCard title="Why no form yet?">
+          <Copy>
+            This starter stays fully static on purpose. Add a form action later
+            when you need server-side validation, email delivery, CRM routing,
+            or spam protection.
+          </Copy>
+        </SectionCard>
       </Stack>
     </Container>
   }

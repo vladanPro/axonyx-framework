@@ -15,6 +15,13 @@ page AboutBlog() {
         <SectionCard title="Publishing is intentionally boring">
           <Copy>Write Markdown in `content/posts`, add frontmatter, and run `cargo ax build --clean`.</Copy>
         </SectionCard>
+        <SectionCard title="What this starter proves">
+          <Copy>
+            A useful blog does not need a database on day one. Axonyx can index
+            content at build time, generate the route map, and keep the reading
+            experience fast and portable.
+          </Copy>
+        </SectionCard>
       </Stack>
     </Container>
   }

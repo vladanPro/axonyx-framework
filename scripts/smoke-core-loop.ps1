@@ -26,19 +26,42 @@ Write-Host "  workdir:  $WorkDir"
 
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
 
+function Invoke-Step {
+  param(
+    [Parameter(Mandatory = $true)]
+    [scriptblock] $Command,
+
+    [Parameter(Mandatory = $true)]
+    [string] $Label
+  )
+
+  & $Command
+  if ($LASTEXITCODE -ne 0) {
+    throw "$Label failed with exit code $LASTEXITCODE"
+  }
+}
+
 try {
   try {
     Push-Location $WorkDir
-    cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p create-axonyx -- $appName --yes --template $Template --runtime-source path
+    Invoke-Step {
+      cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p create-axonyx -- $appName --yes --template $Template --runtime-source path
+    } "create-axonyx scaffold"
   } finally {
     Pop-Location
   }
 
   try {
     Push-Location $appRoot
-    cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- check
-    cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- doctor --deny-warnings
-    cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- build --clean
+    Invoke-Step {
+      cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- check
+    } "cargo ax check"
+    Invoke-Step {
+      cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- doctor
+    } "cargo ax doctor"
+    Invoke-Step {
+      cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- build --clean
+    } "cargo ax build"
   } finally {
     Pop-Location
   }

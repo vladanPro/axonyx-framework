@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use axonyx_core::ax_ast_prelude::{
-    AxBinaryOp, AxDocument, AxExpr, AxImport, AxStatement, AxUnaryOp,
+    AxBinaryOp, AxDocument, AxExpr, AxImport, AxImportBinding, AxStatement, AxUnaryOp,
 };
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
@@ -33,7 +33,9 @@ use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext, AxRecordType, AxType};
-use axonyx_core::state_prelude::{build_state_manifest_with_scope_mapper, AxStateValue};
+use axonyx_core::state_prelude::{
+    build_state_manifest_with_scope, build_state_manifest_with_scope_mapper, AxStateValue,
+};
 use axonyx_runtime::server_prelude::{
     axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
     AxSseEvent,
@@ -60,8 +62,8 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.48";
-const AXONYX_UI_VERSION: &str = "0.0.52";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.49";
+const AXONYX_UI_VERSION: &str = "0.0.58";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -75,6 +77,7 @@ const DEFAULT_SECURITY_HEADERS_ENABLED: bool = true;
 const DEFAULT_REQUEST_LOGGING_ENABLED: bool = true;
 const DEFAULT_LOG_FORMAT: &str = "text";
 const IMMUTABLE_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+const REVALIDATE_ASSET_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String, PathBuf>>> =
     OnceLock::new();
 
@@ -128,6 +131,8 @@ enum Commands {
     Test(TestArgs),
     #[command(about = "Upgrade registry dependencies and optionally reinstall the CLI.")]
     Upgrade(UpgradeArgs),
+    #[command(about = "Inspect the Axonyx UI registry manifest.")]
+    Registry(RegistryArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -172,6 +177,16 @@ struct ActionsArgs {
 struct AddArgs {
     #[arg(value_enum)]
     module: ModuleKind,
+
+    /// Optional target for grouped modules, for example `cargo ax add block marketing-01`.
+    target: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct RegistryArgs {
+    /// Output format for the registry report.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
 }
 
 #[derive(Debug, Parser, Default)]
@@ -341,6 +356,10 @@ struct StateArgs {
     /// Output format for the state manifest.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
+
+    /// Show only state signals visible to a specific page route.
+    #[arg(long)]
+    route: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -426,6 +445,7 @@ impl ServerTransport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ModuleKind {
+    Block,
     Blockbit,
     Cms,
     Docs,
@@ -741,6 +761,32 @@ struct RoutesReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RegistryReport {
+    name: String,
+    namespace: String,
+    description: Option<String>,
+    mode: Option<String>,
+    version: Option<i64>,
+    components: Vec<RegistryItemReport>,
+    blocks: Vec<RegistryItemReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct RegistryItemReport {
+    name: String,
+    title: String,
+    path: String,
+    import: String,
+    preview: String,
+    category: String,
+    status: String,
+    install: String,
+    copy: String,
+    tags: Vec<String>,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ApiReport {
     routes: Vec<ApiRouteReport>,
     schemas: Vec<ApiSchemaReport>,
@@ -806,7 +852,14 @@ struct ActionItemReport {
     name: String,
     returns: Option<String>,
     inputs: Vec<ActionInputReport>,
+    patches: Vec<ActionPatchReport>,
     invalidates: Vec<ActionInvalidationReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActionPatchReport {
+    target: String,
+    value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -826,6 +879,8 @@ struct ActionInputReport {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct StateReport {
     files: Vec<StateReportFile>,
+    graph: StateGraphReport,
+    patches: Vec<StatePatchUsageReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -842,6 +897,57 @@ struct StateReportSignal {
     owner: String,
     ty: String,
     initial: AxStateValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphReport {
+    scopes: Vec<StateGraphScopeReport>,
+    routes: Vec<StateGraphRouteReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphScopeReport {
+    owner: String,
+    scope: String,
+    signals: Vec<StateGraphSignalReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphSignalReport {
+    name: String,
+    key: String,
+    ty: String,
+    file: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphRouteReport {
+    route: String,
+    file: String,
+    signals: Vec<StateGraphRouteSignalReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateGraphRouteSignalReport {
+    owner: String,
+    name: String,
+    key: String,
+    ty: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StateRouteFocusReport {
+    route: String,
+    signals: Vec<StateGraphRouteSignalReport>,
+    patches: Vec<StatePatchUsageReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct StatePatchUsageReport {
+    route: String,
+    action: String,
+    target: String,
+    value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1028,6 +1134,7 @@ struct MeltSummary {
     component_client_scripts: usize,
     query_keys: usize,
     query_invalidations: usize,
+    state_patches: usize,
     content_collections: usize,
     content_entries: usize,
     diagnostics: usize,
@@ -1133,7 +1240,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse_from(normalized_cli_args());
 
     match cli.command {
-        Commands::Add(args) => add_module(args.module),
+        Commands::Add(args) => add_module(args),
         Commands::Actions(args) => actions_command(args),
         Commands::Api(args) => api_command(args),
         Commands::Build(args) => build_command(args),
@@ -1145,6 +1252,7 @@ fn run() -> Result<()> {
         Commands::Graph(args) => graph_command(args),
         Commands::Melt(args) => melt_command(args),
         Commands::Routes(args) => routes_command(args),
+        Commands::Registry(args) => registry_command(args),
         Commands::Run(args) => run_command(args),
         Commands::Schema(args) => schema_command(args),
         Commands::State(args) => state_command(args),
@@ -1152,6 +1260,18 @@ fn run() -> Result<()> {
         Commands::Test(args) => test_command(args),
         Commands::Upgrade(args) => upgrade_command(args),
     }
+}
+
+fn registry_command(args: RegistryArgs) -> Result<()> {
+    let root = app_root()?;
+    let report = collect_registry_report(&root)?;
+
+    match args.format {
+        CheckFormat::Text => print_registry_text(&report),
+        CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+    }
+
+    Ok(())
 }
 
 fn normalized_cli_args() -> Vec<OsString> {
@@ -2181,11 +2301,12 @@ fn doctor_melt_graph_check(root: &Path) -> DoctorCheck {
             code: "melt-graph",
             severity: DoctorSeverity::Ok,
             message: format!(
-                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
+                "Melt graph collected: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} state patch(es), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.state_patches,
                 report.summary.scopes,
                 report.summary.data_bindings,
                 report.summary.query_keys,
@@ -2881,11 +3002,12 @@ fn melt_command(args: MeltArgs) -> Result<()> {
     if args.check {
         if report.diagnostics.is_empty() {
             println!(
-                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
+                "Melt graph ok: {} page route(s), {} API route(s), {} action(s), {} state signal(s), {} state patch(es), {} scope(s), {} data binding(s), {} query key(s), {} query invalidation(s), {} content entr{}.",
                 report.summary.page_routes,
                 report.summary.api_routes,
                 report.summary.actions,
                 report.summary.state_signals,
+                report.summary.state_patches,
                 report.summary.scopes,
                 report.summary.data_bindings,
                 report.summary.query_keys,
@@ -2988,6 +3110,12 @@ fn melt_summary(
         .flat_map(|route| &route.actions)
         .map(|action| action.invalidates.len())
         .sum();
+    let state_patches = actions
+        .routes
+        .iter()
+        .flat_map(|route| &route.actions)
+        .map(|action| action.patches.len())
+        .sum();
     let component_count = components
         .files
         .iter()
@@ -3023,6 +3151,7 @@ fn melt_summary(
         component_client_scripts,
         query_keys: data_bindings,
         query_invalidations,
+        state_patches,
         content_collections: content.collections.len(),
         content_entries: content
             .collections
@@ -3066,8 +3195,8 @@ fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport
                 "empty"
             },
             detail: format!(
-                "{} state signal(s), {} scope state(s) declared.",
-                summary.state_signals, summary.scope_states
+                "{} state signal(s), {} scope state(s), {} state patch(es) declared.",
+                summary.state_signals, summary.scope_states, summary.state_patches
             ),
         },
         MeltLayerReport {
@@ -3245,13 +3374,18 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
 }
 
 fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_prelude::AxFileV2> {
-    if let Ok(file) = parse_ax_v2(source) {
-        return Some(file);
-    }
-    if !source
+    let has_component_decl = source
         .lines()
-        .any(|line| line.trim_start().starts_with("component "))
-    {
+        .any(|line| line.trim_start().starts_with("component "));
+    if let Ok(file) = parse_ax_v2(source) {
+        if has_component_decl && file.components.is_empty() {
+            // Component-only modules can look like loose page body to older syntax paths.
+            // Reparse them through a synthetic page so declarations stay declarations.
+        } else {
+            return Some(file);
+        }
+    }
+    if !has_component_decl {
         return None;
     }
 
@@ -3277,8 +3411,27 @@ fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_
     }
     synthetic.push_str("page ComponentModule\n\n");
     synthetic.push_str(&body.join("\n"));
+    synthetic.push_str("\n\n");
+    for component_name in component_names_from_source(source) {
+        synthetic.push_str(&format!("<{component_name} />\n"));
+    }
 
     parse_ax_v2(&synthetic).ok()
+}
+
+fn component_names_from_source(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let rest = trimmed.strip_prefix("component ")?;
+            let name = rest
+                .split(|char: char| !(char.is_ascii_alphanumeric() || char == '_'))
+                .next()
+                .unwrap_or_default();
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
 }
 
 fn collect_component_usage_report(
@@ -3365,6 +3518,61 @@ fn collect_component_usage_scripts(
         if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
             if import_path.exists() && import_path.starts_with(root) {
                 collect_component_usage_scripts(root, &import_path, visited, scripts)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_component_files_for_route(
+    root: &Path,
+    route: &RouteManifestItem,
+) -> Result<std::collections::BTreeSet<String>> {
+    let Some(resolved) = resolve_route(root, &route.route)? else {
+        return Ok(std::collections::BTreeSet::new());
+    };
+
+    let mut visited = std::collections::BTreeSet::new();
+    let mut files = std::collections::BTreeSet::new();
+    for path in resolved
+        .layout_paths
+        .iter()
+        .chain(std::iter::once(&resolved.page_path))
+    {
+        collect_component_usage_files(root, path, &mut visited, &mut files)?;
+    }
+
+    Ok(files)
+}
+
+fn collect_component_usage_files(
+    root: &Path,
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+    files: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return Ok(());
+    }
+
+    let source =
+        fs::read_to_string(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    let Some(document) = parse_component_report_source(&source) else {
+        return Ok(());
+    };
+
+    if !document.components.is_empty() {
+        if let Ok(relative_file) = path.strip_prefix(root) {
+            files.insert(relative_file.to_string_lossy().replace('\\', "/"));
+        }
+    }
+
+    for import_decl in document.imports {
+        if let Some(import_path) = resolve_preview_import_path(root, &import_decl.source) {
+            if import_path.exists() && import_path.starts_with(root) {
+                collect_component_usage_files(root, &import_path, visited, files)?;
             }
         }
     }
@@ -3919,12 +4127,14 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
                         default: field.default.as_ref().map(format_ax_expr),
                     })
                     .collect();
+                let patches = collect_action_patches_from_body(&action.body);
                 let invalidates = collect_action_invalidations_from_body(&action.body);
 
                 Some(ActionItemReport {
                     name: action.name,
                     returns: action.returns,
                     inputs,
+                    patches,
                     invalidates,
                 })
             })
@@ -3940,6 +4150,21 @@ fn collect_action_report(root: &Path) -> Result<ActionReport> {
     }
 
     Ok(ActionReport { routes })
+}
+
+fn collect_action_patches_from_body(body: &[AxBackendStmt]) -> Vec<ActionPatchReport> {
+    body.iter()
+        .filter_map(|statement| {
+            let AxBackendStmt::Patch(patch) = statement else {
+                return None;
+            };
+
+            Some(ActionPatchReport {
+                target: format_action_patch_target(&patch.signal),
+                value: format_ax_expr(&patch.value),
+            })
+        })
+        .collect()
 }
 
 fn collect_action_invalidations_from_body(body: &[AxBackendStmt]) -> Vec<ActionInvalidationReport> {
@@ -3966,6 +4191,13 @@ fn collect_action_invalidations_from_body(body: &[AxBackendStmt]) -> Vec<ActionI
         }
     }
     invalidations
+}
+
+fn format_action_patch_target(expr: &AxExpr) -> String {
+    match expr {
+        AxExpr::String(value) | AxExpr::Identifier(value) => value.clone(),
+        _ => format_ax_expr(expr),
+    }
 }
 
 fn push_auto_action_invalidation(
@@ -4039,6 +4271,17 @@ fn schema_command(args: SchemaArgs) -> Result<()> {
 fn state_command(args: StateArgs) -> Result<()> {
     let root = app_root()?;
     let report = collect_state_report(&root)?;
+
+    if let Some(route) = args.route.as_deref() {
+        let focus = state_route_focus_report(&report, route);
+        match args.format {
+            CheckFormat::Text => print_state_route_text(&focus),
+            CheckFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&focus)?);
+            }
+        }
+        return Ok(());
+    }
 
     match args.format {
         CheckFormat::Text => print_state_text(&report),
@@ -5358,14 +5601,14 @@ fn collect_route_state_manifest_from_paths<'a>(
     let mut paths = layout_paths.map(PathBuf::as_path).collect::<Vec<&Path>>();
     paths.push(page_path);
 
-    for path in paths {
+    for path in &paths {
         let source = fs::read_to_string(path)
             .with_context(|| format!("failed to read '{}'", path.display()))?;
-        if !source_has_state_declaration(&source) {
+        if !source_may_have_state_declaration(&source) {
             continue;
         }
 
-        let file = parse_ax_v2(&source).with_context(|| {
+        let file = parse_component_report_source(&source).with_context(|| {
             format!(
                 "failed to parse state declarations from '{}'",
                 path.display()
@@ -5382,6 +5625,28 @@ fn collect_route_state_manifest_from_paths<'a>(
         for signal in manifest.signals {
             let legacy_key = format!("root:{}:{}", signal.name, signal.id.index);
             signals.insert(signal.name, signal.key, legacy_key, signal.ty);
+        }
+    }
+
+    let mut visited = std::collections::BTreeSet::new();
+    let mut component_files = std::collections::BTreeSet::new();
+    for path in paths {
+        collect_component_usage_files(root, path, &mut visited, &mut component_files)?;
+    }
+    for file in component_files {
+        let component_path = root.join(&file);
+        let source = fs::read_to_string(&component_path)
+            .with_context(|| format!("failed to read '{}'", component_path.display()))?;
+        for signal in component_state_signals_from_source(&source) {
+            let Some(component_name) = signal.owner.strip_prefix("component:") else {
+                continue;
+            };
+            signals.insert_component(
+                component_name.to_string(),
+                signal.name,
+                signal.key,
+                signal.ty,
+            );
         }
     }
 
@@ -5723,6 +5988,28 @@ fn check_ax_source_with_root(
                 CheckParseError::Backend(error),
             )],
         };
+    }
+
+    if let Some(component_file) =
+        parse_component_report_source(source).filter(|file| !file.components.is_empty())
+    {
+        let mut diagnostics = Vec::new();
+        if let Some(root) = root {
+            let imports = component_file
+                .imports
+                .iter()
+                .map(|import| {
+                    AxImport::new(
+                        import.bindings.iter().map(|binding| {
+                            AxImportBinding::new(binding.imported.clone(), binding.local.clone())
+                        }),
+                        import.source.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            diagnostics.extend(check_imports(root, path, source, &imports));
+        }
+        return diagnostics;
     }
 
     let document = match parse_ax_auto(source) {
@@ -7986,6 +8273,155 @@ fn display_path(path: &Path) -> String {
         .to_string()
 }
 
+fn collect_registry_report(root: &Path) -> Result<RegistryReport> {
+    let package_root = cargo_package_root(root, AXONYX_UI_PACKAGE_NAME)
+        .or_else(|| resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME))
+        .with_context(|| {
+            format!(
+                "unable to resolve {AXONYX_UI_PACKAGE_NAME}; run `cargo ax add ui` or add axonyx-ui to Cargo.toml"
+            )
+        })?;
+    let manifest_path = package_root.join("Axonyx.registry.toml");
+    let source = fs::read_to_string(&manifest_path).with_context(|| {
+        format!(
+            "failed to read registry manifest '{}'",
+            manifest_path.display()
+        )
+    })?;
+    parse_registry_manifest(&source).with_context(|| {
+        format!(
+            "failed to parse registry manifest '{}'",
+            manifest_path.display()
+        )
+    })
+}
+
+fn parse_registry_manifest(source: &str) -> Result<RegistryReport> {
+    let value = source
+        .parse::<toml::Value>()
+        .context("registry manifest is not valid TOML")?;
+    let registry = value
+        .get("registry")
+        .and_then(|value| value.as_table())
+        .context("registry manifest is missing [registry]")?;
+
+    Ok(RegistryReport {
+        name: toml_required_string(registry, "name")?.to_string(),
+        namespace: toml_required_string(registry, "namespace")?.to_string(),
+        description: toml_optional_string(registry, "description").map(str::to_string),
+        mode: toml_optional_string(registry, "mode").map(str::to_string),
+        version: registry.get("version").and_then(|value| value.as_integer()),
+        components: parse_registry_items(&value, "components")?,
+        blocks: parse_registry_items(&value, "blocks")?,
+    })
+}
+
+fn parse_registry_items(value: &toml::Value, key: &str) -> Result<Vec<RegistryItemReport>> {
+    let Some(items) = value.get(key) else {
+        return Ok(Vec::new());
+    };
+    let items = items
+        .as_array()
+        .with_context(|| format!("registry `{key}` must be an array"))?;
+
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| parse_registry_item(item, key, index))
+        .collect()
+}
+
+fn parse_registry_item(
+    item: &toml::Value,
+    group: &str,
+    index: usize,
+) -> Result<RegistryItemReport> {
+    let table = item
+        .as_table()
+        .with_context(|| format!("registry `{group}` item {index} must be a table"))?;
+    let name = toml_required_string(table, "name")?.to_string();
+
+    Ok(RegistryItemReport {
+        title: toml_optional_string(table, "title")
+            .unwrap_or(&name)
+            .to_string(),
+        name,
+        path: toml_required_string(table, "path")?.to_string(),
+        import: toml_required_string(table, "import")?.to_string(),
+        preview: toml_required_string(table, "preview")?.to_string(),
+        category: toml_required_string(table, "category")?.to_string(),
+        status: toml_required_string(table, "status")?.to_string(),
+        install: toml_required_string(table, "install")?.to_string(),
+        copy: toml_required_string(table, "copy")?.to_string(),
+        tags: toml_string_array(table, "tags")?,
+        description: toml_required_string(table, "description")?.to_string(),
+    })
+}
+
+fn toml_required_string<'a>(
+    table: &'a toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<&'a str> {
+    table
+        .get(key)
+        .and_then(|value| value.as_str())
+        .with_context(|| format!("registry field `{key}` must be a string"))
+}
+
+fn toml_optional_string<'a>(
+    table: &'a toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    table.get(key).and_then(|value| value.as_str())
+}
+
+fn toml_string_array(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<Vec<String>> {
+    let Some(value) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .with_context(|| format!("registry field `{key}` must be an array"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .with_context(|| format!("registry field `{key}` must contain strings"))
+        })
+        .collect()
+}
+
+fn print_registry_text(report: &RegistryReport) {
+    println!("{} ({})", report.name, report.namespace);
+    if let Some(description) = &report.description {
+        println!("{description}");
+    }
+    println!();
+    print_registry_items_text("Components", &report.components);
+    println!();
+    print_registry_items_text("Blocks", &report.blocks);
+}
+
+fn print_registry_items_text(label: &str, items: &[RegistryItemReport]) {
+    println!("{label}:");
+    if items.is_empty() {
+        println!("  none");
+        return;
+    }
+
+    for item in items {
+        println!("  {} [{}]", item.name, item.status);
+        println!("    import: {}", item.import);
+        println!("    preview: {}", item.preview);
+        println!("    copy: {}", item.copy);
+    }
+}
+
 fn app_root() -> Result<PathBuf> {
     let root = std::env::current_dir().context("unable to resolve current directory")?;
     let axonyx_toml = root.join("Axonyx.toml");
@@ -8000,23 +8436,76 @@ fn app_root() -> Result<PathBuf> {
     Ok(root)
 }
 
-fn add_module(module: ModuleKind) -> Result<()> {
+fn add_module(args: AddArgs) -> Result<()> {
     let root = app_root()?;
     let axonyx_toml = root.join("Axonyx.toml");
 
-    match module {
+    match args.module {
+        ModuleKind::Block => {
+            let name = args.target.as_deref().context(
+                "`cargo ax add block` needs a block name, for example `cargo ax add block marketing-01`. Run `cargo ax registry` to list blocks.",
+            )?;
+            add_registry_block(&root, name)?;
+        }
         ModuleKind::Docs => {
+            ensure_no_add_target(args.target.as_deref(), "docs")?;
             scaffold_docs_module(&root)?;
             enable_module(&axonyx_toml, "docs")?;
             println!("Added docs module.");
         }
         ModuleKind::Ui => {
+            ensure_no_add_target(args.target.as_deref(), "ui")?;
             add_ui_module(&root, &axonyx_toml)?;
             println!("Added ui module.");
         }
-        ModuleKind::Cms | ModuleKind::Blockbit => add_reserved_cms_module()?,
+        ModuleKind::Cms | ModuleKind::Blockbit => {
+            ensure_no_add_target(args.target.as_deref(), "cms")?;
+            add_reserved_cms_module()?
+        }
     }
 
+    Ok(())
+}
+
+fn ensure_no_add_target(target: Option<&str>, module: &str) -> Result<()> {
+    if let Some(target) = target {
+        bail!("`cargo ax add {module}` does not accept `{target}` yet");
+    }
+
+    Ok(())
+}
+
+fn add_registry_block(root: &Path, name: &str) -> Result<()> {
+    add_ui_module(root, &root.join("Axonyx.toml"))?;
+
+    let report = collect_registry_report(root)?;
+    let block = report
+        .blocks
+        .iter()
+        .find(|block| block.name == name)
+        .with_context(|| {
+            format!(
+                "unknown Axonyx UI block `{name}`. Run `cargo ax registry` to list available blocks."
+            )
+        })?;
+    let package_root = cargo_package_root(root, AXONYX_UI_PACKAGE_NAME)
+        .or_else(|| resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME))
+        .context("unable to resolve axonyx-ui package after adding UI")?;
+    let source_path = package_root.join(&block.path);
+    let source = fs::read_to_string(&source_path)
+        .with_context(|| format!("failed to read block source '{}'", source_path.display()))?;
+
+    let target_relative = format!("app/components/blocks/{}.ax", block.name);
+    write_if_missing(root, &target_relative, &source)?;
+
+    println!("Added block {}.", block.name);
+    println!("  source: {}", block.import);
+    println!("  copied: {target_relative}");
+    println!(
+        "  import: import {{ {} }} from \"@/components/blocks/{}\"",
+        block.title.replace(' ', ""),
+        block.name
+    );
     Ok(())
 }
 
@@ -8799,8 +9288,8 @@ fn copy_hashed_package_entry(entry: &Path, target_dir: &Path) -> Result<()> {
 
     fs::create_dir_all(target_dir)
         .with_context(|| format!("failed to create '{}'", target_dir.display()))?;
-    fs::copy(entry, target_dir.join(file_name))
-        .with_context(|| format!("failed to copy hashed package asset '{}'", entry.display()))?;
+    fs::write(target_dir.join(file_name), package_asset_body(entry)?)
+        .with_context(|| format!("failed to write hashed package asset '{}'", entry.display()))?;
 
     Ok(())
 }
@@ -9499,12 +9988,13 @@ fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} action_routes={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
+        "  pages={} api={} action_routes={} actions={} state_signals={} state_patches={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.action_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.state_patches,
         report.summary.scopes,
         report.summary.scope_states,
         report.summary.components,
@@ -9684,11 +10174,12 @@ fn print_graph_text(report: &MeltReport) {
     println!("Axonyx App Graph");
     println!("  app={} root={}", report.app.name, report.app.root);
     println!(
-        "  pages={} api={} actions={} state_signals={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
+        "  pages={} api={} actions={} state_signals={} state_patches={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} diagnostics={}",
         report.summary.page_routes,
         report.summary.api_routes,
         report.summary.actions,
         report.summary.state_signals,
+        report.summary.state_patches,
         report.summary.scopes,
         report.summary.scope_states,
         report.summary.components,
@@ -9758,27 +10249,35 @@ fn print_graph_text(report: &MeltReport) {
                 .join(",");
             println!("  {:<28} actions={}", route.route, action_names);
             for action in &route.actions {
-                if action.invalidates.is_empty() {
-                    continue;
+                if !action.patches.is_empty() {
+                    let labels = action
+                        .patches
+                        .iter()
+                        .map(|patch| format!("{} = {}", patch.target, patch.value))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    {} patches={}", action.name, labels);
                 }
-                let labels = action
-                    .invalidates
-                    .iter()
-                    .map(|invalidation| {
-                        format!(
-                            "{}:[{}]",
-                            invalidation.target,
-                            invalidation
-                                .query_key
-                                .iter()
-                                .map(|part| format!("{part:?}"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!("    {} invalidates={}", action.name, labels);
+                if !action.invalidates.is_empty() {
+                    let labels = action
+                        .invalidates
+                        .iter()
+                        .map(|invalidation| {
+                            format!(
+                                "{}:[{}]",
+                                invalidation.target,
+                                invalidation
+                                    .query_key
+                                    .iter()
+                                    .map(|part| format!("{part:?}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    {} invalidates={}", action.name, labels);
+                }
             }
         }
     }
@@ -10336,6 +10835,16 @@ fn print_actions_text(report: &ActionReport) {
                 }
             }
 
+            if !action.patches.is_empty() {
+                let labels = action
+                    .patches
+                    .iter()
+                    .map(|patch| format!("{} = {}", patch.target, patch.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("      patches: {labels}");
+            }
+
             if !action.invalidates.is_empty() {
                 let labels = action
                     .invalidates
@@ -10516,11 +11025,11 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
         if looks_like_backend_ax(&source) {
             continue;
         }
-        if !source_has_state_declaration(&source) {
+        if !source_may_have_state_declaration(&source) {
             continue;
         }
 
-        let file = parse_ax_v2(&source).with_context(|| {
+        let file = parse_component_report_source(&source).with_context(|| {
             format!(
                 "failed to parse state declarations from '{}'",
                 path.display()
@@ -10533,11 +11042,7 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
                     .unwrap_or_else(|| default_scope.to_string())
             })
             .with_context(|| format!("failed to build state manifest for '{}'", path.display()))?;
-        if manifest.is_empty() {
-            continue;
-        }
-
-        let signals = manifest
+        let mut signals = manifest
             .signals
             .into_iter()
             .zip(file.states.iter())
@@ -10550,7 +11055,51 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
                 ty: signal.ty,
                 initial: signal.initial,
             })
-            .collect();
+            .collect::<Vec<_>>();
+
+        for component in &file.components {
+            for (index, state) in component.states.iter().enumerate() {
+                let mut component_file = file.clone();
+                component_file.states = vec![state.clone()];
+                component_file.components.clear();
+                let component_scope = format!("component:{}", component.name);
+                let component_manifest =
+                    build_state_manifest_with_scope(&component_file, &component_scope)
+                        .with_context(|| {
+                            format!(
+                                "failed to build component state manifest for '{}.{}' in '{}'",
+                                component.name,
+                                state.name,
+                                path.display()
+                            )
+                        })?;
+
+                let Some(signal) = component_manifest.signals.into_iter().next() else {
+                    continue;
+                };
+                signals.push(StateReportSignal {
+                    name: signal.name,
+                    key: format!(
+                        "__ax_component_state__:{}:{}:{}",
+                        component.name,
+                        state.name,
+                        index + 1
+                    ),
+                    scope: component_scope.clone(),
+                    owner: component_scope.clone(),
+                    ty: signal.ty,
+                    initial: signal.initial,
+                });
+            }
+        }
+
+        signals.extend(component_state_signals_from_source(&source));
+        let mut seen_signal_keys = std::collections::BTreeSet::new();
+        signals.retain(|signal| seen_signal_keys.insert(signal.key.clone()));
+
+        if signals.is_empty() {
+            continue;
+        }
 
         files.push(StateReportFile {
             file: display_relative_path(root, &path),
@@ -10558,33 +11107,237 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
         });
     }
 
-    Ok(StateReport { files })
+    let graph = build_state_graph_report(root, &files)?;
+    let patches = collect_state_patch_usage_report(root)?;
+    Ok(StateReport {
+        files,
+        graph,
+        patches,
+    })
 }
 
-fn source_has_state_declaration(source: &str) -> bool {
-    let mut component_depth = 0usize;
-    for raw_line in source.lines() {
+fn collect_state_patch_usage_report(root: &Path) -> Result<Vec<StatePatchUsageReport>> {
+    let actions = collect_action_report(root)?;
+    Ok(actions
+        .routes
+        .into_iter()
+        .flat_map(|route| {
+            route.actions.into_iter().flat_map(move |action| {
+                let route_path = route.route.clone();
+                let action_name = action.name;
+                action
+                    .patches
+                    .into_iter()
+                    .map(move |patch| StatePatchUsageReport {
+                        route: route_path.clone(),
+                        action: action_name.clone(),
+                        target: patch.target,
+                        value: patch.value,
+                    })
+            })
+        })
+        .collect())
+}
+
+fn build_state_graph_report(root: &Path, files: &[StateReportFile]) -> Result<StateGraphReport> {
+    let routes = collect_page_route_manifest(root)?;
+    let mut route_component_files = std::collections::BTreeMap::new();
+    for route in routes.iter().filter(|route| route.kind == "page") {
+        route_component_files.insert(
+            route.route.clone(),
+            collect_component_files_for_route(root, route)?,
+        );
+    }
+    Ok(state_graph_report_from_routes(
+        files,
+        &routes,
+        &route_component_files,
+    ))
+}
+
+fn state_graph_report_from_routes(
+    files: &[StateReportFile],
+    routes: &[RouteManifestItem],
+    route_component_files: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) -> StateGraphReport {
+    let mut scope_map: std::collections::BTreeMap<(String, String), Vec<StateGraphSignalReport>> =
+        std::collections::BTreeMap::new();
+
+    for file in files {
+        for signal in &file.signals {
+            scope_map
+                .entry((signal.owner.clone(), signal.scope.clone()))
+                .or_default()
+                .push(StateGraphSignalReport {
+                    name: signal.name.clone(),
+                    key: signal.key.clone(),
+                    ty: signal.ty.clone(),
+                    file: file.file.clone(),
+                });
+        }
+    }
+
+    let scopes = scope_map
+        .into_iter()
+        .map(|((owner, scope), mut signals)| {
+            signals.sort_by(|left, right| {
+                left.name
+                    .cmp(&right.name)
+                    .then_with(|| left.key.cmp(&right.key))
+            });
+            StateGraphScopeReport {
+                owner,
+                scope,
+                signals,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let route_reports = routes
+        .iter()
+        .filter(|route| route.kind == "page")
+        .map(|route| {
+            let mut signals = files
+                .iter()
+                .flat_map(|file| file.signals.iter().map(move |signal| (file, signal)))
+                .filter(|(file, signal)| {
+                    state_signal_is_visible_to_route(signal, &route.route)
+                        || state_signal_is_component_used_by_route(
+                            signal,
+                            &file.file,
+                            route_component_files.get(&route.route),
+                        )
+                })
+                .map(|(_, signal)| StateGraphRouteSignalReport {
+                    owner: signal.owner.clone(),
+                    name: signal.name.clone(),
+                    key: signal.key.clone(),
+                    ty: signal.ty.clone(),
+                })
+                .collect::<Vec<_>>();
+            signals.sort_by(|left, right| {
+                left.owner
+                    .cmp(&right.owner)
+                    .then_with(|| left.name.cmp(&right.name))
+                    .then_with(|| left.key.cmp(&right.key))
+            });
+            signals.dedup();
+
+            StateGraphRouteReport {
+                route: route.route.clone(),
+                file: route.file.clone(),
+                signals,
+            }
+        })
+        .filter(|route| !route.signals.is_empty())
+        .collect::<Vec<_>>();
+
+    StateGraphReport {
+        scopes,
+        routes: route_reports,
+    }
+}
+
+fn source_may_have_state_declaration(source: &str) -> bool {
+    source.lines().any(|raw_line| {
         let line = raw_line.trim_start();
-        if component_depth > 0 {
-            component_depth = update_component_block_depth(component_depth, line);
-            continue;
-        }
-        if line.starts_with("component ") {
-            component_depth = update_component_block_depth(0, line);
-            continue;
-        }
-        if line.starts_with("state ")
+        line.starts_with("state ")
             || line.starts_with("app state ")
             || line.starts_with("layout state ")
             || line.starts_with("page state ")
-        {
-            return true;
-        }
-    }
-    false
+    })
 }
 
-fn update_component_block_depth(depth: usize, line: &str) -> usize {
+fn component_state_signals_from_source(source: &str) -> Vec<StateReportSignal> {
+    let mut signals = Vec::new();
+    let mut current_component: Option<(String, usize, usize)> = None;
+
+    for raw_line in source.lines() {
+        let line = raw_line.trim_start();
+        if current_component.is_none() {
+            if let Some(name) = component_name_from_line(line) {
+                let depth = update_block_depth(0, line);
+                current_component = Some((name, depth, 0));
+            }
+            continue;
+        }
+
+        let Some((component_name, depth, state_index)) = current_component.as_mut() else {
+            continue;
+        };
+
+        if let Some((name, ty, initial)) = parse_component_state_line(line) {
+            *state_index += 1;
+            let scope = format!("component:{component_name}");
+            signals.push(StateReportSignal {
+                name: name.clone(),
+                key: format!("__ax_component_state__:{component_name}:{name}:{state_index}"),
+                scope: scope.clone(),
+                owner: scope,
+                ty,
+                initial,
+            });
+        }
+
+        *depth = update_block_depth(*depth, line);
+        if *depth == 0 {
+            current_component = None;
+        }
+    }
+
+    signals
+}
+
+fn component_name_from_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("component ")?;
+    let name = rest
+        .split(|char: char| !(char.is_ascii_alphanumeric() || char == '_'))
+        .next()
+        .unwrap_or_default();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn parse_component_state_line(line: &str) -> Option<(String, String, AxStateValue)> {
+    let rest = line.strip_prefix("state ")?.trim();
+    let equals = rest.find('=')?;
+    let left = rest[..equals].trim();
+    let value = rest[equals + 1..].trim();
+    let (name, explicit_ty) = left
+        .split_once(':')
+        .map(|(name, ty)| (name.trim(), Some(ty.trim())))
+        .unwrap_or((left, None));
+    if name.is_empty() {
+        return None;
+    }
+
+    let initial = parse_state_literal_value(value)?;
+    let ty = explicit_ty
+        .map(str::to_string)
+        .unwrap_or_else(|| initial.type_name().to_string());
+    Some((name.to_string(), ty, initial))
+}
+
+fn parse_state_literal_value(source: &str) -> Option<AxStateValue> {
+    let source = source.trim();
+    let literal = source
+        .strip_prefix("signal(")
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(source)
+        .trim();
+
+    if let Ok(value) = serde_json::from_str::<String>(literal) {
+        return Some(AxStateValue::String(value));
+    }
+    if literal == "true" {
+        return Some(AxStateValue::Bool(true));
+    }
+    if literal == "false" {
+        return Some(AxStateValue::Bool(false));
+    }
+    literal.parse::<f64>().ok().map(AxStateValue::Number)
+}
+
+fn update_block_depth(depth: usize, line: &str) -> usize {
     let open_count = line.chars().filter(|char| *char == '{').count();
     let close_count = line.chars().filter(|char| *char == '}').count();
     depth.saturating_add(open_count).saturating_sub(close_count)
@@ -10723,6 +11476,116 @@ fn print_state_text(report: &StateReport) {
             );
         }
     }
+
+    if !report.graph.scopes.is_empty() {
+        println!();
+        println!("State graph scopes:");
+        for scope in &report.graph.scopes {
+            let labels = scope
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{} ({})", signal.name, signal.key, signal.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {:<24} scope={} signals={}",
+                scope.owner, scope.scope, labels
+            );
+        }
+    }
+
+    if !report.graph.routes.is_empty() {
+        println!();
+        println!("State graph routes:");
+        for route in &report.graph.routes {
+            let labels = route
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.owner, signal.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {:<24} file={} signals={}",
+                route.route, route.file, labels
+            );
+        }
+    }
+
+    if !report.patches.is_empty() {
+        println!();
+        println!("State patch sources:");
+        for patch in &report.patches {
+            println!(
+                "  {:<24} action={} patch {} = {}",
+                patch.route, patch.action, patch.target, patch.value
+            );
+        }
+    }
+}
+
+fn state_route_focus_report(report: &StateReport, route: &str) -> StateRouteFocusReport {
+    let route = normalize_state_route_filter(route);
+    let signals = report
+        .graph
+        .routes
+        .iter()
+        .find(|entry| entry.route == route)
+        .map(|entry| entry.signals.clone())
+        .unwrap_or_default();
+    let patches = report
+        .patches
+        .iter()
+        .filter(|patch| patch.route == route)
+        .cloned()
+        .collect();
+
+    StateRouteFocusReport {
+        route,
+        signals,
+        patches,
+    }
+}
+
+fn normalize_state_route_filter(route: &str) -> String {
+    let route = route.trim();
+    if route.is_empty() || route == "/" {
+        return "/".to_string();
+    }
+
+    let route = route.trim_end_matches('/');
+    if route.starts_with('/') {
+        route.to_string()
+    } else {
+        format!("/{route}")
+    }
+}
+
+fn print_state_route_text(report: &StateRouteFocusReport) {
+    println!("State graph route: {}", report.route);
+    if report.signals.is_empty() && report.patches.is_empty() {
+        println!("  No visible state signals.");
+        return;
+    }
+
+    if !report.signals.is_empty() {
+        println!("  Signals:");
+        for signal in &report.signals {
+            println!(
+                "    {:<26} key={} owner={} type={}",
+                signal.name, signal.key, signal.owner, signal.ty
+            );
+        }
+    }
+
+    if !report.patches.is_empty() {
+        println!("  Patch sources:");
+        for patch in &report.patches {
+            println!(
+                "    action={} patch {} = {}",
+                patch.action, patch.target, patch.value
+            );
+        }
+    }
 }
 
 fn format_state_value(value: &AxStateValue) -> String {
@@ -10768,6 +11631,15 @@ fn state_signal_is_visible_to_route(signal: &StateReportSignal, route: &str) -> 
     };
 
     layout_route != "/" && route.starts_with(&format!("{layout_route}/"))
+}
+
+fn state_signal_is_component_used_by_route(
+    signal: &StateReportSignal,
+    file: &str,
+    route_component_files: Option<&std::collections::BTreeSet<String>>,
+) -> bool {
+    signal.owner.starts_with("component:")
+        && route_component_files.is_some_and(|files| files.contains(file))
 }
 
 fn format_max_body_bytes_for_root(root: &Path) -> String {
@@ -10893,7 +11765,7 @@ fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     println!("Ensured Cargo dependency: axonyx-ui = \"{AXONYX_UI_VERSION}\".");
     println!("Updated app/layout.ax with silver theme and Axonyx UI package use when possible.");
     println!("You can now import components such as:");
-    println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard.ax\"");
+    println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard\"");
     Ok(())
 }
 
@@ -10963,7 +11835,7 @@ fn upgrade_cargo_dependency_version(
 
     let changed = match dependency {
         toml::Value::String(version) => {
-            if version == dependency_version {
+            if !dependency_version_is_older(version, dependency_version) {
                 false
             } else {
                 *version = dependency_version.to_string();
@@ -10974,7 +11846,9 @@ fn upgrade_cargo_dependency_version(
             false
         }
         toml::Value::Table(table) => match table.get_mut("version") {
-            Some(toml::Value::String(version)) if version != dependency_version => {
+            Some(toml::Value::String(version))
+                if dependency_version_is_older(version, dependency_version) =>
+            {
                 *version = dependency_version.to_string();
                 true
             }
@@ -10997,6 +11871,16 @@ fn upgrade_cargo_dependency_version(
     }
 
     Ok(changed)
+}
+
+fn dependency_version_is_older(current: &str, candidate: &str) -> bool {
+    let Ok(current) = semver::Version::parse(current) else {
+        return false;
+    };
+    let Ok(candidate) = semver::Version::parse(candidate) else {
+        return false;
+    };
+    current < candidate
 }
 
 fn copy_dir_all_filtered(
@@ -11300,7 +12184,7 @@ fn handle_http_request(
         }
 
         if let Some(asset) = load_package_asset(&state.root, &request.target)? {
-            return Ok(cacheable_asset_response(asset));
+            return Ok(package_asset_response(asset, &request.target));
         }
 
         if let Some(asset) = load_public_asset(&state.root, &request.target)? {
@@ -12666,6 +13550,12 @@ fn validate_action_patches(route: &ResolvedRoute, patches: &[AxPreviewStatePatch
     }
 
     for patch in patches {
+        if !manifest.owns_signal_key(&patch.signal) {
+            bail!(
+                "state patch for '{}' is not visible to this route",
+                patch.signal
+            );
+        }
         let Some(expected_ty) = manifest.signal_types.get(&patch.signal) else {
             continue;
         };
@@ -12756,14 +13646,24 @@ fn collect_route_state_manifest(route: &ResolvedRoute) -> Result<RouteStateManif
 struct RouteStateManifest {
     signal_types: std::collections::BTreeMap<String, String>,
     aliases: std::collections::BTreeMap<String, String>,
+    owned_keys: std::collections::BTreeSet<String>,
 }
 
 impl RouteStateManifest {
     fn insert(&mut self, name: String, key: String, legacy_key: String, ty: String) {
+        self.owned_keys.insert(key.clone());
         self.signal_types.insert(key.clone(), ty.clone());
         self.signal_types.insert(legacy_key.clone(), ty);
         self.aliases.entry(name).or_insert_with(|| key.clone());
         self.aliases.insert(legacy_key, key.clone());
+        self.aliases.insert(key.clone(), key);
+    }
+
+    fn insert_component(&mut self, component: String, name: String, key: String, ty: String) {
+        self.owned_keys.insert(key.clone());
+        self.signal_types.insert(key.clone(), ty);
+        self.aliases
+            .insert(format!("{component}.{name}"), key.clone());
         self.aliases.insert(key.clone(), key);
     }
 
@@ -12777,6 +13677,10 @@ impl RouteStateManifest {
 
     fn signal_type(&self, signal: &str) -> Option<&str> {
         self.signal_types.get(signal).map(String::as_str)
+    }
+
+    fn owns_signal_key(&self, signal: &str) -> bool {
+        self.owned_keys.contains(signal)
     }
 }
 
@@ -12870,6 +13774,35 @@ fn cacheable_asset_response(asset: StaticAsset) -> AxHttpResponse {
         .with_header("Cache-Control", IMMUTABLE_ASSET_CACHE_CONTROL)
 }
 
+fn package_asset_response(asset: StaticAsset, request_path: &str) -> AxHttpResponse {
+    let cache_control = if request_path_has_content_hash(request_path) {
+        IMMUTABLE_ASSET_CACHE_CONTROL
+    } else {
+        REVALIDATE_ASSET_CACHE_CONTROL
+    };
+    AxHttpResponse::bytes(200, asset.content_type, asset.body)
+        .with_header("Cache-Control", cache_control)
+}
+
+fn request_path_has_content_hash(request_path: &str) -> bool {
+    let file_name = request_path
+        .split(['?', '#'])
+        .next()
+        .and_then(|path| path.rsplit('/').next())
+        .unwrap_or_default();
+    let mut segments = file_name.split('.');
+    let _stem = segments.next();
+    let Some(hash) = segments.next() else {
+        return false;
+    };
+    let Some(_extension) = segments.next() else {
+        return false;
+    };
+    segments.next().is_none()
+        && hash.len() == 12
+        && hash.chars().all(|character| character.is_ascii_hexdigit())
+}
+
 fn internal_asset_response(asset: StaticAsset) -> AxHttpResponse {
     AxHttpResponse::bytes(200, asset.content_type, asset.body).with_no_store()
 }
@@ -12951,8 +13884,7 @@ fn load_package_asset(root: &Path, request_path: &str) -> Result<Option<StaticAs
         return Ok(None);
     }
 
-    let body = fs::read(&asset_path)
-        .with_context(|| format!("failed to read package asset '{}'", asset_path.display()))?;
+    let body = package_asset_body(&asset_path)?;
 
     Ok(Some(StaticAsset {
         content_type: content_type_for(&asset_path),
@@ -13084,14 +14016,64 @@ fn hashed_asset_file_name(entry: &Path) -> Result<Option<OsString>> {
         return Ok(None);
     };
 
-    let body = fs::read(entry).with_context(|| {
-        format!(
-            "failed to read package asset '{}' for hashing",
-            entry.display()
-        )
-    })?;
+    let body = package_asset_body(entry)?;
     let hash = short_content_hash(&body);
     Ok(Some(OsString::from(format!("{stem}.{hash}.{extension}"))))
+}
+
+fn package_asset_body(entry: &Path) -> Result<Vec<u8>> {
+    if entry
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("css"))
+    {
+        return bundle_css_file(entry, &mut std::collections::BTreeSet::new())
+            .map(String::into_bytes);
+    }
+
+    fs::read(entry).with_context(|| format!("failed to read package asset '{}'", entry.display()))
+}
+
+fn bundle_css_file(
+    path: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<String> {
+    let normalized = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(normalized) {
+        return Ok(String::new());
+    }
+
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read package CSS asset '{}'", path.display()))?;
+    let mut output = String::new();
+    for line in source.split_inclusive('\n') {
+        if let Some(import_path) = local_css_import_path(path, line) {
+            output.push_str(&bundle_css_file(&import_path, visited)?);
+        } else {
+            output.push_str(line);
+        }
+    }
+    Ok(output)
+}
+
+fn local_css_import_path(source_path: &Path, line: &str) -> Option<PathBuf> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("@import") {
+        return None;
+    }
+    let quote = if trimmed.contains('\'') { '\'' } else { '"' };
+    let start = trimmed.find(quote)? + 1;
+    let end = trimmed[start..].find(quote)? + start;
+    let import = &trimmed[start..end];
+    if import.starts_with("http:")
+        || import.starts_with("https:")
+        || import.starts_with("//")
+        || import.starts_with("data:")
+    {
+        return None;
+    }
+    let path = source_path.parent()?.join(import);
+    path.is_file().then_some(path)
 }
 
 fn short_content_hash(bytes: &[u8]) -> String {
@@ -15249,12 +16231,12 @@ scope Layout <RenderLayout, setTheme> {
         .expect("scope should write");
         fs::write(
             root.join("app/settings/page.ax"),
-            "page Settings\n<Copy>Settings</Copy>\n",
+            "page Settings\npage state settingsTheme: String = \"bronze\"\n<Copy>Settings</Copy>\n",
         )
         .expect("settings page should write");
         fs::write(
             root.join("app/settings/actions.ax"),
-            "action Save\n  insert posts\n    title: \"Hello\"\n  return ok\n",
+            "action Save\n  patch settingsTheme = \"silver\"\n  insert posts\n    title: \"Hello\"\n  return ok\n",
         )
         .expect("actions should write");
         fs::write(
@@ -15270,12 +16252,13 @@ scope Layout <RenderLayout, setTheme> {
         assert_eq!(report.summary.api_routes, 1);
         assert_eq!(report.summary.action_routes, 1);
         assert_eq!(report.summary.actions, 1);
-        assert_eq!(report.summary.state_signals, 1);
+        assert_eq!(report.summary.state_signals, 2);
         assert_eq!(report.summary.scopes, 1);
         assert_eq!(report.summary.scope_states, 1);
         assert_eq!(report.summary.data_bindings, 1);
         assert_eq!(report.summary.query_keys, 1);
         assert_eq!(report.summary.query_invalidations, 1);
+        assert_eq!(report.summary.state_patches, 1);
         assert_eq!(report.summary.diagnostics, 0);
         assert_eq!(report.data.routes.len(), 1);
         assert_eq!(report.data.routes[0].route, "/");
@@ -15289,6 +16272,13 @@ scope Layout <RenderLayout, setTheme> {
             vec![ActionInvalidationReport {
                 target: "posts".to_string(),
                 query_key: vec!["posts".to_string()],
+            }]
+        );
+        assert_eq!(
+            report.actions.routes[0].actions[0].patches,
+            vec![ActionPatchReport {
+                target: "settingsTheme".to_string(),
+                value: "\"silver\"".to_string(),
             }]
         );
         assert_eq!(report.scopes.files.len(), 1);
@@ -15338,6 +16328,8 @@ scope Layout <RenderLayout, setTheme> {
         assert!(json.contains("\"scope_states\":1"));
         assert!(json.contains("\"query_key\""));
         assert!(json.contains("\"invalidates\""));
+        assert!(json.contains("\"patches\""));
+        assert!(json.contains("\"state_patches\":1"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -15542,6 +16534,11 @@ scope Blog <Domain> {
                     },
                 ],
             }],
+            graph: StateGraphReport {
+                scopes: Vec::new(),
+                routes: Vec::new(),
+            },
+            patches: Vec::new(),
         };
 
         let labels = state_signal_labels_for_route(&report, "/docs/getting-started");
@@ -15549,6 +16546,61 @@ scope Blog <Domain> {
         assert!(labels.contains(&"app:language".to_string()));
         assert!(labels.contains(&"layout:/docs:sidebarOpen".to_string()));
         assert!(labels.contains(&"page:/docs/getting-started:filter".to_string()));
+    }
+
+    #[test]
+    fn state_route_focus_reports_only_visible_route_signals() {
+        let report = StateReport {
+            files: Vec::new(),
+            graph: StateGraphReport {
+                scopes: Vec::new(),
+                routes: vec![StateGraphRouteReport {
+                    route: "/docs/getting-started".to_string(),
+                    file: "app/docs/getting-started/page.ax".to_string(),
+                    signals: vec![
+                        StateGraphRouteSignalReport {
+                            owner: "app".to_string(),
+                            name: "language".to_string(),
+                            key: "app:language:1".to_string(),
+                            ty: "String".to_string(),
+                        },
+                        StateGraphRouteSignalReport {
+                            owner: "page:/docs/getting-started".to_string(),
+                            name: "filter".to_string(),
+                            key: "page:docs.getting-started:filter:1".to_string(),
+                            ty: "String".to_string(),
+                        },
+                    ],
+                }],
+            },
+            patches: Vec::new(),
+        };
+
+        let focus = state_route_focus_report(&report, "docs/getting-started/");
+
+        assert_eq!(focus.route, "/docs/getting-started");
+        assert_eq!(focus.signals.len(), 2);
+        assert_eq!(focus.signals[0].name, "language");
+        assert_eq!(focus.signals[1].name, "filter");
+        assert!(focus.patches.is_empty());
+    }
+
+    #[test]
+    fn state_route_focus_returns_empty_report_for_routes_without_state() {
+        let report = StateReport {
+            files: Vec::new(),
+            graph: StateGraphReport {
+                scopes: Vec::new(),
+                routes: Vec::new(),
+            },
+            patches: Vec::new(),
+        };
+
+        let focus = state_route_focus_report(&report, "/empty");
+
+        assert_eq!(focus.route, "/empty");
+        assert!(focus.signals.is_empty());
+        assert!(focus.patches.is_empty());
     }
 
     #[test]
@@ -15652,6 +16704,13 @@ action saveProfile(email: string, public?: bool = true) -> ProfilePatch {
             }]
         );
         assert_eq!(
+            report.routes[0].actions[0].patches,
+            vec![ActionPatchReport {
+                target: "theme".to_string(),
+                value: "input.theme".to_string(),
+            }]
+        );
+        assert_eq!(
             report.routes[0].actions[0].invalidates,
             vec![ActionInvalidationReport {
                 target: "posts".to_string(),
@@ -15752,6 +16811,48 @@ action SavePost
     }
 
     #[test]
+    fn action_report_collects_component_state_patch_targets() {
+        let root = make_temp_dir("action-report-component-patches");
+        fs::create_dir_all(root.join("app/docs")).expect("docs dir should exist");
+        fs::write(
+            root.join("app/docs/page.ax"),
+            "page Docs\n<Copy>Docs</Copy>\n",
+        )
+        .expect("docs page should write");
+        fs::write(
+            root.join("app/docs/actions.ax"),
+            r#"
+action SetDocsTheme(theme: string) {
+  patch docsTheme = input.theme
+  patch StatePatchProbe.mode = input.theme
+  return ok()
+}
+"#,
+        )
+        .expect("actions should write");
+
+        let report = collect_action_report(&root).expect("action report should collect");
+
+        assert_eq!(report.routes.len(), 1);
+        assert_eq!(report.routes[0].route, "/docs");
+        assert_eq!(
+            report.routes[0].actions[0].patches,
+            vec![
+                ActionPatchReport {
+                    target: "docsTheme".to_string(),
+                    value: "input.theme".to_string(),
+                },
+                ActionPatchReport {
+                    target: "StatePatchProbe.mode".to_string(),
+                    value: "input.theme".to_string(),
+                },
+            ]
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn action_report_filters_by_route_and_name() {
         let report = ActionReport {
             routes: vec![
@@ -15763,12 +16864,14 @@ action SavePost
                             name: "SetTheme".to_string(),
                             returns: None,
                             inputs: Vec::new(),
+                            patches: Vec::new(),
                             invalidates: Vec::new(),
                         },
                         ActionItemReport {
                             name: "ClearTheme".to_string(),
                             returns: None,
                             inputs: Vec::new(),
+                            patches: Vec::new(),
                             invalidates: Vec::new(),
                         },
                     ],
@@ -15780,6 +16883,7 @@ action SavePost
                         name: "SendFeedback".to_string(),
                         returns: None,
                         inputs: Vec::new(),
+                        patches: Vec::new(),
                         invalidates: Vec::new(),
                     }],
                 },
@@ -15916,6 +17020,150 @@ page state enabled = signal(true)
         assert_eq!(report.files[3].signals[0].scope, "page:settings");
         assert_eq!(report.files[3].signals[0].owner, "page:/settings");
         assert_eq!(report.files[3].signals[0].initial, AxStateValue::Bool(true));
+
+        assert_eq!(report.graph.scopes.len(), 4);
+        assert_eq!(report.graph.routes.len(), 2);
+
+        let root_route = report
+            .graph
+            .routes
+            .iter()
+            .find(|route| route.route == "/")
+            .expect("root route should have state graph entry");
+        assert_eq!(
+            root_route
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.owner, signal.name))
+                .collect::<Vec<_>>(),
+            vec![
+                "app:language".to_string(),
+                "page:/:count".to_string(),
+                "page:/:theme".to_string(),
+            ]
+        );
+
+        let settings_route = report
+            .graph
+            .routes
+            .iter()
+            .find(|route| route.route == "/settings")
+            .expect("settings route should have state graph entry");
+        assert_eq!(
+            settings_route
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.owner, signal.name))
+                .collect::<Vec<_>>(),
+            vec![
+                "app:language".to_string(),
+                "layout:/settings:sidebarOpen".to_string(),
+                "page:/settings:enabled".to_string(),
+            ]
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn state_report_collects_action_patch_sources() {
+        let root = make_temp_dir("state-report-action-patches");
+        fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::write(
+            root.join("app/settings/page.ax"),
+            r#"
+page Settings
+
+page state theme: String = "silver"
+
+<Copy>{theme}</Copy>
+"#,
+        )
+        .expect("settings page should write");
+        fs::write(
+            root.join("app/settings/actions.ax"),
+            r#"
+action SetTheme(theme: String) {
+  patch theme = input.theme
+  return ok()
+}
+"#,
+        )
+        .expect("settings actions should write");
+
+        let report = collect_state_report(&root).expect("state report should collect");
+
+        assert_eq!(
+            report.patches,
+            vec![StatePatchUsageReport {
+                route: "/settings".to_string(),
+                action: "SetTheme".to_string(),
+                target: "theme".to_string(),
+                value: "input.theme".to_string(),
+            }]
+        );
+        let focus = state_route_focus_report(&report, "/settings");
+        assert_eq!(focus.patches, report.patches);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn state_graph_maps_component_local_state_to_importing_routes() {
+        let root = make_temp_dir("component-state-graph");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { ThemeSwitch } from "@/components/ThemeSwitch.ax"
+
+page Home() {
+  return ASX {
+    <ThemeSwitch />
+  }
+}
+"#,
+        )
+        .expect("home page should write");
+        fs::write(
+            root.join("app/components/ThemeSwitch.ax"),
+            r#"
+component ThemeSwitch() {
+  state theme: String = "silver"
+  style { recipe = "theme-switch" }
+
+  render ASX {
+    <span>{theme}</span>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+
+        let report = collect_state_report(&root).expect("state report should collect");
+
+        assert_eq!(report.files.len(), 1);
+        assert_eq!(report.files[0].file, "app/components/ThemeSwitch.ax");
+        assert_eq!(report.files[0].signals[0].owner, "component:ThemeSwitch");
+        assert_eq!(
+            report.files[0].signals[0].key,
+            "__ax_component_state__:ThemeSwitch:theme:1"
+        );
+
+        let root_route = report
+            .graph
+            .routes
+            .iter()
+            .find(|route| route.route == "/")
+            .expect("root route should include component state");
+        assert_eq!(
+            root_route
+                .signals
+                .iter()
+                .map(|signal| format!("{}:{}", signal.owner, signal.name))
+                .collect::<Vec<_>>(),
+            vec!["component:ThemeSwitch:theme".to_string()]
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -16189,6 +17437,33 @@ route GET "/api/posts"
     }
 
     #[test]
+    fn package_assets_only_use_immutable_cache_for_hashed_paths() {
+        let plain = package_asset_response(
+            StaticAsset {
+                content_type: "text/css; charset=utf-8",
+                body: b"body {}".to_vec(),
+            },
+            "/_ax/pkg/axonyx-ui/primitives.css",
+        );
+        let hashed = package_asset_response(
+            StaticAsset {
+                content_type: "text/css; charset=utf-8",
+                body: b"body {}".to_vec(),
+            },
+            "/_ax/pkg/axonyx-ui/index.012345abcdef.css",
+        );
+
+        assert_eq!(
+            plain.header_value("Cache-Control"),
+            Some(REVALIDATE_ASSET_CACHE_CONTROL)
+        );
+        assert_eq!(
+            hashed.header_value("Cache-Control"),
+            Some(IMMUTABLE_ASSET_CACHE_CONTROL)
+        );
+    }
+
+    #[test]
     fn start_server_serves_state_snapshot_from_dist_ax_with_no_store() {
         let root = make_temp_dir("state-snapshot-asset");
         fs::create_dir_all(root.join("dist/_ax/state")).expect("state dir should exist");
@@ -16305,6 +17580,32 @@ axonyx-ui = {{ path = "{ui_path}" }}
         assert_eq!(asset.body, b"body { color: silver; }");
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn css_entry_hash_changes_when_a_package_stylesheet_changes() {
+        let root = make_temp_dir("transitive-css-hash");
+        let index = root.join("index.css");
+        let primitive = root.join("primitives.css");
+        fs::write(&index, "@import './primitives.css';\n").expect("CSS entry should write");
+        fs::write(&primitive, ".ax-bleed { width: 100vw; }\n")
+            .expect("CSS dependency should write");
+
+        let before = hashed_asset_file_name(&index)
+            .expect("entry hash should compute")
+            .expect("entry should exist");
+        fs::write(&primitive, ".ax-bleed { width: auto; }\n")
+            .expect("CSS dependency should update");
+        let after = hashed_asset_file_name(&index)
+            .expect("updated entry hash should compute")
+            .expect("entry should exist");
+        let bundled = String::from_utf8(package_asset_body(&index).expect("CSS should bundle"))
+            .expect("bundled CSS should remain UTF-8");
+
+        assert_ne!(before, after);
+        assert!(!bundled.contains("@import"));
+        assert!(bundled.contains(".ax-bleed { width: auto; }"));
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
@@ -17687,7 +18988,133 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.52\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.58\""));
+
+        fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn registry_manifest_report_accepts_v1_entries() {
+        let report = parse_registry_manifest(
+            r#"
+[registry]
+name = "Axonyx UI"
+namespace = "@axonyx/ui"
+description = "Foundry registry"
+mode = "native"
+version = 1
+
+[[components]]
+name = "Button"
+title = "Button"
+path = "src/foundry/Button.ax"
+import = "@axonyx/ui/foundry/Button"
+preview = "/components/button"
+category = "actions"
+status = "v0"
+install = "cargo ax add ui"
+copy = "cargo ax add button"
+tags = ["action", "cta"]
+description = "Action primitive."
+"#,
+        )
+        .expect("registry manifest should parse");
+
+        assert_eq!(report.version, Some(1));
+        assert_eq!(report.components.len(), 1);
+        assert_eq!(report.components[0].import, "@axonyx/ui/foundry/Button");
+        assert_eq!(report.components[0].tags, vec!["action", "cta"]);
+    }
+
+    #[test]
+    fn add_registry_block_copies_block_source_from_ui_package() {
+        let workspace = make_temp_dir("add-registry-block");
+        let app_root = workspace.join("demo-app");
+        let ui_root = app_root.join("vendor/axonyx-ui");
+        let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
+
+        fs::create_dir_all(app_root.join("app")).expect("app dir should exist");
+        fs::create_dir_all(ui_root.join("src/blocks")).expect("ui block dir should exist");
+        fs::write(
+            app_root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[modules]\nenabled = []\n",
+        )
+        .expect("config should write");
+        fs::write(
+            app_root.join("app/layout.ax"),
+            "page RootLayout\n  title \"Demo\"\n  Slot\n",
+        )
+        .expect("layout should write");
+        fs::write(
+            app_root.join("Cargo.toml"),
+            format!(
+                r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-runtime = "0.1.0"
+axonyx-ui = {{ path = "{ui_path}" }}
+"#
+            ),
+        )
+        .expect("cargo manifest should write");
+        fs::write(
+            ui_root.join("Cargo.toml"),
+            r#"
+[package]
+name = "axonyx-ui"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .expect("ui cargo manifest should write");
+        fs::write(ui_root.join("src/lib.rs"), "").expect("ui lib should write");
+        fs::write(
+            ui_root.join("Axonyx.registry.toml"),
+            r#"
+[registry]
+name = "Axonyx UI"
+namespace = "@axonyx/ui"
+version = 1
+
+[[blocks]]
+name = "marketing-01"
+title = "Marketing 01"
+path = "src/blocks/marketing-01.ax"
+import = "@axonyx/ui/blocks/marketing-01"
+preview = "/blocks/marketing-01"
+category = "marketing"
+status = "v0"
+install = "cargo ax add ui"
+copy = "cargo ax add block marketing-01"
+tags = ["landing"]
+description = "Marketing block."
+"#,
+        )
+        .expect("registry should write");
+        fs::write(
+            ui_root.join("src/blocks/marketing-01.ax"),
+            "component Marketing01 {\n  <Card title=\"Copied block\" />\n}\n",
+        )
+        .expect("block source should write");
+
+        add_registry_block(&app_root, "marketing-01").expect("block should add");
+
+        let copied = fs::read_to_string(app_root.join("app/components/blocks/marketing-01.ax"))
+            .expect("copied block should read");
+        assert!(copied.contains("component Marketing01"));
+        assert!(copied.contains("Copied block"));
+
+        let layout =
+            fs::read_to_string(app_root.join("app/layout.ax")).expect("layout should read back");
+        assert!(layout.contains("theme \"silver\""));
+        assert!(layout.contains(AXONYX_UI_STYLESHEET_HREF));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -18247,7 +19674,28 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
-        assert!(updated.contains("version = \"0.0.52\""));
+        assert!(updated.contains("version = \"0.0.58\""));
+
+        fs::write(
+            &cargo_toml,
+            r#"
+[package]
+name = "demo-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axonyx-ui = "0.0.59"
+"#,
+        )
+        .expect("newer manifest should write");
+
+        assert!(
+            !upgrade_cargo_dependency_version(&cargo_toml, "axonyx-ui", AXONYX_UI_VERSION)
+                .expect("newer UI dependency should remain unchanged")
+        );
+        let unchanged = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
+        assert!(unchanged.contains("axonyx-ui = \"0.0.59\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -19487,6 +20935,59 @@ action SetTheme
     }
 
     #[test]
+    fn route_state_manifest_resolves_imported_component_state_aliases() {
+        let root = make_temp_dir("component-action-binding");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { ThemeSwitch } from "@/components/theme-switch.ax"
+
+page Home() {
+  return ASX {
+    <ThemeSwitch />
+  }
+}
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switch.ax"),
+            r#"
+component ThemeSwitch() {
+  state theme: String = "silver"
+  style { recipe = "theme-switch" }
+
+  render ASX {
+    <span>{theme}</span>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route should resolve")
+            .expect("route should exist");
+        let manifest = collect_route_state_manifest(&route).expect("state manifest should collect");
+
+        assert_eq!(
+            manifest.resolve_signal_key("ThemeSwitch.theme").as_deref(),
+            Some("__ax_component_state__:ThemeSwitch:theme:1")
+        );
+        assert_eq!(
+            manifest.signal_type("__ax_component_state__:ThemeSwitch:theme:1"),
+            Some("String")
+        );
+        assert!(manifest.owns_signal_key("__ax_component_state__:ThemeSwitch:theme:1"));
+        assert_eq!(manifest.resolve_signal_key("theme"), None);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn action_request_can_use_shared_app_domain_helpers() {
         let root = make_temp_dir("action-shared-domain-helper");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
@@ -19554,6 +21055,72 @@ action SetTheme(theme: string) {
         assert!(raw.contains("Content-Type: application/ax-patch+json; charset=utf-8"));
         assert!(raw.contains("\"signal\":\"page:root:theme:1\""));
         assert!(raw.contains("\"value\":\"gold\""));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn action_patch_response_rejects_route_invisible_state_signal() {
+        let root = make_temp_dir("action-patch-route-ownership");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Home() {
+  page state theme: String = "silver"
+
+  return ASX {
+    <Copy>Home</Copy>
+  }
+}
+"#,
+        )
+        .expect("home page should write");
+        fs::write(
+            root.join("app/settings/page.ax"),
+            r#"
+page Settings() {
+  page state theme: String = "silver"
+
+  return ASX {
+    <Copy>Settings</Copy>
+  }
+}
+"#,
+        )
+        .expect("settings page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetTheme(theme: string) {
+  patch "page:settings:theme:1" = input.theme
+  return ok
+}
+"#,
+        )
+        .expect("actions should write");
+
+        let route = resolve_route(&root, "/")
+            .expect("route should resolve")
+            .expect("route should exist");
+        let result = AxPreviewActionResult {
+            redirect_to: None,
+            value: AxValue::Null,
+            patches: vec![AxPreviewStatePatch::set(
+                "page:settings:theme:1",
+                AxValue::from("gold"),
+            )],
+            invalidations: Vec::new(),
+            error: None,
+        };
+        let error = action_patch_response(&route, &result).expect_err("patch should be rejected");
+        let error = error.to_string();
+        assert!(
+            error.contains("not visible to this route"),
+            "error was: {error}"
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -19863,6 +21430,58 @@ action SetTheme
         assert_eq!(diagnostics[0].code, "axonyx-action-patch-target");
         assert_eq!(diagnostics[0].line, 6);
         assert!(diagnostics[0].message.contains("missingTheme"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_accepts_imported_component_state_patch_alias() {
+        let root = make_temp_dir("action-patch-component-alias");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { ThemeSwitch } from "@/components/theme-switch.ax"
+
+page Home() {
+  return ASX {
+    <ThemeSwitch />
+  }
+}
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/theme-switch.ax"),
+            r#"
+component ThemeSwitch() {
+  state theme: String = "silver"
+
+  render ASX {
+    <span>{theme}</span>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action SetTheme
+  input:
+    theme: string
+
+  patch ThemeSwitch.theme = input.theme
+  return ok
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 0, "{diagnostics:#?}");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -20657,7 +22276,7 @@ page SectionCard
         fs::write(
             root.join("app/page.ax"),
             r#"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard"
 
 page Home
 
@@ -20705,7 +22324,7 @@ page SectionCard
         fs::write(
             root.join("app/page.ax"),
             r#"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard"
 
 page Home
 

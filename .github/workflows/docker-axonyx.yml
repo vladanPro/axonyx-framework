@@ -6,7 +6,7 @@ on:
       tag:
         description: Docker image tag
         required: true
-        default: "0.1.87"
+        default: "0.1.88"
       push_latest:
         description: Also push latest tag
         required: true
@@ -48,8 +48,8 @@ jobs:
         run: |
           docker build \
             --build-arg CARGO_AXONYX_VERSION=${{ inputs.tag }} \
-            --build-arg CREATE_AXONYX_VERSION=0.1.57 \
-            --build-arg AXONYX_RUNTIME_VERSION=0.1.48 \
+            --build-arg CREATE_AXONYX_VERSION=0.1.58 \
+            --build-arg AXONYX_RUNTIME_VERSION=0.1.49 \
             -t ghcr.io/${{ steps.owner.outputs.value }}/axonyx:${{ inputs.tag }} \
             -t ${{ secrets.DOCKERHUB_USERNAME }}/axonyx:${{ inputs.tag }} \
             -f docker/axonyx/Dockerfile .

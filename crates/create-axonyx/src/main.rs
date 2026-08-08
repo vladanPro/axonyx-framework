@@ -10,9 +10,9 @@ use clap::{Parser, ValueEnum};
 
 const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runtime";
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
-const DEFAULT_RUNTIME_VERSION: &str = "0.1.48";
+const DEFAULT_RUNTIME_VERSION: &str = "0.1.49";
 const DEFAULT_UI_PACKAGE: &str = "axonyx-ui";
-const DEFAULT_UI_VERSION: &str = "0.0.52";
+const DEFAULT_UI_VERSION: &str = "0.0.58";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonyx")]
@@ -743,9 +743,9 @@ mod tests {
         let cargo_toml =
             fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
         assert!(
-            cargo_toml.contains("axonyx-runtime = { version = \"0.1.48\", features = [\"axum\"] }")
+            cargo_toml.contains("axonyx-runtime = { version = \"0.1.49\", features = [\"axum\"] }")
         );
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.52\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.58\""));
 
         let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
         assert!(page.contains("page Home()"));
@@ -846,5 +846,29 @@ mod tests {
         assert!(!paths.contains(&"app/feedback/page.ax"));
         assert!(paths.contains(&"app/getting-started/page.ax"));
         assert!(paths.contains(&"app/reference/page.ax"));
+    }
+
+    #[test]
+    fn docs_template_uses_route_aware_cli_loop() {
+        let files = template::template_files(
+            template::AppTemplate::Docs,
+            "demo-docs",
+            "axonyx-runtime = \"0.1.0\"",
+            "runtime note",
+        );
+        let readme = files
+            .iter()
+            .find(|file| file.relative_path == "README.md")
+            .expect("docs template should include README");
+        let reference = files
+            .iter()
+            .find(|file| file.relative_path == "app/reference/page.ax")
+            .expect("docs template should include reference page");
+
+        assert!(readme.contents.contains("cargo ax run dev"));
+        assert!(readme.contents.contains("cargo ax test"));
+        assert!(!readme.contents.contains("cargo run preview"));
+        assert!(!readme.contents.contains("target/axonyx-preview.html"));
+        assert!(!reference.contents.contains("{ return ASX { ... } }"));
     }
 }

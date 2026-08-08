@@ -3,6 +3,7 @@ import { Card } from "@axonyx/ui/foundry/Card.ax"
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
 import { Copy } from "@axonyx/ui/foundry/Copy.ax"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
 import { Stack } from "@axonyx/ui/foundry/Stack.ax"
 
 page BlogHome() {
@@ -34,6 +35,27 @@ page BlogHome() {
               <Card title="No notes yet"><Copy>Add a Markdown file under `content/posts`.</Copy></Card>
             </Else>
           </If>
+        </ContentGrid>
+
+        <ContentGrid cols={3} gap="lg">
+          <SectionCard title="Write Markdown">
+            <Copy>
+              Add posts under `content/posts`. Frontmatter becomes typed content
+              fields, and the filename becomes the route slug.
+            </Copy>
+          </SectionCard>
+          <SectionCard title="Inspect content">
+            <Copy>
+              Run `cargo ax content` to see the collection manifest before
+              publishing or debugging missing entries.
+            </Copy>
+          </SectionCard>
+          <SectionCard title="Prerender routes">
+            <Copy>
+              `cargo ax build --clean` writes the index and every configured
+              `/blog/:slug` article as static HTML.
+            </Copy>
+          </SectionCard>
         </ContentGrid>
       </Stack>
     </Container>

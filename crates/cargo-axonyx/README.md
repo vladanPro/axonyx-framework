@@ -132,10 +132,31 @@ Generated apps depend on published Cargo packages by default:
 
 ```toml
 axonyx-runtime = "0.1.14"
-axonyx-ui = "0.0.52"
+axonyx-ui = "0.0.58"
 ```
 
 Local path and package override flows are still supported for framework development and UI dogfooding.
+
+Inspect the installed UI registry:
+
+```bash
+cargo ax registry
+cargo ax registry --format json
+```
+
+Use components and blocks from the package by default:
+
+```ax
+use "@axonyx/ui"
+import { Button } from "@axonyx/ui/foundry/Button"
+import { Marketing01 } from "@axonyx/ui/blocks/marketing-01"
+```
+
+Copy a block into the app when you want to customize it locally:
+
+```bash
+cargo ax add block marketing-01
+```
 
 ## Architecture Direction
 
