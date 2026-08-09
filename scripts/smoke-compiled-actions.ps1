@@ -18,19 +18,23 @@ $stdout = Join-Path $WorkDir "server.out.log"
 $stderr = Join-Path $WorkDir "server.err.log"
 $serverProcess = $null
 $originalLocation = Get-Location
+$originalDbDialect = $env:AX_SECRET_DB_DIALECT
 
 function Invoke-AxRequest {
   param(
     [Parameter(Mandatory = $true)] [string] $Url,
     [string] $Body = "",
     [hashtable] $Headers = @{},
+    [string] $Method = "POST",
     [int] $ExpectedStatus = 200
   )
 
   $request = [System.Net.HttpWebRequest]::Create($Url)
-  $request.Method = "POST"
+  $request.Method = $Method
   $request.AllowAutoRedirect = $false
-  $request.ContentType = "application/x-www-form-urlencoded"
+  if ($Method -ne "GET" -and $Method -ne "HEAD") {
+    $request.ContentType = "application/x-www-form-urlencoded"
+  }
   foreach ($header in $Headers.GetEnumerator()) {
     if ($header.Key -ieq "Accept") {
       $request.Accept = [string] $header.Value
@@ -41,10 +45,12 @@ function Invoke-AxRequest {
     }
   }
 
-  $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
-  $request.ContentLength = $bytes.Length
-  $stream = $request.GetRequestStream()
-  try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+  if ($Method -ne "GET" -and $Method -ne "HEAD") {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+    $request.ContentLength = $bytes.Length
+    $stream = $request.GetRequestStream()
+    try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+  }
 
   try {
     $response = $request.GetResponse()
@@ -120,6 +126,7 @@ action Noop() {
     RedirectStandardError = $stderr
     PassThru = $true
   }
+  $env:AX_SECRET_DB_DIALECT = "memory"
   if ($env:OS -eq "Windows_NT") { $processArgs.WindowStyle = "Hidden" }
   $serverProcess = Start-Process @processArgs
 
@@ -147,6 +154,13 @@ action Noop() {
   if (!$payload.ok -or $payload.redirect -ne "/posts") { throw "Compiled success envelope is invalid" }
   if ($payload.patches[0].signal -ne "page:posts:draftStatus:1" -or $payload.patches[0].value -ne "gold") { throw "Compiled state patch is invalid: $($success.Body)" }
   if ($payload.invalidations[0].target -ne "/posts" -or $payload.invalidations[0].queryKey[0] -ne "posts") { throw "Compiled invalidation is invalid" }
+  if ($payload.refreshes[0].name -ne "posts" -or $payload.refreshes[0].source -ne "loadPosts()") { throw "Compiled data refresh metadata is invalid: $($success.Body)" }
+
+  $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
+  if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }
+  $dataPayload = $data.Body | ConvertFrom-Json
+  if (!$dataPayload.ok -or $dataPayload.binding.name -ne "posts" -or $dataPayload.value.collection -ne "posts") { throw "Compiled loader response is invalid: $($data.Body)" }
+  Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2F%2Fevil.example&name=posts" -Method "GET" -ExpectedStatus 400 | Out-Null
 
   $invalid = Invoke-AxRequest -Url $actionUrl -Body "theme=&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
   if ($invalid.Headers["Content-Type"] -notmatch "application/ax-error\+json") { throw "Missing action error content type" }
@@ -168,6 +182,11 @@ action Noop() {
     $serverProcess.WaitForExit(5000) | Out-Null
   }
   Set-Location $originalLocation
+  if ($null -eq $originalDbDialect) {
+    Remove-Item Env:AX_SECRET_DB_DIALECT -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_DB_DIALECT = $originalDbDialect
+  }
   if ($ownsWorkDir -and (Test-Path -LiteralPath $WorkDir)) {
     $resolved = [System.IO.Path]::GetFullPath($WorkDir)
     $temp = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())

@@ -983,6 +983,15 @@ struct DataBindingReport {
     query_key: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompiledDataBinding {
+    route_pattern: String,
+    name: String,
+    loader: String,
+    source: String,
+    query_key: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ScopeReport {
     files: Vec<ScopeFileReport>,
@@ -8759,7 +8768,8 @@ fn build_compiled_production_binary(
     let dist_relative = dist.strip_prefix(root).unwrap_or(&dist);
     let dist_literal = format!("{:?}", dist_relative.to_string_lossy());
     let signal_aliases = compiled_action_signal_aliases(root)?;
-    let source = compiled_production_source(&dist_literal, &signal_aliases);
+    let data_bindings = compiled_data_bindings(root)?;
+    let source = compiled_production_source(&dist_literal, &signal_aliases, &data_bindings);
     fs::write(&source_path, source).with_context(|| {
         format!(
             "failed to write compiled production server '{}'",
@@ -8809,14 +8819,88 @@ fn compiled_action_signal_aliases(root: &Path) -> Result<Vec<(String, String, St
     Ok(aliases)
 }
 
+fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
+    let mut bindings = Vec::new();
+    for route in collect_page_route_manifest(root)? {
+        let page_path = root.join(&route.file);
+        let source = fs::read_to_string(&page_path)
+            .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
+        let Ok(document) = parse_ax_auto(&source) else {
+            continue;
+        };
+
+        for statement in &document.page.body {
+            let AxStatement::Data(binding) = statement else {
+                continue;
+            };
+            let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
+                continue;
+            };
+            if !args.is_empty() {
+                continue;
+            }
+            let Some(loader) = path.last().filter(|name| name.starts_with("load")) else {
+                continue;
+            };
+
+            let mut query_key = vec![binding.name.clone()];
+            query_key.extend(args.iter().map(format_ax_expr));
+            bindings.push(CompiledDataBinding {
+                route_pattern: route.route.clone(),
+                name: binding.name.clone(),
+                loader: loader.clone(),
+                source: format_ax_expr(&binding.value),
+                query_key,
+            });
+        }
+    }
+    Ok(bindings)
+}
+
 fn compiled_production_source(
     dist_literal: &str,
     signal_aliases: &[(String, String, String)],
+    data_bindings: &[CompiledDataBinding],
 ) -> String {
     let signal_match_arms = signal_aliases
         .iter()
         .map(|(route, alias, canonical)| {
             format!("        ({route:?}, {alias:?}) => {canonical:?},\n")
+        })
+        .collect::<String>();
+    let data_binding_arms = data_bindings
+        .iter()
+        .map(|binding| {
+            let query_key = binding
+                .query_key
+                .iter()
+                .map(|part| format!("{part:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "    if route_pattern_matches({pattern:?}, path) && name == {name:?} {{ return Some(({pattern:?}, {loader:?}, {source:?}, &[{query_key}])); }}\n",
+                pattern = binding.route_pattern,
+                name = binding.name,
+                loader = binding.loader,
+                source = binding.source,
+            )
+        })
+        .collect::<String>();
+    let refresh_binding_steps = data_bindings
+        .iter()
+        .map(|binding| {
+            let query_key = binding
+                .query_key
+                .iter()
+                .map(|part| format!("{part:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "    if route_pattern_matches({pattern:?}, route) && invalidations.iter().any(|item| invalidation_matches(item, &[{query_key}])) {{ refreshes.push(json!({{ \"name\": {name:?}, \"source\": {source:?}, \"queryKey\": [{query_key}] }})); }}\n",
+                pattern = binding.route_pattern,
+                name = binding.name,
+                source = binding.source,
+            )
         })
         .collect::<String>();
     format!(
@@ -8847,6 +8931,10 @@ fn handle_request(dist: &Path, request: AxHttpRequest) -> AxHttpResponse {{
 
     if request.target.split('?').next() == Some("/__axonyx/action") {{
         return secure(handle_compiled_action(&request));
+    }}
+
+    if request.target.split('?').next() == Some("/__axonyx/data") {{
+        return secure(handle_compiled_data(&request));
     }}
 
     if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
@@ -8917,7 +9005,7 @@ fn handle_compiled_action(request: &AxHttpRequest) -> AxHttpResponse {{
                     fields.insert("redirect".to_string(), Value::String(route.clone()));
                 }}
             }}
-            normalize_action_patches(&route, &mut payload);
+            normalize_action_payload(&route, &mut payload);
             let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
             if wants_action_patch_response(request) || !ok {{
                 let status = if ok {{
@@ -8962,7 +9050,7 @@ fn handle_compiled_action(request: &AxHttpRequest) -> AxHttpResponse {{
     }}
 }}
 
-fn normalize_action_patches(route: &str, payload: &mut Value) {{
+fn normalize_action_payload(route: &str, payload: &mut Value) {{
     let Some(patches) = payload.get_mut("patches").and_then(Value::as_array_mut) else {{ return; }};
     for patch in patches {{
         let Some(signal) = patch.get("signal").and_then(Value::as_str).map(str::to_string) else {{ continue; }};
@@ -8973,6 +9061,80 @@ fn normalize_action_patches(route: &str, payload: &mut Value) {{
             fields.insert("signal".to_string(), Value::String(canonical.to_string()));
         }}
     }}
+    let invalidations = payload.get("invalidations").and_then(Value::as_array).cloned().unwrap_or_default();
+    if let Value::Object(fields) = payload {{
+        fields.insert("refreshes".to_string(), Value::Array(compiled_refreshes(route, &invalidations)));
+    }}
+}}
+
+fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
+    if !request.method.eq_ignore_ascii_case("GET") {{
+        return AxHttpResponse::text(405, "Method Not Allowed")
+            .with_header("Allow", "GET")
+            .with_no_store();
+    }}
+    let Some(path) = action_query_param(&request.target, "path") else {{
+        return AxHttpResponse::text(400, "missing data route path").with_no_store();
+    }};
+    let Some(name) = action_query_param(&request.target, "name") else {{
+        return AxHttpResponse::text(400, "missing data binding name").with_no_store();
+    }};
+    let Some(path) = safe_route_path(&path) else {{
+        return AxHttpResponse::text(400, "invalid data route path").with_no_store();
+    }};
+    let Some((pattern, loader, source, query_key)) = compiled_data_binding(&path, &name) else {{
+        return AxHttpResponse::text(404, "data binding not found").with_no_store();
+    }};
+    let mut loader_request = request.clone();
+    loader_request.target = path.clone();
+    let dispatched = (|| {{
+        let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
+        backend::dispatch_loader(&runtime, loader, pattern, &loader_request)
+    }})();
+    match dispatched {{
+        Ok(Some(value)) => match serde_json::to_vec(&json!({{
+            "ok": true,
+            "route": path,
+            "binding": {{ "name": name, "source": source, "queryKey": query_key }},
+            "value": value,
+            "html": Value::Null,
+        }})) {{
+            Ok(body) => AxHttpResponse::bytes(200, "application/ax-data+json; charset=utf-8", body).with_no_store(),
+            Err(error) => {{
+                eprintln!("Axonyx compiled data serialization error: {{error}}");
+                AxHttpResponse::text(500, "Internal Server Error").with_no_store()
+            }}
+        }},
+        Ok(None) => AxHttpResponse::text(404, "loader not found").with_no_store(),
+        Err(error) => {{
+            eprintln!("Axonyx compiled data error: {{error}}");
+            AxHttpResponse::text(500, "Internal Server Error").with_no_store()
+        }}
+    }}
+}}
+
+fn compiled_data_binding(path: &str, name: &str) -> Option<(&'static str, &'static str, &'static str, &'static [&'static str])> {{
+{data_binding_arms}    None
+}}
+
+fn compiled_refreshes(route: &str, invalidations: &[Value]) -> Vec<Value> {{
+    let mut refreshes = Vec::new();
+{refresh_binding_steps}    refreshes
+}}
+
+fn invalidation_matches(invalidation: &Value, binding: &[&str]) -> bool {{
+    let Some(parts) = invalidation.get("queryKey").and_then(Value::as_array) else {{ return false; }};
+    !parts.is_empty()
+        && parts.len() <= binding.len()
+        && parts.iter().zip(binding).all(|(left, right)| left.as_str() == Some(*right))
+}}
+
+fn route_pattern_matches(pattern: &str, target: &str) -> bool {{
+    let pattern = pattern.trim_matches('/').split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let target = target.split_once('?').map_or(target, |(path, _)| path)
+        .trim_matches('/').split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    pattern.len() == target.len()
+        && pattern.iter().zip(target).all(|(expected, actual)| expected.starts_with(':') || *expected == actual)
 }}
 
 fn wants_action_patch_response(request: &AxHttpRequest) -> bool {{
@@ -8990,14 +9152,18 @@ fn action_query_param(target: &str, needle: &str) -> Option<String> {{
 }}
 
 fn safe_action_route(value: &str) -> String {{
+    safe_route_path(value).unwrap_or_else(|| "/".to_string())
+}}
+
+fn safe_route_path(value: &str) -> Option<String> {{
     let path = value.split(['?', '#']).next().unwrap_or("/").trim();
     if !path.starts_with('/') || path.starts_with("//") || path.contains('\\') {{
-        return "/".to_string();
+        return None;
     }}
     if path.trim_start_matches('/').split('/').any(|segment| matches!(segment, "." | "..")) {{
-        return "/".to_string();
+        return None;
     }}
-    if path.is_empty() {{ "/".to_string() }} else {{ path.to_string() }}
+    Some(if path.is_empty() {{ "/".to_string() }} else {{ path.to_string() }})
 }}
 
 fn form_value(body: &[u8], needle: &str) -> Option<String> {{
@@ -18828,13 +18994,23 @@ page Home
                 "root:draftStatus:1".to_string(),
                 "page:posts:draftStatus:1".to_string(),
             )],
+            &[CompiledDataBinding {
+                route_pattern: "/posts".to_string(),
+                name: "posts".to_string(),
+                loader: "loadPosts".to_string(),
+                source: "loadPosts()".to_string(),
+                query_key: vec!["posts".to_string()],
+            }],
         );
 
         assert!(source.contains("backend::dispatch_api_route"));
         assert!(source.contains("backend::dispatch_action"));
+        assert!(source.contains("backend::dispatch_loader"));
         assert!(source.contains("serve_compiled_axum"));
         assert!(source.contains("Component::Normal"));
         assert!(source.contains("application/ax-patch+json"));
+        assert!(source.contains("application/ax-data+json"));
+        assert!(source.contains("compiled_data_binding"));
         assert!(source.contains("cross_site_action_request"));
         assert!(source.contains("safe_action_route"));
         assert!(source.contains("path.starts_with(\"//\")"));
@@ -18844,6 +19020,32 @@ page Home
         );
         assert!(!source.contains("compiled actions are not enabled"));
         assert!(!source.contains("read_to_string"));
+    }
+
+    #[test]
+    fn compiled_data_bindings_include_only_zero_argument_loaders() {
+        let root = make_temp_dir("compiled-data-bindings");
+        fs::create_dir_all(root.join("app/posts")).expect("posts route should exist");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"page Posts() {
+data posts = loadPosts()
+data featured = loadPost("featured")
+return ASX { <Copy>{posts}</Copy> }
+}
+"#,
+        )
+        .expect("page should write");
+
+        let bindings = compiled_data_bindings(&root).expect("bindings should collect");
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].route_pattern, "/posts");
+        assert_eq!(bindings[0].name, "posts");
+        assert_eq!(bindings[0].loader, "loadPosts");
+        assert_eq!(bindings[0].query_key, ["posts"]);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
