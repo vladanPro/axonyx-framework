@@ -62,7 +62,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.49";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.50";
 const AXONYX_UI_VERSION: &str = "0.0.69";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -8758,7 +8758,8 @@ fn build_compiled_production_binary(
     let dist = resolve_output_dir(root, out_dir);
     let dist_relative = dist.strip_prefix(root).unwrap_or(&dist);
     let dist_literal = format!("{:?}", dist_relative.to_string_lossy());
-    let source = compiled_production_source(&dist_literal);
+    let signal_aliases = compiled_action_signal_aliases(root)?;
+    let source = compiled_production_source(&dist_literal, &signal_aliases);
     fs::write(&source_path, source).with_context(|| {
         format!(
             "failed to write compiled production server '{}'",
@@ -8791,13 +8792,40 @@ fn compiled_production_binary_path(root: &Path) -> PathBuf {
     root.join("target").join("release").join(name)
 }
 
-fn compiled_production_source(dist_literal: &str) -> String {
+fn compiled_action_signal_aliases(root: &Path) -> Result<Vec<(String, String, String)>> {
+    let mut aliases = Vec::new();
+    for route in collect_page_route_manifest(root)? {
+        if route.actions.is_none() {
+            continue;
+        }
+        let manifest = collect_route_state_manifest_from_route_item(root, &route)?;
+        aliases.extend(
+            manifest
+                .aliases
+                .into_iter()
+                .map(|(alias, canonical)| (route.route.clone(), alias, canonical)),
+        );
+    }
+    Ok(aliases)
+}
+
+fn compiled_production_source(
+    dist_literal: &str,
+    signal_aliases: &[(String, String, String)],
+) -> String {
+    let signal_match_arms = signal_aliases
+        .iter()
+        .map(|(route, alias, canonical)| {
+            format!("        ({route:?}, {alias:?}) => {canonical:?},\n")
+        })
+        .collect::<String>();
     format!(
         r#"use std::path::{{Component, Path, PathBuf}};
 use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxEnv}};
 use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
+use serde_json::{{json, Value}};
 
 #[path = "../generated/backend.rs"]
 mod backend;
@@ -8818,7 +8846,7 @@ fn handle_request(dist: &Path, request: AxHttpRequest) -> AxHttpResponse {{
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/action") {{
-        return secure(AxHttpResponse::text(501, "compiled actions are not enabled in this preview"));
+        return secure(handle_compiled_action(&request));
     }}
 
     if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
@@ -8845,6 +8873,174 @@ fn handle_request(dist: &Path, request: AxHttpRequest) -> AxHttpResponse {{
         response.body = AxBody::fixed(Vec::new());
     }}
     secure(response)
+}}
+
+fn handle_compiled_action(request: &AxHttpRequest) -> AxHttpResponse {{
+    if !request.method.eq_ignore_ascii_case("POST") {{
+        return AxHttpResponse::text(405, "Method Not Allowed")
+            .with_header("Allow", "POST")
+            .with_no_store();
+    }}
+    if cross_site_action_request(request) {{
+        return AxHttpResponse::text(403, "Forbidden: cross-site Axonyx action request")
+            .with_no_store();
+    }}
+
+    let content_type = request.header_value("Content-Type").unwrap_or("");
+    if !content_type.starts_with("application/x-www-form-urlencoded")
+        && !content_type.starts_with("application/json")
+    {{
+        return AxHttpResponse::text(415, "expected form-urlencoded or JSON action input")
+            .with_no_store();
+    }}
+
+    let Some(name) = action_query_param(&request.target, "name") else {{
+        return AxHttpResponse::text(400, "missing action name").with_no_store();
+    }};
+    if name.is_empty() {{
+        return AxHttpResponse::text(400, "missing action name").with_no_store();
+    }}
+    let route = action_query_param(&request.target, "path")
+        .as_deref()
+        .map(safe_action_route)
+        .unwrap_or_else(|| "/".to_string());
+
+    let dispatched = (|| {{
+        let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
+        backend::dispatch_action(&runtime, &name, request)
+    }})();
+
+    match dispatched {{
+        Ok(Some(mut payload)) => {{
+            if payload.get("redirect").is_none_or(Value::is_null) {{
+                if let Value::Object(fields) = &mut payload {{
+                    fields.insert("redirect".to_string(), Value::String(route.clone()));
+                }}
+            }}
+            normalize_action_patches(&route, &mut payload);
+            let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
+            if wants_action_patch_response(request) || !ok {{
+                let status = if ok {{
+                    200
+                }} else {{
+                    payload.pointer("/error/status").and_then(Value::as_u64)
+                        .and_then(|status| u16::try_from(status).ok()).unwrap_or(422)
+                }};
+                let content_type = if ok {{
+                    "application/ax-patch+json; charset=utf-8"
+                }} else {{
+                    "application/ax-error+json; charset=utf-8"
+                }};
+                match serde_json::to_vec(&payload) {{
+                    Ok(body) => AxHttpResponse::bytes(status, content_type, body).with_no_store(),
+                    Err(error) => {{
+                        eprintln!("Axonyx compiled action serialization error: {{error}}");
+                        AxHttpResponse::text(500, "Internal Server Error").with_no_store()
+                    }}
+                }}
+            }} else {{
+                let redirect = payload.get("redirect").and_then(Value::as_str).unwrap_or(&route);
+                AxHttpResponse::redirect_with_status(303, redirect).with_no_store()
+            }}
+        }}
+        Ok(None) => AxHttpResponse::text(404, "action not found").with_no_store(),
+        Err(error) => {{
+            eprintln!("Axonyx compiled action error: {{error}}");
+            let body = json!({{
+                "ok": false,
+                "redirect": route,
+                "error": {{ "message": "Action failed.", "status": 500, "value": error.public_error_payload() }},
+                "patches": [],
+                "invalidations": [],
+                "refreshes": [],
+            }});
+            match serde_json::to_vec(&body) {{
+                Ok(body) => AxHttpResponse::bytes(500, "application/ax-error+json; charset=utf-8", body).with_no_store(),
+                Err(_) => AxHttpResponse::text(500, "Internal Server Error").with_no_store(),
+            }}
+        }}
+    }}
+}}
+
+fn normalize_action_patches(route: &str, payload: &mut Value) {{
+    let Some(patches) = payload.get_mut("patches").and_then(Value::as_array_mut) else {{ return; }};
+    for patch in patches {{
+        let Some(signal) = patch.get("signal").and_then(Value::as_str).map(str::to_string) else {{ continue; }};
+        let canonical = match (route, signal.as_str()) {{
+{signal_match_arms}            _ => continue,
+        }};
+        if let Value::Object(fields) = patch {{
+            fields.insert("signal".to_string(), Value::String(canonical.to_string()));
+        }}
+    }}
+}}
+
+fn wants_action_patch_response(request: &AxHttpRequest) -> bool {{
+    request.header_value("Accept")
+        .is_some_and(|value| value.contains("application/ax-patch+json"))
+        || form_value(&request.body, "__ax_patch").is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}}
+
+fn action_query_param(target: &str, needle: &str) -> Option<String> {{
+    let query = target.split_once('?')?.1;
+    query.split('&').find_map(|pair| {{
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == needle).then(|| url_decode(value))
+    }})
+}}
+
+fn safe_action_route(value: &str) -> String {{
+    let path = value.split(['?', '#']).next().unwrap_or("/").trim();
+    if !path.starts_with('/') || path.starts_with("//") || path.contains('\\') {{
+        return "/".to_string();
+    }}
+    if path.trim_start_matches('/').split('/').any(|segment| matches!(segment, "." | "..")) {{
+        return "/".to_string();
+    }}
+    if path.is_empty() {{ "/".to_string() }} else {{ path.to_string() }}
+}}
+
+fn form_value(body: &[u8], needle: &str) -> Option<String> {{
+    String::from_utf8_lossy(body).split('&').find_map(|pair| {{
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (url_decode(key) == needle).then(|| url_decode(value))
+    }})
+}}
+
+fn url_decode(value: &str) -> String {{
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {{
+        match bytes[index] {{
+            b'+' => {{ decoded.push(b' '); index += 1; }}
+            b'%' if index + 2 < bytes.len() => {{
+                let pair = &value[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(pair, 16) {{ decoded.push(byte); index += 3; }}
+                else {{ decoded.push(bytes[index]); index += 1; }}
+            }}
+            byte => {{ decoded.push(byte); index += 1; }}
+        }}
+    }}
+    String::from_utf8_lossy(&decoded).into_owned()
+}}
+
+fn cross_site_action_request(request: &AxHttpRequest) -> bool {{
+    if request.header_value("Sec-Fetch-Site").is_some_and(|value| value.eq_ignore_ascii_case("cross-site")) {{
+        return true;
+    }}
+    let Some(origin) = request.header_value("Origin").or_else(|| request.header_value("Referer")) else {{
+        return false;
+    }};
+    let Some(host) = request.header_value("X-Forwarded-Host")
+        .and_then(|value| value.split(',').next()).map(str::trim).filter(|value| !value.is_empty())
+        .or_else(|| request.header_value("Host"))
+    else {{
+        return true;
+    }};
+    let Some((scheme, remainder)) = origin.trim().split_once("://") else {{ return true; }};
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {{ return true; }}
+    !remainder.split('/').next().unwrap_or("").eq_ignore_ascii_case(host.trim())
 }}
 
 fn static_response(dist: &Path, target: &str) -> Option<AxHttpResponse> {{
@@ -18625,12 +18821,28 @@ page Home
 
     #[test]
     fn compiled_production_source_uses_generated_dispatch_and_safe_static_paths() {
-        let source = compiled_production_source("\"dist\"");
+        let source = compiled_production_source(
+            "\"dist\"",
+            &[(
+                "/posts".to_string(),
+                "root:draftStatus:1".to_string(),
+                "page:posts:draftStatus:1".to_string(),
+            )],
+        );
 
         assert!(source.contains("backend::dispatch_api_route"));
+        assert!(source.contains("backend::dispatch_action"));
         assert!(source.contains("serve_compiled_axum"));
         assert!(source.contains("Component::Normal"));
-        assert!(source.contains("compiled actions are not enabled"));
+        assert!(source.contains("application/ax-patch+json"));
+        assert!(source.contains("cross_site_action_request"));
+        assert!(source.contains("safe_action_route"));
+        assert!(source.contains("path.starts_with(\"//\")"));
+        assert!(source.contains("AxHttpResponse::redirect_with_status(303"));
+        assert!(
+            source.contains("(\"/posts\", \"root:draftStatus:1\") => \"page:posts:draftStatus:1\"")
+        );
+        assert!(!source.contains("compiled actions are not enabled"));
         assert!(!source.contains("read_to_string"));
     }
 
