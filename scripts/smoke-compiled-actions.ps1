@@ -112,7 +112,16 @@ action Noop() {
     "-p", "cargo-axonyx", "--bin", "cargo-axonyx", "--",
     "run", "start", "--compiled", "--host", "127.0.0.1", "--port", "$Port"
   )
-  $serverProcess = Start-Process -FilePath "cargo" -ArgumentList $args -WorkingDirectory $appRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+  $processArgs = @{
+    FilePath = "cargo"
+    ArgumentList = $args
+    WorkingDirectory = $appRoot
+    RedirectStandardOutput = $stdout
+    RedirectStandardError = $stderr
+    PassThru = $true
+  }
+  if ($env:OS -eq "Windows_NT") { $processArgs.WindowStyle = "Hidden" }
+  $serverProcess = Start-Process @processArgs
 
   $baseUrl = "http://127.0.0.1:$Port"
   $ready = $false
