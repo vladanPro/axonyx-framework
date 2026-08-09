@@ -37,6 +37,10 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-core-loop.ps1 -Template docs
 
+      - name: Smoke compiled action runtime
+        shell: pwsh
+        run: ./scripts/smoke-compiled-actions.ps1
+
   runtime:
     name: Runtime Tests
     runs-on: ubuntu-latest
