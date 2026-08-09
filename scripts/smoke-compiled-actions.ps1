@@ -19,6 +19,7 @@ $stderr = Join-Path $WorkDir "server.err.log"
 $serverProcess = $null
 $originalLocation = Get-Location
 $originalDbDialect = $env:AX_SECRET_DB_DIALECT
+$originalDbUrl = $env:AX_SECRET_DB_URL
 
 function Invoke-AxRequest {
   param(
@@ -103,6 +104,13 @@ action Noop() {
     (New-Object System.Text.UTF8Encoding($false))
   )
 
+  $dbPath = Join-Path $appRoot "compiled-smoke.db"
+  $python = Get-Command python -ErrorAction SilentlyContinue
+  if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
+  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL)"
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(sys.argv[2]);db.commit();db.close()' $dbPath $schema
+  if ($LASTEXITCODE -ne 0) { throw "failed to seed compiled smoke SQLite database" }
+
   Push-Location $appRoot
   try {
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- check
@@ -126,7 +134,8 @@ action Noop() {
     RedirectStandardError = $stderr
     PassThru = $true
   }
-  $env:AX_SECRET_DB_DIALECT = "memory"
+  $env:AX_SECRET_DB_DIALECT = "sqlite"
+  $env:AX_SECRET_DB_URL = $dbPath
   if ($env:OS -eq "Windows_NT") { $processArgs.WindowStyle = "Hidden" }
   $serverProcess = Start-Process @processArgs
 
@@ -156,10 +165,16 @@ action Noop() {
   if ($payload.invalidations[0].target -ne "/posts" -or $payload.invalidations[0].queryKey[0] -ne "posts") { throw "Compiled invalidation is invalid" }
   if ($payload.refreshes[0].name -ne "posts" -or $payload.refreshes[0].source -ne "loadPosts()") { throw "Compiled data refresh metadata is invalid: $($success.Body)" }
 
+  $createUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=CreatePost"
+  $created = Invoke-AxRequest -Url $createUrl -Body "title=Fresh+compiled+post&excerpt=Rendered+without+reload&status=published&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  $createdPayload = $created.Body | ConvertFrom-Json
+  if (!$createdPayload.ok -or $createdPayload.refreshes[0].name -ne "posts") { throw "Compiled create action did not invalidate posts: $($created.Body)" }
+
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }
   $dataPayload = $data.Body | ConvertFrom-Json
-  if (!$dataPayload.ok -or $dataPayload.binding.name -ne "posts" -or $dataPayload.value.collection -ne "posts") { throw "Compiled loader response is invalid: $($data.Body)" }
+  if (!$dataPayload.ok -or $dataPayload.binding.name -ne "posts" -or $dataPayload.value[0].title -ne "Fresh compiled post") { throw "Compiled loader response is invalid: $($data.Body)" }
+  if ($dataPayload.html -notmatch 'data-ax-root="page"' -or $dataPayload.html -notmatch "Fresh compiled post") { throw "Compiled page HTML was not regenerated: $($data.Body)" }
   Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2F%2Fevil.example&name=posts" -Method "GET" -ExpectedStatus 400 | Out-Null
 
   $invalid = Invoke-AxRequest -Url $actionUrl -Body "theme=&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
@@ -186,6 +201,11 @@ action Noop() {
     Remove-Item Env:AX_SECRET_DB_DIALECT -ErrorAction SilentlyContinue
   } else {
     $env:AX_SECRET_DB_DIALECT = $originalDbDialect
+  }
+  if ($null -eq $originalDbUrl) {
+    Remove-Item Env:AX_SECRET_DB_URL -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_DB_URL = $originalDbUrl
   }
   if ($ownsWorkDir -and (Test-Path -LiteralPath $WorkDir)) {
     $resolved = [System.IO.Path]::GetFullPath($WorkDir)
