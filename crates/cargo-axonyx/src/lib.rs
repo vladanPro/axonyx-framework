@@ -63,7 +63,7 @@ const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/referen
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.49";
-const AXONYX_UI_VERSION: &str = "0.0.58";
+const AXONYX_UI_VERSION: &str = "0.0.69";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -12135,7 +12135,9 @@ fn handle_connection(
     let started = Instant::now();
     let response = handle_http_request(state, mode, request.clone())?;
     let response = apply_server_response_policy(state, &request, response, suppress_body)?;
-    log_request_if_enabled(state, &request, &response, started.elapsed());
+    let duration = started.elapsed();
+    let response = with_server_timing(response, duration);
+    log_request_if_enabled(state, &request, &response, duration);
     write_ax_response(&mut stream, &response, suppress_body)?;
     Ok(())
 }
@@ -12366,7 +12368,9 @@ async fn axum_tokio_handler(
                     Ok(response) => response,
                     Err(error) => internal_server_error_response(state.mode, "policy", &error),
                 };
-            log_request_if_enabled(&state.dev, &request, &response, started.elapsed());
+            let duration = started.elapsed();
+            let response = with_server_timing(response, duration);
+            log_request_if_enabled(&state.dev, &request, &response, duration);
             let mut response = axonyx_response_to_axum(response);
             if suppress_body {
                 *response.body_mut() = axum::body::Body::empty();
@@ -12680,6 +12684,15 @@ fn apply_server_response_policy(
     }
 
     Ok(response)
+}
+
+fn with_server_timing(response: AxHttpResponse, duration: Duration) -> AxHttpResponse {
+    let metric = format!("axonyx;dur={:.3}", duration.as_secs_f64() * 1000.0);
+    let value = response
+        .header_value("Server-Timing")
+        .map(|existing| format!("{existing}, {metric}"))
+        .unwrap_or(metric);
+    response.with_header("Server-Timing", value)
 }
 
 fn apply_security_headers(mut response: AxHttpResponse) -> AxHttpResponse {
@@ -18988,7 +19001,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.58\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.69\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -19674,7 +19687,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
-        assert!(updated.contains("version = \"0.0.58\""));
+        assert!(updated.contains("version = \"0.0.69\""));
 
         fs::write(
             &cargo_toml,
@@ -19685,7 +19698,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-ui = "0.0.59"
+axonyx-ui = "0.0.70"
 "#,
         )
         .expect("newer manifest should write");
@@ -19695,7 +19708,7 @@ axonyx-ui = "0.0.59"
                 .expect("newer UI dependency should remain unchanged")
         );
         let unchanged = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
-        assert!(unchanged.contains("axonyx-ui = \"0.0.59\""));
+        assert!(unchanged.contains("axonyx-ui = \"0.0.70\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -20434,6 +20447,18 @@ axonyx-runtime = "0.1.0"
         assert!(line.contains("[axonyx] GET /docs 200 14ms"));
         assert!(line.contains("text/html; charset=utf-8"));
         assert!(line.contains("11 bytes"));
+    }
+
+    #[test]
+    fn server_timing_reports_axonyx_duration_and_preserves_app_metrics() {
+        let response = AxHttpResponse::text(200, "ok").with_header("Server-Timing", "db;dur=1.250");
+
+        let response = with_server_timing(response, Duration::from_micros(3_450));
+
+        assert_eq!(
+            response.header_value("Server-Timing"),
+            Some("db;dur=1.250, axonyx;dur=3.450")
+        );
     }
 
     #[test]
