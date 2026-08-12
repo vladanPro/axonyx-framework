@@ -347,6 +347,10 @@ declared return contract. For example, `data posts = loadPosts()` inherits
 `List<Post>` from `app/posts/loader.ax` when `loadPosts` returns `Post[]`.
 Explicit page types are checked against that loader contract, and mismatches
 fail `cargo ax check` instead of silently changing the public manifest.
+When no route-local loader matches, a uniquely named shared query under
+`app/**` can provide the same type contract. Route-local loaders take priority;
+ambiguous shared query names fail diagnostics rather than depending on file
+system traversal order.
 
 UI package tooling uses the same structured prop shape. With `axonyx-ui`
 installed, `cargo ax registry --format json` parses each registry component and
