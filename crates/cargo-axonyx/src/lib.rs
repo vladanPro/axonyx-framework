@@ -1016,6 +1016,19 @@ struct CompiledPageRenderer {
     import_sources: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SharedQueryReturn {
+    file: String,
+    ty: Option<AxType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueryReturnResolution {
+    Known { ty: AxType, source: &'static str },
+    Ambiguous { files: Vec<String> },
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ScopeReport {
     files: Vec<ScopeFileReport>,
@@ -3351,6 +3364,7 @@ fn melt_layer_reports(root: &Path, summary: &MeltSummary) -> Vec<MeltLayerReport
 
 fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport> {
     let mut data_routes = Vec::new();
+    let shared_returns = shared_query_return_types(root)?;
 
     for route in routes.routes.iter().filter(|route| route.kind == "page") {
         let file_path = root.join(&route.file);
@@ -3365,7 +3379,7 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
             Err(_) => continue,
         };
         let file = parse_ax_v2(&source).ok();
-        let loader_returns = route_local_loader_return_types(&file_path).unwrap_or_default();
+        let loader_returns = route_local_query_return_types(&file_path).unwrap_or_default();
 
         let bindings = document
             .page
@@ -3376,6 +3390,7 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
                     statement,
                     file.as_ref(),
                     &loader_returns,
+                    &shared_returns,
                 )
             })
             .collect::<Vec<_>>();
@@ -4221,13 +4236,15 @@ fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBin
         statement,
         None,
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
     )
 }
 
 fn data_binding_report_from_statement_with_types(
     statement: &AxStatement,
     file: Option<&axonyx_core::ax_ast_v2_prelude::AxFileV2>,
-    loader_returns: &std::collections::BTreeMap<String, AxType>,
+    loader_returns: &std::collections::BTreeMap<String, Option<AxType>>,
+    shared_returns: &std::collections::BTreeMap<String, Vec<SharedQueryReturn>>,
 ) -> Option<DataBindingReport> {
     let AxStatement::Data(binding) = statement else {
         return None;
@@ -4247,13 +4264,15 @@ fn data_binding_report_from_statement_with_types(
         .and_then(|file| file.lets.iter().find(|item| item.name == binding.name))
         .and_then(|item| item.ty.as_deref())
         .and_then(|ty| AxType::parse_annotation(ty).ok());
-    let loader_type = route_local_loader_return_type(&binding.value, loader_returns).cloned();
+    let loader_type = resolve_query_return_type(&binding.value, loader_returns, shared_returns);
     let (ty, type_source) = if let Some(ty) = declared_type {
         (Some(ty.display_name()), "declared")
-    } else if let Some(ty) = loader_type {
-        (Some(ty.display_name()), "loader")
     } else {
-        (None, "unknown")
+        match loader_type {
+            QueryReturnResolution::Known { ty, source } => (Some(ty.display_name()), source),
+            QueryReturnResolution::Ambiguous { .. } => (None, "ambiguous"),
+            QueryReturnResolution::Unknown => (None, "unknown"),
+        }
     };
 
     Some(DataBindingReport {
@@ -4265,9 +4284,9 @@ fn data_binding_report_from_statement_with_types(
     })
 }
 
-fn route_local_loader_return_types(
+fn route_local_query_return_types(
     page_path: &Path,
-) -> Result<std::collections::BTreeMap<String, AxType>> {
+) -> Result<std::collections::BTreeMap<String, Option<AxType>>> {
     if page_path.file_name().and_then(|name| name.to_str()) != Some("page.ax") {
         return Ok(std::collections::BTreeMap::new());
     }
@@ -4289,10 +4308,12 @@ fn route_local_loader_return_types(
         let AxBackendBlock::Loader(loader) = block else {
             continue;
         };
-        let Some(annotation) = loader.returns else {
-            continue;
-        };
-        returns.insert(loader.name, parse_loader_contract_type(&annotation)?);
+        let ty = loader
+            .returns
+            .as_deref()
+            .map(parse_loader_contract_type)
+            .transpose()?;
+        returns.insert(loader.name, ty);
     }
     Ok(returns)
 }
@@ -4305,15 +4326,81 @@ fn parse_loader_contract_type(annotation: &str) -> Result<AxType> {
     Ok(AxType::parse_annotation(annotation)?)
 }
 
-fn route_local_loader_return_type<'a>(
-    expr: &AxExpr,
-    loader_returns: &'a std::collections::BTreeMap<String, AxType>,
-) -> Option<&'a AxType> {
-    let (path, _) = query_call_from_binding_expr(expr)?;
-    if path.len() != 1 {
-        return None;
+fn shared_query_return_types(
+    root: &Path,
+) -> Result<std::collections::BTreeMap<String, Vec<SharedQueryReturn>>> {
+    let app_root = root.join("app");
+    let mut sources = Vec::new();
+    collect_backend_like_sources_in_dir(&app_root, &app_root, &mut sources)?;
+    let mut returns = std::collections::BTreeMap::<String, Vec<SharedQueryReturn>>::new();
+
+    for (file, source) in sources {
+        if file == "loader.ax" || file.ends_with("/loader.ax") {
+            continue;
+        }
+        let Ok(document) = parse_backend_ax(&source) else {
+            continue;
+        };
+        for block in document.blocks {
+            let AxBackendBlock::Loader(loader) = block else {
+                continue;
+            };
+            let ty = loader
+                .returns
+                .as_deref()
+                .and_then(|annotation| parse_loader_contract_type(annotation).ok());
+            returns
+                .entry(loader.name)
+                .or_default()
+                .push(SharedQueryReturn {
+                    file: format!("app/{file}"),
+                    ty,
+                });
+        }
     }
-    loader_returns.get(&path[0])
+
+    Ok(returns)
+}
+
+fn resolve_query_return_type(
+    expr: &AxExpr,
+    local_returns: &std::collections::BTreeMap<String, Option<AxType>>,
+    shared_returns: &std::collections::BTreeMap<String, Vec<SharedQueryReturn>>,
+) -> QueryReturnResolution {
+    let Some((path, _)) = query_call_from_binding_expr(expr) else {
+        return QueryReturnResolution::Unknown;
+    };
+    if path.len() != 1 {
+        return QueryReturnResolution::Unknown;
+    }
+    let name = &path[0];
+
+    if let Some(ty) = local_returns.get(name) {
+        return match ty {
+            Some(ty) => QueryReturnResolution::Known {
+                ty: ty.clone(),
+                source: "loader",
+            },
+            None => QueryReturnResolution::Unknown,
+        };
+    }
+
+    match shared_returns.get(name).map(Vec::as_slice) {
+        Some([candidate]) => match &candidate.ty {
+            Some(ty) => QueryReturnResolution::Known {
+                ty: ty.clone(),
+                source: "shared-query",
+            },
+            None => QueryReturnResolution::Unknown,
+        },
+        Some(candidates) if !candidates.is_empty() => QueryReturnResolution::Ambiguous {
+            files: candidates
+                .iter()
+                .map(|candidate| candidate.file.clone())
+                .collect(),
+        },
+        _ => QueryReturnResolution::Unknown,
+    }
 }
 
 fn query_call_from_binding_expr(expr: &AxExpr) -> Option<(&[String], &[AxExpr])> {
@@ -5710,9 +5797,14 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     collect_ax_files(&root.join("routes"), &mut files)?;
     collect_ax_files(&root.join("jobs"), &mut files)?;
 
+    let shared_returns = shared_query_return_types(root)?;
     let mut diagnostics = Vec::new();
     for file in files {
-        diagnostics.extend(check_ax_file_with_root(&file, Some(root))?);
+        diagnostics.extend(check_ax_file_with_context(
+            &file,
+            Some(root),
+            Some(&shared_returns),
+        )?);
     }
     diagnostics.extend(check_axonyx_config(root)?);
     diagnostics.extend(check_route_manifest(root)?);
@@ -6289,15 +6381,45 @@ fn check_ax_file(path: &Path) -> Result<Vec<CheckDiagnostic>> {
 }
 
 fn check_ax_file_with_root(path: &Path, root: Option<&Path>) -> Result<Vec<CheckDiagnostic>> {
-    let source = fs::read_to_string(path)
-        .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
-    Ok(check_ax_source_with_root(path, &source, root))
+    let shared_returns = root
+        .map(shared_query_return_types)
+        .transpose()?
+        .unwrap_or_default();
+    check_ax_file_with_context(path, root, Some(&shared_returns))
 }
 
+fn check_ax_file_with_context(
+    path: &Path,
+    root: Option<&Path>,
+    shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
+) -> Result<Vec<CheckDiagnostic>> {
+    let source = fs::read_to_string(path)
+        .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
+    Ok(check_ax_source_with_context(
+        path,
+        &source,
+        root,
+        shared_returns,
+    ))
+}
+
+#[cfg(test)]
 fn check_ax_source_with_root(
     path: &Path,
     source: &str,
     root: Option<&Path>,
+) -> Vec<CheckDiagnostic> {
+    let shared_returns = root
+        .and_then(|root| shared_query_return_types(root).ok())
+        .unwrap_or_default();
+    check_ax_source_with_context(path, source, root, Some(&shared_returns))
+}
+
+fn check_ax_source_with_context(
+    path: &Path,
+    source: &str,
+    root: Option<&Path>,
+    shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
 ) -> Vec<CheckDiagnostic> {
     if looks_like_backend_ax(source) {
         return match parse_backend_ax(source) {
@@ -6342,7 +6464,13 @@ fn check_ax_source_with_root(
     };
 
     let mut diagnostics = Vec::new();
-    diagnostics.extend(check_type_annotations(path, source, root, &document));
+    diagnostics.extend(check_type_annotations(
+        path,
+        source,
+        root,
+        &document,
+        shared_returns,
+    ));
     if let Some(root) = root {
         diagnostics.extend(check_imports(root, path, source, &document.imports));
     }
@@ -7704,6 +7832,7 @@ fn check_type_annotations(
     source: &str,
     root: Option<&Path>,
     document: &axonyx_core::ax_ast_prelude::AxDocument,
+    shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
 ) -> Vec<CheckDiagnostic> {
     let Ok(file) = parse_ax_v2(source) else {
         return Vec::new();
@@ -7738,19 +7867,41 @@ fn check_type_annotations(
         }
     }
     let loader_returns = root
-        .and_then(|_| route_local_loader_return_types(path).ok())
+        .and_then(|_| route_local_query_return_types(path).ok())
         .unwrap_or_default();
+    let empty_shared_returns = std::collections::BTreeMap::new();
+    let shared_returns = shared_returns.unwrap_or(&empty_shared_returns);
     let mut diagnostics = Vec::new();
     for statement in &document.page.body {
         let AxStatement::Data(binding) = statement else {
             continue;
         };
-        let Some(inferred) = route_local_loader_return_type(&binding.value, &loader_returns) else {
-            continue;
+        let inferred = match resolve_query_return_type(
+            &binding.value,
+            &loader_returns,
+            shared_returns,
+        ) {
+            QueryReturnResolution::Known { ty, .. } => ty,
+            QueryReturnResolution::Ambiguous { files } => {
+                diagnostics.push(CheckDiagnostic {
+                    file: display_path(path),
+                    line: line_for_source_pattern(source, &format!("data {}", binding.name)),
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-query-ambiguous",
+                    message: format!(
+                        "data binding `{}` calls an ambiguous shared query; matching definitions: {}. Move the query into this route's loader.ax or give shared queries unique names",
+                        binding.name,
+                        files.join(", ")
+                    ),
+                });
+                continue;
+            }
+            QueryReturnResolution::Unknown => continue,
         };
 
         if let Some(declared) = context.binding(&binding.name) {
-            if declared != inferred {
+            if declared != &inferred {
                 diagnostics.push(CheckDiagnostic {
                     file: display_path(path),
                     line: line_for_source_pattern(source, &format!("data {}", binding.name)),
@@ -7758,7 +7909,7 @@ fn check_type_annotations(
                     severity: "error",
                     code: "axonyx-loader-return-type",
                     message: format!(
-                        "data binding `{}` declares `{}` but route-local loader returns `{}`",
+                        "data binding `{}` declares `{}` but its resolved query contract returns `{}`",
                         binding.name,
                         declared.display_name(),
                         inferred.display_name()
@@ -7766,7 +7917,7 @@ fn check_type_annotations(
                 });
             }
         } else {
-            context.bind(binding.name.clone(), inferred.clone());
+            context.bind(binding.name.clone(), inferred);
         }
     }
     if context.records.is_empty() && context.bindings.is_empty() {
@@ -15357,7 +15508,8 @@ fn render_route_html_with_database_runtime(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let loader_sources = collect_app_backend_like_source_strings(&state.root)?;
+    let loader_sources =
+        collect_route_loader_source_strings(&state.root, route.loader_path.as_deref())?;
     let loader_refs = loader_sources
         .iter()
         .map(String::as_str)
@@ -15533,11 +15685,40 @@ fn apply_package_use_assets(
     ensure_head_script(&html, &script_href)
 }
 
-fn collect_app_backend_like_source_strings(root: &Path) -> Result<Vec<String>> {
+fn collect_route_loader_source_strings(
+    root: &Path,
+    route_loader_path: Option<&Path>,
+) -> Result<Vec<String>> {
     let app_root = root.join("app");
     let mut sources = Vec::new();
     collect_backend_like_sources_in_dir(&app_root, &app_root, &mut sources)?;
-    Ok(sources.into_iter().map(|(_, source)| source).collect())
+
+    let mut route_loader_source = None;
+    let mut shared = Vec::new();
+    for (name, source) in sources {
+        let is_route_loader = name == "loader.ax" || name.ends_with("/loader.ax");
+        if !is_route_loader {
+            shared.push(source);
+            continue;
+        }
+
+        let source_path = app_root.join(&name);
+        if route_loader_path.is_some_and(|path| paths_refer_to_same_file(path, &source_path)) {
+            route_loader_source = Some(source);
+        }
+    }
+
+    if let Some(source) = route_loader_source {
+        shared.push(source);
+    }
+    Ok(shared)
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 fn collect_route_action_source_strings(root: &Path, actions_path: &Path) -> Result<Vec<String>> {
@@ -23198,6 +23379,45 @@ page Posts() {
     }
 
     #[test]
+    fn render_route_html_prefers_active_route_loader_over_shared_and_sibling_loaders() {
+        let root = make_temp_dir("active-route-loader-priority");
+        fs::create_dir_all(root.join("app/posts")).expect("posts app dir should exist");
+        fs::create_dir_all(root.join("app/admin")).expect("admin app dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared app dir should exist");
+        fs::write(
+            root.join("app/shared/queries.ax"),
+            "query loadContent() -> Post[]\n  data posts = db.posts.all()\n    where status = \"draft\"\n  return posts\n",
+        )
+        .expect("shared query should write");
+        fs::write(
+            root.join("app/admin/loader.ax"),
+            "query loadContent() -> Post[]\n  data posts = db.posts.all()\n    where status = \"draft\"\n  return posts\n",
+        )
+        .expect("sibling loader should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            "query loadContent() -> Post[]\n  data posts = db.posts.all()\n    where status = \"published\"\n  return posts\n",
+        )
+        .expect("active loader should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            "page Posts\n  data posts = loadContent()\n  each post in posts\n    Copy -> post.title\n",
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/posts")
+            .expect("route resolution should work")
+            .expect("route should exist");
+        let state = test_dev_state(&root);
+        let html = render_route_html(&state, &route).expect("route should render");
+
+        assert!(html.contains("Hello Axonyx"));
+        assert!(!html.contains("Draft Preview"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn render_route_html_resolves_shared_query_domain_helpers() {
         let root = make_temp_dir("shared-query-domain-render");
         fs::create_dir_all(root.join("app/posts")).expect("posts app dir should exist");
@@ -24283,11 +24503,11 @@ return ASX {
         )
         .expect("page should write");
 
-        let loader_returns = route_local_loader_return_types(&root.join("app/posts/page.ax"))
+        let loader_returns = route_local_query_return_types(&root.join("app/posts/page.ax"))
             .expect("loader return contracts should collect");
         assert_eq!(
             loader_returns.get("loadPosts"),
-            Some(&AxType::list(AxType::record("Post")))
+            Some(&Some(AxType::list(AxType::record("Post"))))
         );
 
         let diagnostics = check_app_sources(&root).expect("check should run");
@@ -24385,6 +24605,161 @@ return ASX {
         assert_eq!(diagnostics[0].code, "axonyx-loader-return-type");
         assert!(diagnostics[0].message.contains("List<User>"));
         assert!(diagnostics[0].message.contains("List<Post>"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_infers_unique_shared_query_return_type() {
+        let root = make_temp_dir("shared-query-return-type");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/shared/queries.ax"),
+            r#"
+export type Post {
+  title: String
+}
+
+export query loadPosts() -> Post[] {
+  return posts
+}
+"#,
+        )
+        .expect("shared query should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts() {
+data posts = loadPosts()
+
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.title} />
+  </Each>
+}
+}
+"#,
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        let report = collect_contract_report(&root).expect("contract report should collect");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert_eq!(
+            report.data.routes[0].bindings[0].ty.as_deref(),
+            Some("List<Post>")
+        );
+        assert_eq!(
+            report.data.routes[0].bindings[0].type_source,
+            "shared-query"
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_prefers_route_local_loader_over_shared_query() {
+        let root = make_temp_dir("route-loader-priority");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/shared/queries.ax"),
+            r#"
+export type User {
+  name: String
+}
+
+export query loadPosts() -> User[] {
+  return users
+}
+"#,
+        )
+        .expect("shared query should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+export type Post {
+  title: String
+}
+
+query loadPosts() -> Post[] {
+  return posts
+}
+"#,
+        )
+        .expect("local loader should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts() {
+data posts = loadPosts()
+
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.title} />
+  </Each>
+}
+}
+"#,
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        let report = collect_contract_report(&root).expect("contract report should collect");
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert_eq!(
+            report.data.routes[0].bindings[0].ty.as_deref(),
+            Some("List<Post>")
+        );
+        assert_eq!(report.data.routes[0].bindings[0].type_source, "loader");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_ambiguous_shared_query_return_type() {
+        let root = make_temp_dir("ambiguous-shared-query-return");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::create_dir_all(root.join("app/shared")).expect("shared dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/shared/posts.ax"),
+            "export type Post {\n  title: String\n}\n\nexport query loadContent() -> Post[] {\n  return posts\n}\n",
+        )
+        .expect("post query should write");
+        fs::write(
+            root.join("app/shared/articles.ax"),
+            "export query loadContent() {\n  return articles\n}\n",
+        )
+        .expect("article query should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts() {
+data content = loadContent()
+
+return ASX {
+  <Copy>Content</Copy>
+}
+}
+"#,
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, "axonyx-query-ambiguous");
+        assert!(diagnostics[0].message.contains("app/shared/articles.ax"));
+        assert!(diagnostics[0].message.contains("app/shared/posts.ax"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
