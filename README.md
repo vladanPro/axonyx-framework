@@ -342,8 +342,11 @@ cargo ax contracts --format json --out public/axonyx-contracts.json
 
 Every production build also emits the same schema at
 `dist/_ax/contracts/manifest.json`. Missing type annotations remain visible as
-unknown/empty metadata; the manifest does not pretend that untyped values were
-statically proven.
+unknown/empty metadata unless a direct route-local loader call provides a
+declared return contract. For example, `data posts = loadPosts()` inherits
+`List<Post>` from `app/posts/loader.ax` when `loadPosts` returns `Post[]`.
+Explicit page types are checked against that loader contract, and mismatches
+fail `cargo ax check` instead of silently changing the public manifest.
 
 UI package tooling uses the same structured prop shape. With `axonyx-ui`
 installed, `cargo ax registry --format json` parses each registry component and
