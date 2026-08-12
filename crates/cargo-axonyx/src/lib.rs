@@ -995,6 +995,8 @@ struct DataBindingReport {
     name: String,
     source: String,
     query_key: Vec<String>,
+    ty: Option<String>,
+    type_source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3362,12 +3364,20 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
             Ok(document) => document,
             Err(_) => continue,
         };
+        let file = parse_ax_v2(&source).ok();
+        let loader_returns = route_local_loader_return_types(&file_path).unwrap_or_default();
 
         let bindings = document
             .page
             .body
             .iter()
-            .filter_map(data_binding_report_from_statement)
+            .filter_map(|statement| {
+                data_binding_report_from_statement_with_types(
+                    statement,
+                    file.as_ref(),
+                    &loader_returns,
+                )
+            })
             .collect::<Vec<_>>();
 
         if !bindings.is_empty() {
@@ -4207,6 +4217,18 @@ fn scope_render_name(call: &AxExpr) -> String {
 }
 
 fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBindingReport> {
+    data_binding_report_from_statement_with_types(
+        statement,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+fn data_binding_report_from_statement_with_types(
+    statement: &AxStatement,
+    file: Option<&axonyx_core::ax_ast_v2_prelude::AxFileV2>,
+    loader_returns: &std::collections::BTreeMap<String, AxType>,
+) -> Option<DataBindingReport> {
     let AxStatement::Data(binding) = statement else {
         return None;
     };
@@ -4221,12 +4243,77 @@ fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBin
 
     let mut query_key = vec![binding.name.clone()];
     query_key.extend(args.iter().map(format_ax_expr));
+    let declared_type = file
+        .and_then(|file| file.lets.iter().find(|item| item.name == binding.name))
+        .and_then(|item| item.ty.as_deref())
+        .and_then(|ty| AxType::parse_annotation(ty).ok());
+    let loader_type = route_local_loader_return_type(&binding.value, loader_returns).cloned();
+    let (ty, type_source) = if let Some(ty) = declared_type {
+        (Some(ty.display_name()), "declared")
+    } else if let Some(ty) = loader_type {
+        (Some(ty.display_name()), "loader")
+    } else {
+        (None, "unknown")
+    };
 
     Some(DataBindingReport {
         name: binding.name.clone(),
         source: format_ax_expr(&binding.value),
         query_key,
+        ty,
+        type_source: type_source.to_string(),
     })
+}
+
+fn route_local_loader_return_types(
+    page_path: &Path,
+) -> Result<std::collections::BTreeMap<String, AxType>> {
+    if page_path.file_name().and_then(|name| name.to_str()) != Some("page.ax") {
+        return Ok(std::collections::BTreeMap::new());
+    }
+
+    let Some(parent) = page_path.parent() else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let loader_path = parent.join("loader.ax");
+    if !loader_path.exists() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+
+    let source = fs::read_to_string(&loader_path)
+        .with_context(|| format!("failed to read loader source '{}'", loader_path.display()))?;
+    let document = parse_backend_ax(&source)
+        .with_context(|| format!("failed to parse loader source '{}'", loader_path.display()))?;
+    let mut returns = std::collections::BTreeMap::new();
+    for block in document.blocks {
+        let AxBackendBlock::Loader(loader) = block else {
+            continue;
+        };
+        let Some(annotation) = loader.returns else {
+            continue;
+        };
+        returns.insert(loader.name, parse_loader_contract_type(&annotation)?);
+    }
+    Ok(returns)
+}
+
+fn parse_loader_contract_type(annotation: &str) -> Result<AxType> {
+    let annotation = annotation.trim();
+    if let Some(item) = annotation.strip_suffix("[]") {
+        return Ok(AxType::list(parse_loader_contract_type(item)?));
+    }
+    Ok(AxType::parse_annotation(annotation)?)
+}
+
+fn route_local_loader_return_type<'a>(
+    expr: &AxExpr,
+    loader_returns: &'a std::collections::BTreeMap<String, AxType>,
+) -> Option<&'a AxType> {
+    let (path, _) = query_call_from_binding_expr(expr)?;
+    if path.len() != 1 {
+        return None;
+    }
+    loader_returns.get(&path[0])
 }
 
 fn query_call_from_binding_expr(expr: &AxExpr) -> Option<(&[String], &[AxExpr])> {
@@ -7621,9 +7708,6 @@ fn check_type_annotations(
     let Ok(file) = parse_ax_v2(source) else {
         return Vec::new();
     };
-    if file.types.is_empty() && file.lets.iter().all(|binding| binding.ty.is_none()) {
-        return Vec::new();
-    }
 
     let mut context = match AxDataContext::from_v2_let_types(&file) {
         Ok(context) => context,
@@ -7653,27 +7737,62 @@ fn check_type_annotations(
             }
         }
     }
+    let loader_returns = root
+        .and_then(|_| route_local_loader_return_types(path).ok())
+        .unwrap_or_default();
+    let mut diagnostics = Vec::new();
+    for statement in &document.page.body {
+        let AxStatement::Data(binding) = statement else {
+            continue;
+        };
+        let Some(inferred) = route_local_loader_return_type(&binding.value, &loader_returns) else {
+            continue;
+        };
+
+        if let Some(declared) = context.binding(&binding.name) {
+            if declared != inferred {
+                diagnostics.push(CheckDiagnostic {
+                    file: display_path(path),
+                    line: line_for_source_pattern(source, &format!("data {}", binding.name)),
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-loader-return-type",
+                    message: format!(
+                        "data binding `{}` declares `{}` but route-local loader returns `{}`",
+                        binding.name,
+                        declared.display_name(),
+                        inferred.display_name()
+                    ),
+                });
+            }
+        } else {
+            context.bind(binding.name.clone(), inferred.clone());
+        }
+    }
     if context.records.is_empty() && context.bindings.is_empty() {
-        return Vec::new();
+        return diagnostics;
     }
 
-    check_document_types(document, &context)
-        .errors
-        .into_iter()
-        .map(|error| CheckDiagnostic {
-            file: display_path(path),
-            line: type_error_line(source, error.expression.as_deref())
-                .or_else(|| typed_let_line(source))
-                .unwrap_or(1),
-            column: 1,
-            severity: "error",
-            code: "axonyx-type",
-            message: match error.expression {
-                Some(expression) => format!("`{expression}`: {}", error.message),
-                None => format!("{}: {}", error.location, error.message),
-            },
-        })
-        .collect()
+    diagnostics.extend(
+        check_document_types(document, &context)
+            .errors
+            .into_iter()
+            .map(|error| CheckDiagnostic {
+                file: display_path(path),
+                line: type_error_line(source, error.expression.as_deref())
+                    .or_else(|| typed_let_line(source))
+                    .unwrap_or(1),
+                column: 1,
+                severity: "error",
+                code: "axonyx-type",
+                message: match error.expression {
+                    Some(expression) => format!("`{expression}`: {}", error.message),
+                    None => format!("{}: {}", error.location, error.message),
+                },
+            })
+            .collect::<Vec<_>>(),
+    );
+    diagnostics
 }
 
 fn add_project_type_schemas_to_context(context: &mut AxDataContext, root: &Path) -> Result<()> {
@@ -17364,7 +17483,7 @@ component ThemeSwitcher(label: String = "Theme") {
 import { HeroCard } from "@/components/HeroCard.ax"
 
 page Home() {
-  data posts: List<Post> = loadPosts("published")
+  data posts = loadPosts("published")
 
   return ASX {
     <HeroCard title="Contracts" />
@@ -17419,6 +17538,11 @@ action publishPost(id: String) -> Post {
         assert_eq!(report.summary.data_bindings, 1);
         assert_eq!(report.summary.loaders, 1);
         assert_eq!(report.summary.actions, 1);
+        assert_eq!(
+            report.data.routes[0].bindings[0].ty.as_deref(),
+            Some("List<Post>")
+        );
+        assert_eq!(report.data.routes[0].bindings[0].type_source, "loader");
         assert_eq!(report.loaders[0].name, "loadPosts");
         assert_eq!(report.loaders[0].returns.as_deref(), Some("Post[]"));
         assert_eq!(report.loaders[0].inputs[0].name, "status");
@@ -24122,7 +24246,7 @@ return ASX {
     }
 
     #[test]
-    fn check_app_sources_uses_backend_type_contracts_for_typed_each() {
+    fn check_app_sources_infers_route_local_loader_return_type() {
         let root = make_temp_dir("backend-type-contract-typed-each");
         fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
@@ -24145,7 +24269,7 @@ query loadPosts() -> Post[] {
             root.join("app/posts/page.ax"),
             r#"
 page Posts() {
-data posts: List<Post> = loadPosts()
+data posts = loadPosts()
 
 return ASX {
   <Each items={posts} as="post">
@@ -24159,9 +24283,108 @@ return ASX {
         )
         .expect("page should write");
 
+        let loader_returns = route_local_loader_return_types(&root.join("app/posts/page.ax"))
+            .expect("loader return contracts should collect");
+        assert_eq!(
+            loader_returns.get("loadPosts"),
+            Some(&AxType::list(AxType::record("Post")))
+        );
+
         let diagnostics = check_app_sources(&root).expect("check should run");
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_unknown_member_from_inferred_loader_type() {
+        let root = make_temp_dir("inferred-loader-type-unknown-member");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+export type Post {
+  title: String
+}
+
+query loadPosts() -> Post[] {
+  return posts
+}
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts() {
+data posts = loadPosts()
+
+return ASX {
+  <Each items={posts} as="post">
+    <Card title={post.summary} />
+  </Each>
+}
+}
+"#,
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert!(diagnostics[0].message.contains("post.summary"));
+        assert!(diagnostics[0].message.contains("unknown field"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_declared_loader_return_type_mismatch() {
+        let root = make_temp_dir("declared-loader-return-mismatch");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            r#"
+export type Post {
+  title: String
+}
+
+query loadPosts() -> Post[] {
+  return posts
+}
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            r#"
+page Posts() {
+type User {
+  name: String
+}
+
+data posts: List<User> = loadPosts()
+
+return ASX {
+  <Copy>Posts</Copy>
+}
+}
+"#,
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, "axonyx-loader-return-type");
+        assert!(diagnostics[0].message.contains("List<User>"));
+        assert!(diagnostics[0].message.contains("List<Post>"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
