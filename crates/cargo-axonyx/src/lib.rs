@@ -62,7 +62,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.51";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.52";
 const AXONYX_UI_VERSION: &str = "0.0.69";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -988,6 +988,7 @@ struct CompiledDataBinding {
     route_pattern: String,
     name: String,
     loader: String,
+    args: Vec<AxExpr>,
     source: String,
     query_key: Vec<String>,
 }
@@ -8849,7 +8850,10 @@ fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
             let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
                 continue;
             };
-            if !args.is_empty() {
+            if args
+                .iter()
+                .any(|arg| compiled_loader_arg_source(arg).is_none())
+            {
                 continue;
             }
             let Some(loader) = path.last().filter(|name| name.starts_with("load")) else {
@@ -8862,6 +8866,7 @@ fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
                 route_pattern: route.route.clone(),
                 name: binding.name.clone(),
                 loader: loader.clone(),
+                args: args.to_vec(),
                 source: format_ax_expr(&binding.value),
                 query_key,
             });
@@ -8927,6 +8932,27 @@ fn collect_compiled_import_sources(
     Ok(())
 }
 
+fn compiled_loader_arg_source(expr: &AxExpr) -> Option<String> {
+    match expr {
+        AxExpr::String(value) => Some(format!("Value::String({value:?}.to_string())")),
+        AxExpr::Number(value) => Some(format!("Value::from({value})")),
+        AxExpr::Bool(value) => Some(format!("Value::Bool({value})")),
+        AxExpr::Member { object, property }
+            if matches!(object.as_ref(), AxExpr::Identifier(name) if name == "params")
+                || matches!(
+                    object.as_ref(),
+                    AxExpr::Member { object, property } if property == "params"
+                        && matches!(object.as_ref(), AxExpr::Identifier(name) if name == "request")
+                ) =>
+        {
+            Some(format!(
+                "compiled_route_param(binding.pattern, path, {property:?})?"
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn compiled_production_source(
     dist_literal: &str,
     signal_aliases: &[(String, String, String)],
@@ -8974,6 +9000,23 @@ fn compiled_production_source(
             )
         })
         .collect::<String>();
+    let binding_arg_arms = data_bindings
+        .iter()
+        .map(|binding| {
+            let args = binding
+                .args
+                .iter()
+                .map(compiled_loader_arg_source)
+                .collect::<Option<Vec<_>>>()
+                .expect("compiled bindings only contain supported argument expressions")
+                .join(", ");
+            format!(
+                "        ({pattern:?}, {name:?}) => Ok(vec![{args}]),\n",
+                pattern = binding.route_pattern,
+                name = binding.name,
+            )
+        })
+        .collect::<String>();
     let page_renderer_arms = page_renderers
         .iter()
         .map(|renderer| {
@@ -8997,7 +9040,7 @@ use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxEnv}};
 use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
-use axonyx_runtime::render_compiled_page_fragment;
+use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
 
 #[path = "../generated/backend.rs"]
@@ -9187,16 +9230,21 @@ fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
     let dispatched = (|| {{
         let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
         let mut loader_values = BTreeMap::new();
+        let mut binding_values = BTreeMap::new();
         for route_binding in &bindings {{
             let mut loader_request = request.clone();
             loader_request.target = path.clone();
+            let args = compiled_binding_args(route_binding, &path)?;
             let value = backend::dispatch_loader(
                 &runtime,
                 route_binding.loader,
                 route_binding.pattern,
                 &loader_request,
+                &args,
             )?.ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled loader not found"))?;
-            loader_values.insert(route_binding.loader.to_string(), value);
+            let key = compiled_loader_call_key(route_binding.loader, &args);
+            binding_values.insert(route_binding.name.to_string(), value.clone());
+            loader_values.insert(key, value);
         }}
         let html = if let Some((pattern, document, imports)) = compiled_page_renderer(&path) {{
             let params = route_params(pattern, &path)
@@ -9206,14 +9254,14 @@ fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
         }} else {{
             None
         }};
-        Ok::<_, axonyx_runtime::backend::AxRuntimeError>((loader_values, html))
+        Ok::<_, axonyx_runtime::backend::AxRuntimeError>((binding_values, html))
     }})();
     match dispatched {{
-        Ok((loader_values, html)) => match serde_json::to_vec(&json!({{
+        Ok((binding_values, html)) => match serde_json::to_vec(&json!({{
             "ok": true,
             "route": path,
             "binding": {{ "name": binding.name, "source": binding.source, "queryKey": binding.query_key }},
-            "value": loader_values.get(binding.loader).cloned().unwrap_or(Value::Null),
+            "value": binding_values.get(binding.name).cloned().unwrap_or(Value::Null),
             "html": html,
         }})) {{
             Ok(body) => AxHttpResponse::bytes(200, "application/ax-data+json; charset=utf-8", body).with_no_store(),
@@ -9232,6 +9280,19 @@ fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
 fn compiled_route_bindings(path: &str) -> Vec<CompiledBinding> {{
     let mut bindings = Vec::new();
 {route_binding_steps}    bindings
+}}
+
+fn compiled_binding_args(binding: &CompiledBinding, path: &str) -> Result<Vec<Value>, axonyx_runtime::backend::AxRuntimeError> {{
+    match (binding.pattern, binding.name) {{
+{binding_arg_arms}        _ => Err(axonyx_runtime::backend::AxRuntimeError::message("compiled loader arguments not found")),
+    }}
+}}
+
+fn compiled_route_param(pattern: &str, path: &str, name: &str) -> Result<Value, axonyx_runtime::backend::AxRuntimeError> {{
+    route_params(pattern, path)
+        .and_then(|params| params.get(name).cloned())
+        .map(Value::String)
+        .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message(format!("missing compiled route param `{{name}}`")))
 }}
 
 fn compiled_page_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
@@ -19131,6 +19192,7 @@ page Home
                 route_pattern: "/posts".to_string(),
                 name: "posts".to_string(),
                 loader: "loadPosts".to_string(),
+                args: Vec::new(),
                 source: "loadPosts()".to_string(),
                 query_key: vec!["posts".to_string()],
             }],
@@ -19149,6 +19211,8 @@ page Home
         assert!(source.contains("application/ax-patch+json"));
         assert!(source.contains("application/ax-data+json"));
         assert!(source.contains("compiled_page_renderer"));
+        assert!(source.contains("compiled_binding_args"));
+        assert!(source.contains("compiled_loader_call_key"));
         assert!(source.contains("render_compiled_page_fragment"));
         assert!(source.contains("cross_site_action_request"));
         assert!(source.contains("safe_action_route"));
@@ -19162,14 +19226,19 @@ page Home
     }
 
     #[test]
-    fn compiled_data_bindings_include_only_zero_argument_loaders() {
+    fn compiled_data_bindings_include_supported_parameterized_loaders() {
         let root = make_temp_dir("compiled-data-bindings");
-        fs::create_dir_all(root.join("app/posts")).expect("posts route should exist");
+        fs::create_dir_all(root.join("app/posts/[slug]")).expect("posts route should exist");
         fs::write(
-            root.join("app/posts/page.ax"),
+            root.join("app/posts/[slug]/page.ax"),
             r#"page Posts() {
 data posts = loadPosts()
 data featured = loadPost("featured")
+data current = loadPost(params.slug)
+data requested = loadPost(request.params.slug)
+data page = loadPage(2, true)
+data unsupported = loadPost(currentSlug)
+data unsupportedList = loadPosts(["draft", "published"])
 return ASX { <Copy>{posts}</Copy> }
 }
 "#,
@@ -19178,11 +19247,18 @@ return ASX { <Copy>{posts}</Copy> }
 
         let bindings = compiled_data_bindings(&root).expect("bindings should collect");
 
-        assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].route_pattern, "/posts");
+        assert_eq!(bindings.len(), 5);
+        assert_eq!(bindings[0].route_pattern, "/posts/:slug");
         assert_eq!(bindings[0].name, "posts");
         assert_eq!(bindings[0].loader, "loadPosts");
         assert_eq!(bindings[0].query_key, ["posts"]);
+        assert_eq!(bindings[1].args, [AxExpr::string("featured")]);
+        assert_eq!(bindings[2].args, [AxExpr::ident("params").member("slug")]);
+        assert_eq!(
+            bindings[3].args,
+            [AxExpr::ident("request").member("params").member("slug")]
+        );
+        assert_eq!(bindings[4].args, [AxExpr::number(2), AxExpr::bool(true)]);
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

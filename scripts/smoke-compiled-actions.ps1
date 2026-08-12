@@ -104,11 +104,52 @@ action Noop() {
     (New-Object System.Text.UTF8Encoding($false))
   )
 
+  $detailRoot = Join-Path $appRoot "app/posts/[slug]"
+  New-Item -ItemType Directory -Path $detailRoot -Force | Out-Null
+  [System.IO.File]::WriteAllText(
+    (Join-Path $detailRoot "loader.ax"),
+    @'
+query loadPost(slug: String) {
+  data post = db.posts.first()
+    where slug = input.slug
+  return post
+}
+'@,
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+  [System.IO.File]::WriteAllText(
+    (Join-Path $detailRoot "actions.ax"),
+    @'
+action RenamePost(slug: string, title: string) {
+  db.posts.where({ slug: input.slug }).update({ title: input.title })
+  return ok()
+}
+'@,
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+  [System.IO.File]::WriteAllText(
+    (Join-Path $detailRoot "page.ax"),
+    @'
+page PostDetail() {
+data posts = loadPost(params.slug)
+return ASX {
+  <Container max="xl">
+    <Card title={posts.title}>
+      <Copy>{posts.excerpt}</Copy>
+    </Card>
+  </Container>
+}
+}
+'@,
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+
   $dbPath = Join-Path $appRoot "compiled-smoke.db"
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
-  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL)"
-  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(sys.argv[2]);db.commit();db.close()' $dbPath $schema
+  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL)"
+  $seed = "INSERT INTO posts (slug,title,excerpt,status) VALUES (?,?,?,?)"
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published"
   if ($LASTEXITCODE -ne 0) { throw "failed to seed compiled smoke SQLite database" }
 
   Push-Location $appRoot
@@ -173,8 +214,19 @@ action Noop() {
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }
   $dataPayload = $data.Body | ConvertFrom-Json
-  if (!$dataPayload.ok -or $dataPayload.binding.name -ne "posts" -or $dataPayload.value[0].title -ne "Fresh compiled post") { throw "Compiled loader response is invalid: $($data.Body)" }
+  $createdRows = @($dataPayload.value | Where-Object { $_.title -eq "Fresh compiled post" })
+  if (!$dataPayload.ok -or $dataPayload.binding.name -ne "posts" -or $createdRows.Count -ne 1) { throw "Compiled loader response is invalid: $($data.Body)" }
   if ($dataPayload.html -notmatch 'data-ax-root="page"' -or $dataPayload.html -notmatch "Fresh compiled post") { throw "Compiled page HTML was not regenerated: $($data.Body)" }
+
+  $detailActionUrl = "$baseUrl/__axonyx/action?path=%2Fposts%2Ffresh-compiled-post&name=RenamePost"
+  $renamed = Invoke-AxRequest -Url $detailActionUrl -Body "slug=fresh-compiled-post&title=Fresh+parameterized+title&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  $renamedPayload = $renamed.Body | ConvertFrom-Json
+  if (!$renamedPayload.ok -or $renamedPayload.refreshes[0].name -ne "posts" -or $renamedPayload.refreshes[0].source -ne "loadPost(params.slug)") { throw "Parameterized action refresh metadata is invalid: $($renamed.Body)" }
+
+  $detailData = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts%2Ffresh-compiled-post&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
+  $detailPayload = $detailData.Body | ConvertFrom-Json
+  if (!$detailPayload.ok -or $detailPayload.value.title -ne "Fresh parameterized title") { throw "Parameterized loader response is invalid: $($detailData.Body)" }
+  if ($detailPayload.html -notmatch 'data-ax-root="page"' -or $detailPayload.html -notmatch "Fresh parameterized title") { throw "Parameterized page HTML was not regenerated: $($detailData.Body)" }
   Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2F%2Fevil.example&name=posts" -Method "GET" -ExpectedStatus 400 | Out-Null
 
   $invalid = Invoke-AxRequest -Url $actionUrl -Body "theme=&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
