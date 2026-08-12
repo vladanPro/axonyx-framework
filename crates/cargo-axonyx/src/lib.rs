@@ -105,6 +105,8 @@ enum Commands {
     Build(BuildArgs),
     #[command(about = "Run source diagnostics without building.")]
     Check(CheckArgs),
+    #[command(about = "Inspect the stable application contract manifest.")]
+    Contracts(ContractsArgs),
     #[command(about = "Inspect configured content collections.")]
     Content(ContentArgs),
     #[command(about = "Check or pull database schema metadata.")]
@@ -171,6 +173,17 @@ struct ActionsArgs {
     /// Render action input contracts as .ax type declarations.
     #[arg(long)]
     schema: bool,
+}
+
+#[derive(Debug, Parser)]
+struct ContractsArgs {
+    /// Output format for the application contract report.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+
+    /// Write the JSON contract manifest to a file instead of stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -1056,10 +1069,19 @@ struct ComponentFileReport {
 struct ComponentDeclReport {
     name: String,
     params: Vec<String>,
+    param_details: Vec<ComponentParamReport>,
     states: Vec<String>,
     clients: Vec<ComponentClientReport>,
     has_style: bool,
     has_render: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ComponentParamReport {
+    name: String,
+    ty: Option<String>,
+    required: bool,
+    default: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1103,6 +1125,46 @@ struct ComponentUsageScriptReport {
     file: String,
     source: String,
     output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ContractReport {
+    schema_version: u32,
+    app: ContractAppReport,
+    types: Vec<ApiSchemaReport>,
+    components: ComponentReport,
+    data: DataReport,
+    loaders: Vec<LoaderContractReport>,
+    actions: ActionReport,
+    api_routes: Vec<ApiRouteReport>,
+    scopes: ScopeReport,
+    summary: ContractSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ContractAppReport {
+    name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LoaderContractReport {
+    file: String,
+    name: String,
+    exported: bool,
+    returns: Option<String>,
+    inputs: Vec<ActionInputReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ContractSummary {
+    types: usize,
+    components: usize,
+    component_props: usize,
+    data_bindings: usize,
+    loaders: usize,
+    actions: usize,
+    api_routes: usize,
+    scopes: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1262,6 +1324,7 @@ fn run() -> Result<()> {
         Commands::Api(args) => api_command(args),
         Commands::Build(args) => build_command(args),
         Commands::Check(args) => check_command(args),
+        Commands::Contracts(args) => contracts_command(args),
         Commands::Content(args) => content_command(args),
         Commands::Db(args) => db_command(args),
         Commands::Dev(args) => run_dev_server(args),
@@ -1277,6 +1340,28 @@ fn run() -> Result<()> {
         Commands::Test(args) => test_command(args),
         Commands::Upgrade(args) => upgrade_command(args),
     }
+}
+
+fn contracts_command(args: ContractsArgs) -> Result<()> {
+    let root = app_root()?;
+    ensure_no_check_diagnostics_for(&root, "contracts")?;
+    let report = collect_contract_report(&root)?;
+
+    if let Some(out) = args.out.as_deref() {
+        if args.format != CheckFormat::Json {
+            bail!("--out requires --format json");
+        }
+        write_contract_report(out, &report)?;
+        println!("Wrote application contract to {}", display_path(out));
+        return Ok(());
+    }
+
+    match args.format {
+        CheckFormat::Text => print_contract_text(&report),
+        CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+    }
+
+    Ok(())
 }
 
 fn registry_command(args: RegistryArgs) -> Result<()> {
@@ -3327,6 +3412,20 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
                         (None, None) => param.name.clone(),
                     })
                     .collect(),
+                param_details: component
+                    .params
+                    .iter()
+                    .map(|param| ComponentParamReport {
+                        name: param.name.clone(),
+                        ty: param.ty.clone(),
+                        required: param.default.is_none()
+                            && !param
+                                .ty
+                                .as_deref()
+                                .is_some_and(|ty| normalize_api_schema_field_type(ty).1),
+                        default: param.default.clone(),
+                    })
+                    .collect(),
                 states: component
                     .states
                     .iter()
@@ -3388,6 +3487,115 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
     }
 
     Ok(ComponentReport { files })
+}
+
+fn collect_contract_report(root: &Path) -> Result<ContractReport> {
+    let routes = routes_report(root)?;
+    let api = collect_api_report(root)?;
+    let components = collect_component_report(root)?;
+    let data = collect_data_report(root, &routes)?;
+    let loaders = collect_loader_contracts(root)?;
+    let actions = collect_action_report(root)?;
+    let scopes = collect_scope_report(root)?;
+    let summary = ContractSummary {
+        types: api.schemas.len(),
+        components: components
+            .files
+            .iter()
+            .map(|file| file.components.len())
+            .sum(),
+        component_props: components
+            .files
+            .iter()
+            .flat_map(|file| &file.components)
+            .map(|component| component.param_details.len())
+            .sum(),
+        data_bindings: data.routes.iter().map(|route| route.bindings.len()).sum(),
+        loaders: loaders.len(),
+        actions: actions.routes.iter().map(|route| route.actions.len()).sum(),
+        api_routes: api.routes.len(),
+        scopes: scopes.files.iter().map(|file| file.scopes.len()).sum(),
+    };
+
+    Ok(ContractReport {
+        schema_version: 1,
+        app: ContractAppReport {
+            name: axonyx_config_string(root, "app", "name")
+                .unwrap_or_else(|| "axonyx-app".to_string()),
+        },
+        types: api.schemas,
+        components,
+        data,
+        loaders,
+        actions,
+        api_routes: api.routes,
+        scopes,
+        summary,
+    })
+}
+
+fn collect_loader_contracts(root: &Path) -> Result<Vec<LoaderContractReport>> {
+    let mut paths = Vec::new();
+    collect_ax_files(&root.join("app"), &mut paths)?;
+    collect_ax_files(&root.join("routes"), &mut paths)?;
+    collect_ax_files(&root.join("jobs"), &mut paths)?;
+
+    let mut loaders = Vec::new();
+    for path in paths {
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
+        let Ok(document) = parse_backend_ax(&source) else {
+            continue;
+        };
+        let file = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        for block in document.blocks {
+            let AxBackendBlock::Loader(loader) = block else {
+                continue;
+            };
+            loaders.push(LoaderContractReport {
+                file: file.clone(),
+                name: loader.name,
+                exported: loader.exported,
+                returns: loader.returns,
+                inputs: loader
+                    .input
+                    .into_iter()
+                    .map(|field| ActionInputReport {
+                        name: field.name,
+                        ty: field.ty,
+                        optional: field.optional,
+                        default: field.default.as_ref().map(format_ax_expr),
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    loaders.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(loaders)
+}
+
+fn write_contract_report(path: &Path, report: &ContractReport) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create '{}'", parent.display()))?;
+    }
+    let json =
+        serde_json::to_string_pretty(report).context("failed to render contract manifest")?;
+    fs::write(path, format!("{json}\n"))
+        .with_context(|| format!("failed to write contract manifest to '{}'", path.display()))
 }
 
 fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_prelude::AxFileV2> {
@@ -9493,6 +9701,7 @@ fn build_static_site_from_app_root(
     write_component_client_manifest_to_dist(root, &output_dir)?;
     let content_collection_count = write_content_manifest_to_dist(root, &output_dir)?;
     let state_signal_count = write_state_manifest_to_dist(root, &output_dir)?;
+    write_contract_manifest_to_dist(root, &output_dir)?;
     let melt_graph_written = write_melt_graph_to_dist(root, &output_dir)?;
 
     if static_routes.is_empty() && prerender_routes.is_empty() {
@@ -10081,6 +10290,15 @@ fn write_state_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize>
     Ok(signal_count)
 }
 
+fn write_contract_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<()> {
+    let report = collect_contract_report(root)?;
+    let target = output_dir
+        .join("_ax")
+        .join("contracts")
+        .join("manifest.json");
+    write_contract_report(&target, &report)
+}
+
 fn state_snapshot_from_report(report: &StateReport) -> StateSnapshotReport {
     let mut signals = Vec::new();
 
@@ -10628,6 +10846,46 @@ fn print_data_text(report: &DataReport) {
                     .map(|part| format!("{part:?}"))
                     .collect::<Vec<_>>()
                     .join(", ")
+            );
+        }
+    }
+}
+
+fn print_contract_text(report: &ContractReport) {
+    println!(
+        "Axonyx application contract v{}: {}",
+        report.schema_version, report.app.name
+    );
+    println!(
+        "  {} type(s), {} component(s), {} prop(s), {} data binding(s)",
+        report.summary.types,
+        report.summary.components,
+        report.summary.component_props,
+        report.summary.data_bindings
+    );
+    println!(
+        "  {} loader(s), {} action(s), {} API route(s), {} scope(s)",
+        report.summary.loaders,
+        report.summary.actions,
+        report.summary.api_routes,
+        report.summary.scopes
+    );
+
+    if !report.loaders.is_empty() {
+        println!("Loaders:");
+        for loader in &report.loaders {
+            let inputs = loader
+                .inputs
+                .iter()
+                .map(|input| format!("{}: {}", input.name, input.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {}({}) -> {} ({})",
+                loader.name,
+                inputs,
+                loader.returns.as_deref().unwrap_or("Unknown"),
+                loader.file
             );
         }
     }
@@ -16955,6 +17213,15 @@ component ThemeSwitcher(label: String = "Theme") {
             vec!["label: String = \"Theme\"".to_string()]
         );
         assert_eq!(
+            report.components.files[0].components[0].param_details,
+            vec![ComponentParamReport {
+                name: "label".to_string(),
+                ty: Some("String".to_string()),
+                required: false,
+                default: Some("\"Theme\"".to_string()),
+            }]
+        );
+        assert_eq!(
             report.components.files[0].components[0].states,
             vec!["selected: String".to_string()]
         );
@@ -17003,6 +17270,101 @@ component ThemeSwitcher(label: String = "Theme") {
         assert!(json.contains("\"component_usage\""));
         assert!(json.contains("\"ThemeSwitcher\""));
         assert!(json.contains("theme-switcher.client.js"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn contract_report_unifies_types_components_data_loaders_and_actions() {
+        let root = make_temp_dir("contract-report-v1");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"contract-demo\"\n",
+        )
+        .expect("config should write");
+        fs::create_dir_all(root.join("app/components")).expect("components dir should exist");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+import { HeroCard } from "@/components/HeroCard.ax"
+
+page Home() {
+  data posts: List<Post> = loadPosts("published")
+
+  return ASX {
+    <HeroCard title="Contracts" />
+  }
+}
+"#,
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/components/HeroCard.ax"),
+            r#"
+component HeroCard(title: String, tone: String = "silver", subtitle: Optional<String>) {
+  render ASX {
+    <article data-tone={tone}>{title}</article>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+        fs::write(
+            root.join("app/loader.ax"),
+            r#"
+type Post {
+  title: String
+}
+
+export query loadPosts(status: String = "published") -> Post[] {
+  data posts = db.posts.all()
+    where status = input.status
+  return posts
+}
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action publishPost(id: String) -> Post {
+  return ok
+}
+"#,
+        )
+        .expect("actions should write");
+
+        let report = collect_contract_report(&root).expect("contract report should collect");
+
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.app.name, "contract-demo");
+        assert!(report.types.iter().any(|schema| schema.name == "Post"));
+        assert_eq!(report.summary.components, 1);
+        assert_eq!(report.summary.component_props, 3);
+        assert_eq!(report.summary.data_bindings, 1);
+        assert_eq!(report.summary.loaders, 1);
+        assert_eq!(report.summary.actions, 1);
+        assert_eq!(report.loaders[0].name, "loadPosts");
+        assert_eq!(report.loaders[0].returns.as_deref(), Some("Post[]"));
+        assert_eq!(report.loaders[0].inputs[0].name, "status");
+        assert_eq!(
+            report.components.files[0].components[0].param_details[0],
+            ComponentParamReport {
+                name: "title".to_string(),
+                ty: Some("String".to_string()),
+                required: true,
+                default: None,
+            }
+        );
+        assert!(!report.components.files[0].components[0].param_details[2].required);
+
+        let target = root.join("dist/_ax/contracts/manifest.json");
+        write_contract_manifest_to_dist(&root, &root.join("dist"))
+            .expect("build contract manifest should write");
+        let manifest = fs::read_to_string(target).expect("contract manifest should read");
+        assert!(manifest.contains("\"schema_version\": 1"));
+        assert!(manifest.contains("\"loadPosts\""));
+        assert!(manifest.contains("\"param_details\""));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
