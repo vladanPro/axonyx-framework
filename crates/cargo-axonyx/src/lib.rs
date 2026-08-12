@@ -797,6 +797,7 @@ struct RegistryItemReport {
     copy: String,
     tags: Vec<String>,
     description: String,
+    props: Vec<ComponentParamReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1366,7 +1367,7 @@ fn contracts_command(args: ContractsArgs) -> Result<()> {
 
 fn registry_command(args: RegistryArgs) -> Result<()> {
     let root = app_root()?;
-    let report = collect_registry_report(&root)?;
+    let report = collect_registry_contract_report(&root)?;
 
     match args.format {
         CheckFormat::Text => print_registry_text(&report),
@@ -3415,16 +3416,7 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
                 param_details: component
                     .params
                     .iter()
-                    .map(|param| ComponentParamReport {
-                        name: param.name.clone(),
-                        ty: param.ty.clone(),
-                        required: param.default.is_none()
-                            && !param
-                                .ty
-                                .as_deref()
-                                .is_some_and(|ty| normalize_api_schema_field_type(ty).1),
-                        default: param.default.clone(),
-                    })
+                    .map(component_param_report)
                     .collect(),
                 states: component
                     .states
@@ -3487,6 +3479,21 @@ fn collect_component_report(root: &Path) -> Result<ComponentReport> {
     }
 
     Ok(ComponentReport { files })
+}
+
+fn component_param_report(
+    param: &axonyx_core::ax_ast_v2_prelude::AxComponentParamDeclV2,
+) -> ComponentParamReport {
+    ComponentParamReport {
+        name: param.name.clone(),
+        ty: param.ty.clone(),
+        required: param.default.is_none()
+            && !param
+                .ty
+                .as_deref()
+                .is_some_and(|ty| normalize_api_schema_field_type(ty).1),
+        default: param.default.clone(),
+    }
 }
 
 fn collect_contract_report(root: &Path) -> Result<ContractReport> {
@@ -8521,6 +8528,60 @@ fn collect_registry_report(root: &Path) -> Result<RegistryReport> {
     })
 }
 
+fn collect_registry_contract_report(root: &Path) -> Result<RegistryReport> {
+    let package_root = cargo_package_root(root, AXONYX_UI_PACKAGE_NAME)
+        .or_else(|| resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME))
+        .with_context(|| {
+            format!(
+                "unable to resolve {AXONYX_UI_PACKAGE_NAME}; run `cargo ax add ui` or add axonyx-ui to Cargo.toml"
+            )
+        })?;
+    let mut report = collect_registry_report(root)?;
+    attach_registry_component_contracts(&package_root, &mut report.components)?;
+    attach_registry_component_contracts(&package_root, &mut report.blocks)?;
+    Ok(report)
+}
+
+fn attach_registry_component_contracts(
+    package_root: &Path,
+    items: &mut [RegistryItemReport],
+) -> Result<()> {
+    for item in items {
+        let path = package_root.join(&item.path);
+        let source = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to read registry component source '{}'",
+                path.display()
+            )
+        })?;
+        let file = parse_component_report_source(&source).with_context(|| {
+            format!(
+                "failed to parse registry component source '{}'",
+                path.display()
+            )
+        })?;
+        let component = file
+            .components
+            .iter()
+            .find(|component| component.name == item.name)
+            .or_else(|| (file.components.len() == 1).then(|| &file.components[0]))
+            .with_context(|| {
+                format!(
+                    "registry item '{}' does not match a component in '{}'",
+                    item.name,
+                    path.display()
+                )
+            })?;
+        item.props = component
+            .params
+            .iter()
+            .map(component_param_report)
+            .collect();
+    }
+
+    Ok(())
+}
+
 fn parse_registry_manifest(source: &str) -> Result<RegistryReport> {
     let value = source
         .parse::<toml::Value>()
@@ -8580,6 +8641,7 @@ fn parse_registry_item(
         copy: toml_required_string(table, "copy")?.to_string(),
         tags: toml_string_array(table, "tags")?,
         description: toml_required_string(table, "description")?.to_string(),
+        props: Vec::new(),
     })
 }
 
@@ -8644,6 +8706,19 @@ fn print_registry_items_text(label: &str, items: &[RegistryItemReport]) {
         println!("    import: {}", item.import);
         println!("    preview: {}", item.preview);
         println!("    copy: {}", item.copy);
+        if !item.props.is_empty() {
+            println!(
+                "    props: {}",
+                item.props
+                    .iter()
+                    .map(|prop| match &prop.ty {
+                        Some(ty) => format!("{}: {}", prop.name, ty),
+                        None => prop.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
     }
 }
 
@@ -20028,6 +20103,73 @@ description = "Action primitive."
         assert_eq!(report.components.len(), 1);
         assert_eq!(report.components[0].import, "@axonyx/ui/foundry/Button");
         assert_eq!(report.components[0].tags, vec!["action", "cta"]);
+        assert!(report.components[0].props.is_empty());
+    }
+
+    #[test]
+    fn registry_report_attaches_structured_component_prop_contracts() {
+        let root = make_temp_dir("registry-component-contracts");
+        fs::create_dir_all(root.join("src/foundry")).expect("foundry dir should exist");
+        fs::write(
+            root.join("src/foundry/Button.ax"),
+            r#"
+component Button(label: String, tone: String = "primary", icon: Optional<String>) {
+  render ASX {
+    <button data-tone={tone}>{label}</button>
+  }
+}
+"#,
+        )
+        .expect("component should write");
+        let mut report = parse_registry_manifest(
+            r#"
+[registry]
+name = "Axonyx UI"
+namespace = "@axonyx/ui"
+version = 1
+
+[[components]]
+name = "Button"
+path = "src/foundry/Button.ax"
+import = "@axonyx/ui/foundry/Button"
+preview = "/components/button"
+category = "actions"
+status = "v0"
+install = "cargo ax add ui"
+copy = "cargo ax add button"
+description = "Action primitive."
+"#,
+        )
+        .expect("registry manifest should parse");
+
+        attach_registry_component_contracts(&root, &mut report.components)
+            .expect("component contracts should attach");
+
+        assert_eq!(
+            report.components[0].props,
+            vec![
+                ComponentParamReport {
+                    name: "label".to_string(),
+                    ty: Some("String".to_string()),
+                    required: true,
+                    default: None,
+                },
+                ComponentParamReport {
+                    name: "tone".to_string(),
+                    ty: Some("String".to_string()),
+                    required: false,
+                    default: Some("\"primary\"".to_string()),
+                },
+                ComponentParamReport {
+                    name: "icon".to_string(),
+                    ty: Some("Optional<String>".to_string()),
+                    required: false,
+                    default: None,
+                },
+            ]
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
