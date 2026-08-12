@@ -345,6 +345,11 @@ Every production build also emits the same schema at
 unknown/empty metadata; the manifest does not pretend that untyped values were
 statically proven.
 
+UI package tooling uses the same structured prop shape. With `axonyx-ui`
+installed, `cargo ax registry --format json` parses each registry component and
+adds its `props` contract (`name`, `ty`, `required`, and `default`) without
+changing the existing `cargo ax add` copy/install path.
+
 ## Build
 
 `cargo ax build` scans backend-oriented `.ax` sources:
