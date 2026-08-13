@@ -272,7 +272,7 @@ fn create_app(target_dir: &PathBuf, project_name: &str, cli: &Cli) -> Result<()>
         template,
         template::AppTemplate::Site | template::AppTemplate::Blog | template::AppTemplate::Docs
     ) {
-        install_template_ui(target_dir)?;
+        install_template_ui(target_dir, cli)?;
     }
 
     compile_initial_backend(target_dir)?;
@@ -280,12 +280,12 @@ fn create_app(target_dir: &PathBuf, project_name: &str, cli: &Cli) -> Result<()>
     Ok(())
 }
 
-fn install_template_ui(target_dir: &Path) -> Result<()> {
-    ensure_ui_cargo_dependency(target_dir)?;
+fn install_template_ui(target_dir: &Path, cli: &Cli) -> Result<()> {
+    ensure_ui_cargo_dependency(target_dir, cli)?;
     Ok(())
 }
 
-fn ensure_ui_cargo_dependency(target_dir: &Path) -> Result<()> {
+fn ensure_ui_cargo_dependency(target_dir: &Path, cli: &Cli) -> Result<()> {
     let cargo_toml = target_dir.join("Cargo.toml");
     if !cargo_toml.exists() {
         return Ok(());
@@ -301,10 +301,23 @@ fn ensure_ui_cargo_dependency(target_dir: &Path) -> Result<()> {
     if !updated.ends_with('\n') {
         updated.push('\n');
     }
-    updated.push_str(&format!(
-        "\n{} = \"{}\"\n",
-        DEFAULT_UI_PACKAGE, DEFAULT_UI_VERSION
-    ));
+    let dependency = match cli.runtime_source {
+        RuntimeSource::Path => {
+            let ui_root = workspace_root().join("vendor").join("axonyx-ui");
+            let ui_root = ui_root
+                .canonicalize()
+                .context("failed to resolve local axonyx-ui package path")?;
+            format!(
+                "{} = {{ path = \"{}\" }}",
+                DEFAULT_UI_PACKAGE,
+                cargo_toml_path(&ui_root)
+            )
+        }
+        RuntimeSource::Git | RuntimeSource::Registry => {
+            format!("{} = \"{}\"", DEFAULT_UI_PACKAGE, DEFAULT_UI_VERSION)
+        }
+    };
+    updated.push_str(&format!("\n{dependency}\n"));
 
     fs::write(&cargo_toml, updated)
         .with_context(|| format!("failed to write '{}'", cargo_toml.display()))?;
