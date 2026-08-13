@@ -96,7 +96,7 @@ type Post {
 
 ## Typed Data And Each
 
-Axonyx now has an early typed data path for JSX-like `.ax` files. Define a record shape, bind query data to a typed list, and `cargo ax check` can catch wrong field access before render:
+Axonyx now has an early typed data path for JSX-like `.asx` files. Define a record shape, bind query data to a typed list, and `cargo ax check` can catch wrong field access before render:
 
 ```ax
 page Blog() -> ASX {
@@ -206,10 +206,10 @@ Generated apps currently include:
 
 Generated apps include optional framework-native boundary pages:
 
-- `app/not-found.ax` renders with status `404` when no `app/**/page.ax` route matches.
-- `app/error.ax` renders with status `500` when a matched route fails during rendering.
+- `app/not-found.asx` renders with status `404` when no `app/**/page.asx` route matches.
+- `app/error.asx` renders with status `500` when a matched route fails during rendering.
 
-Both files are normal `.ax` pages and are wrapped by `app/layout.ax`, so the site
+Both files are normal `.asx` pages and are wrapped by `app/layout.asx`, so the site
 keeps the same shell even when a route is missing or a render error happens.
 
 ## Next Step To Close Core

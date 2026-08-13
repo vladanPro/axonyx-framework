@@ -69,24 +69,24 @@ The older `cargo run` preview loop still generates `target/axonyx-preview.html`,
 
 This starter follows the recommended AX v2 authoring path:
 
-- JSX-like `.ax` files
-- `app/layout.ax` and `app/page.ax` route entrypoints
+- JSX-like `.asx` files
+- `app/layout.asx` and `app/page.asx` route entrypoints
 - optional route-local `loader.ax` and `actions.ax`
 - action-backed form demo with `ActionForm`, `ActionStatus`, typed inputs, and
   defaulted optional action fields
 
 Older indentation-first `.ax` syntax still exists in the framework for compatibility,
-but new app work should prefer JSX-like `.ax`.
+but new app work should prefer JSX-like `.asx`.
 
 Use it as the smallest "Hello Axonyx" loop:
 
-1. edit `app/layout.ax` or `app/page.ax`
+1. edit `app/layout.asx` or `app/page.asx`
 2. run `cargo ax run dev`
 3. reload `http://127.0.0.1:3000`
 
 Suggested first edit:
 
-- open `app/page.ax`
+- open `app/page.asx`
 - change one heading or `Copy` body
 - run `cargo ax run dev`
 - reload `http://127.0.0.1:3000`
@@ -134,10 +134,10 @@ Auth convention:
 
 ```text
 app/
-  layout.ax
-  page.ax
+  layout.asx
+  page.asx
   posts/
-    page.ax
+    page.asx
     loader.ax
     actions.ax
 routes/
@@ -153,8 +153,8 @@ src/
 
 ## Entry Files
 
-- `app/page.ax`
-- `app/layout.ax`
+- `app/page.asx`
+- `app/layout.asx`
 - `app/posts/loader.ax`
 - `app/posts/actions.ax`
 - `routes/api/posts.ax`

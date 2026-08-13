@@ -1,5 +1,5 @@
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
 
 page Error() {
 

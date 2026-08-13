@@ -55,15 +55,15 @@ use serde::Serialize;
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const DOCS_LAYOUT_AX: &str = include_str!("../templates/docs/app/docs/layout.ax.tpl");
-const DOCS_HOME_AX: &str = include_str!("../templates/docs/app/docs/page.ax.tpl");
+const DOCS_LAYOUT_AX: &str = include_str!("../templates/docs/app/docs/layout.asx.tpl");
+const DOCS_HOME_AX: &str = include_str!("../templates/docs/app/docs/page.asx.tpl");
 const DOCS_GETTING_STARTED_AX: &str =
-    include_str!("../templates/docs/app/docs/getting-started/page.ax.tpl");
-const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.ax.tpl");
-const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.ax.tpl");
+    include_str!("../templates/docs/app/docs/getting-started/page.asx.tpl");
+const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
+const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.52";
-const AXONYX_UI_VERSION: &str = "0.0.69";
+const AXONYX_UI_VERSION: &str = "0.0.70";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -119,6 +119,8 @@ enum Commands {
     Graph(GraphArgs),
     #[command(about = "Inspect or validate the Melt compiler graph.")]
     Melt(MeltArgs),
+    #[command(about = "Migrate an Axonyx project between authoring contracts.")]
+    Migrate(MigrateArgs),
     #[command(about = "List app and API routes.")]
     Routes(RoutesArgs),
     #[command(about = "Run Axonyx commands such as dev/start with npm-like ergonomics.")]
@@ -225,8 +227,27 @@ struct UpgradeArgs {
 }
 
 #[derive(Debug, Parser)]
+struct MigrateArgs {
+    #[command(subcommand)]
+    command: MigrateCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum MigrateCommands {
+    #[command(about = "Rename markup-bearing frontend .ax files to canonical .asx files.")]
+    Asx(MigrateAsxArgs),
+}
+
+#[derive(Debug, Parser)]
+struct MigrateAsxArgs {
+    /// Print the migration plan without changing files.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Parser)]
 struct CheckArgs {
-    /// Check a single .ax file instead of all app/routes/jobs sources.
+    /// Check a single .asx or .ax file instead of all app/routes/jobs sources.
     #[arg(long)]
     file: Option<PathBuf>,
 
@@ -1347,6 +1368,7 @@ fn run() -> Result<()> {
         Commands::Doctor(args) => doctor_command(args),
         Commands::Graph(args) => graph_command(args),
         Commands::Melt(args) => melt_command(args),
+        Commands::Migrate(args) => migrate_command(args),
         Commands::Routes(args) => routes_command(args),
         Commands::Registry(args) => registry_command(args),
         Commands::Run(args) => run_command(args),
@@ -1356,6 +1378,159 @@ fn run() -> Result<()> {
         Commands::Test(args) => test_command(args),
         Commands::Upgrade(args) => upgrade_command(args),
     }
+}
+
+fn migrate_command(args: MigrateArgs) -> Result<()> {
+    let root = app_root()?;
+    match args.command {
+        MigrateCommands::Asx(args) => migrate_asx_files(&root, args.dry_run),
+    }
+}
+
+fn migrate_asx_files(root: &Path, dry_run: bool) -> Result<()> {
+    let app_dir = root.join("app");
+    let mut app_sources = Vec::new();
+    collect_ax_files(&app_dir, &mut app_sources)?;
+
+    let mut renames = std::collections::BTreeMap::new();
+    for path in app_sources
+        .iter()
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("ax"))
+    {
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("failed to read migration source '{}'", path.display()))?;
+        if looks_like_backend_ax(&source) {
+            continue;
+        }
+        let is_frontend = matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("page.ax" | "layout.ax" | "error.ax" | "not-found.ax")
+        ) || parse_component_report_source(&source)
+            .is_some_and(|report| !report.components.is_empty())
+            || parse_ax_auto(&source).is_ok();
+        if !is_frontend {
+            continue;
+        }
+
+        let target = path.with_extension("asx");
+        if target.exists() {
+            bail!(
+                "cannot migrate '{}' because '{}' already exists",
+                path.display(),
+                target.display()
+            );
+        }
+        renames.insert(path.clone(), target);
+    }
+
+    if renames.is_empty() {
+        println!("No legacy frontend .ax files found. The project already uses .asx.");
+        return Ok(());
+    }
+
+    let mut project_sources = Vec::new();
+    for relative in ["app", "routes", "features", "jobs"] {
+        collect_ax_files(&root.join(relative), &mut project_sources)?;
+    }
+    project_sources.sort();
+    project_sources.dedup();
+
+    let mut rewrites = Vec::new();
+    for path in &project_sources {
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("failed to read migration source '{}'", path.display()))?;
+        let mut migrated = source.clone();
+        for import_source in migration_import_sources(&source) {
+            if !import_source.ends_with(".ax") {
+                continue;
+            }
+            let resolved = resolve_migration_import_path(root, path, &import_source);
+            let Some(resolved) = resolved else {
+                continue;
+            };
+            if !renames.keys().any(|path| same_path(path, &resolved)) {
+                continue;
+            }
+            let replacement = format!("{}.asx", import_source.trim_end_matches(".ax"));
+            migrated = migrated.replace(&import_source, &replacement);
+        }
+        if migrated != source {
+            rewrites.push((path.clone(), migrated));
+        }
+    }
+
+    let mode = if dry_run {
+        "Would migrate"
+    } else {
+        "Migrating"
+    };
+    for (source, target) in &renames {
+        println!(
+            "{mode} {} -> {}",
+            display_relative_path(root, source),
+            display_relative_path(root, target)
+        );
+    }
+    for (path, _) in &rewrites {
+        println!("{mode} imports in {}", display_relative_path(root, path));
+    }
+
+    if dry_run {
+        println!(
+            "Dry run complete: {} file rename(s), {} import rewrite(s).",
+            renames.len(),
+            rewrites.len()
+        );
+        return Ok(());
+    }
+
+    let rewrite_count = rewrites.len();
+    for (path, source) in rewrites {
+        fs::write(&path, source)
+            .with_context(|| format!("failed to rewrite imports in '{}'", path.display()))?;
+    }
+    for (source, target) in &renames {
+        fs::rename(source, target).with_context(|| {
+            format!(
+                "failed to migrate '{}' to '{}'",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+
+    println!(
+        "ASX migration complete: {} frontend file(s), {} import file(s).",
+        renames.len(),
+        rewrite_count
+    );
+    Ok(())
+}
+
+fn migration_import_sources(source: &str) -> Vec<String> {
+    if looks_like_backend_ax(source) {
+        return parse_backend_ax(source)
+            .map(|document| {
+                document
+                    .imports
+                    .into_iter()
+                    .map(|import| import.source)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    parse_import_validation_sources(source).unwrap_or_default()
+}
+
+fn resolve_migration_import_path(
+    root: &Path,
+    importing_path: &Path,
+    source: &str,
+) -> Option<PathBuf> {
+    if source.starts_with("./") || source.starts_with("../") {
+        return importing_path.parent().map(|parent| parent.join(source));
+    }
+    resolve_preview_import_path(root, source)
 }
 
 fn contracts_command(args: ContractsArgs) -> Result<()> {
@@ -2067,7 +2242,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
         "app-directory",
         "app/ directory found.",
         "app/ directory is missing.",
-        Some("Create app/page.ax or scaffold a template with create-axonyx."),
+        Some("Create app/page.asx or scaffold a template with create-axonyx."),
     ));
 
     let cargo_source = fs::read_to_string(root.join("Cargo.toml")).ok();
@@ -2275,33 +2450,35 @@ fn doctor_server_request_logging_check(root: &Path) -> DoctorCheck {
 }
 
 fn doctor_error_boundaries_check(root: &Path) -> DoctorCheck {
-    let has_not_found = root.join("app/not-found.ax").exists();
-    let has_error = root.join("app/error.ax").exists();
+    let app_root = root.join("app");
+    let has_not_found = preferred_frontend_source_path(&app_root, "not-found").is_some();
+    let has_error = preferred_frontend_source_path(&app_root, "error").is_some();
     match (has_not_found, has_error) {
         (true, true) => DoctorCheck {
             code: "error-boundaries",
             severity: DoctorSeverity::Ok,
-            message: "Global not-found.ax and error.ax boundaries found.".to_string(),
+            message: "Global not-found.asx and error.asx boundaries found.".to_string(),
             hint: Some(
-                "Nested app/**/error.ax and not-found.ax files can override a route subtree.",
+                "Nested app/**/error.asx and not-found.asx files can override a route subtree.",
             ),
         },
         (false, true) => DoctorCheck {
             code: "error-boundaries",
             severity: DoctorSeverity::Warn,
-            message: "Global app/not-found.ax boundary is missing.".to_string(),
-            hint: Some("Add app/not-found.ax so missing routes render a branded 404 page."),
+            message: "Global app/not-found.asx boundary is missing.".to_string(),
+            hint: Some("Add app/not-found.asx so missing routes render a branded 404 page."),
         },
         (true, false) => DoctorCheck {
             code: "error-boundaries",
             severity: DoctorSeverity::Warn,
-            message: "Global app/error.ax boundary is missing.".to_string(),
-            hint: Some("Add app/error.ax so production render errors use a branded fallback."),
+            message: "Global app/error.asx boundary is missing.".to_string(),
+            hint: Some("Add app/error.asx so production render errors use a branded fallback."),
         },
         (false, false) => DoctorCheck {
             code: "error-boundaries",
             severity: DoctorSeverity::Warn,
-            message: "Global app/not-found.ax and app/error.ax boundaries are missing.".to_string(),
+            message: "Global app/not-found.asx and app/error.asx boundaries are missing."
+                .to_string(),
             hint: Some("Add both files or scaffold a fresh template with create-axonyx."),
         },
     }
@@ -2639,7 +2816,10 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
         },
     );
 
-    let layout_source = fs::read_to_string(root.join("app/layout.ax")).ok();
+    let layout_path = preferred_frontend_source_path(&root.join("app"), "layout");
+    let layout_source = layout_path
+        .as_deref()
+        .and_then(|path| fs::read_to_string(path).ok());
     let layout_uses_axonyx_ui = layout_source
         .as_deref()
         .is_some_and(|source| source_uses_package(source, "@axonyx/ui"));
@@ -2666,13 +2846,13 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
         Some(_) => DoctorCheck {
             code: "ui-stylesheet",
             severity: DoctorSeverity::Warn,
-            message: "Axonyx UI stylesheet link is missing from app/layout.ax.".to_string(),
+            message: "Axonyx UI stylesheet link is missing from app/layout.asx.".to_string(),
             hint: Some("Run `cargo ax add ui` or add /_ax/pkg/axonyx-ui/index.css to <Head>."),
         },
         None => DoctorCheck {
             code: "ui-stylesheet",
             severity: DoctorSeverity::Warn,
-            message: "Could not inspect UI stylesheet because app/layout.ax is missing."
+            message: "Could not inspect UI stylesheet because app/layout.asx is missing."
                 .to_string(),
             hint: None,
         },
@@ -2695,7 +2875,7 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
         Some(_) if uses_interactive_foundry => DoctorCheck {
             code: "ui-script",
             severity: DoctorSeverity::Warn,
-            message: "Interactive Foundry components were detected, but the Axonyx UI behavior script is missing from app/layout.ax.".to_string(),
+            message: "Interactive Foundry components were detected, but the Axonyx UI behavior script is missing from app/layout.asx.".to_string(),
             hint: Some(
                 "Run `cargo ax add ui` or add /_ax/pkg/axonyx-ui/js/index.js to <Head>.",
             ),
@@ -2703,13 +2883,13 @@ fn doctor_ui_checks(root: &Path, cargo_source: Option<&str>) -> Vec<DoctorCheck>
         Some(_) => DoctorCheck {
             code: "ui-script",
             severity: DoctorSeverity::Warn,
-            message: "Axonyx UI behavior script is missing from app/layout.ax.".to_string(),
+            message: "Axonyx UI behavior script is missing from app/layout.asx.".to_string(),
             hint: Some("Run `cargo ax add ui` or add /_ax/pkg/axonyx-ui/js/index.js to <Head>."),
         },
         None => DoctorCheck {
             code: "ui-script",
             severity: DoctorSeverity::Warn,
-            message: "Could not inspect UI behavior script because app/layout.ax is missing."
+            message: "Could not inspect UI behavior script because app/layout.asx is missing."
                 .to_string(),
             hint: None,
         },
@@ -2981,8 +3161,8 @@ fn doctor_framework_layer_status_lines(checks: &[DoctorCheck]) -> Vec<String> {
             "Axonyx Pages",
             "ax-sources",
             checks,
-            ".ax pages, layouts, route params, and API source diagnostics pass",
-            ".ax page/route source diagnostics need attention",
+            ".asx pages and layouts plus .ax API source diagnostics pass",
+            ".asx page or .ax backend source diagnostics need attention",
             ".ax page/route source diagnostics could not be fully checked",
         ),
         doctor_layer_line(
@@ -4287,7 +4467,10 @@ fn data_binding_report_from_statement_with_types(
 fn route_local_query_return_types(
     page_path: &Path,
 ) -> Result<std::collections::BTreeMap<String, Option<AxType>>> {
-    if page_path.file_name().and_then(|name| name.to_str()) != Some("page.ax") {
+    if !matches!(
+        page_path.file_name().and_then(|name| name.to_str()),
+        Some("page.asx" | "page.ax")
+    ) {
         return Ok(std::collections::BTreeMap::new());
     }
 
@@ -6367,12 +6550,47 @@ fn collect_ax_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             continue;
         }
 
-        if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("ax") {
+        if file_type.is_file() && is_axonyx_source_file(&path) {
             out.push(path);
         }
     }
 
     Ok(())
+}
+
+fn is_axonyx_source_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("asx" | "ax")
+    )
+}
+
+fn is_asx_source_file(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("asx")
+}
+
+fn frontend_source_path(dir: &Path, stem: &str) -> Result<Option<PathBuf>> {
+    let canonical = dir.join(format!("{stem}.asx"));
+    let legacy = dir.join(format!("{stem}.ax"));
+    match (canonical.is_file(), legacy.is_file()) {
+        (true, true) => bail!(
+            "ambiguous frontend source: both '{}' and '{}' exist; keep the canonical .asx file",
+            canonical.display(),
+            legacy.display()
+        ),
+        (true, false) => Ok(Some(canonical)),
+        (false, true) => Ok(Some(legacy)),
+        (false, false) => Ok(None),
+    }
+}
+
+fn preferred_frontend_source_path(dir: &Path, stem: &str) -> Option<PathBuf> {
+    let canonical = dir.join(format!("{stem}.asx"));
+    if canonical.is_file() {
+        return Some(canonical);
+    }
+    let legacy = dir.join(format!("{stem}.ax"));
+    legacy.is_file().then_some(legacy)
 }
 
 fn check_ax_file(path: &Path) -> Result<Vec<CheckDiagnostic>> {
@@ -6421,7 +6639,7 @@ fn check_ax_source_with_context(
     root: Option<&Path>,
     shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
 ) -> Vec<CheckDiagnostic> {
-    if looks_like_backend_ax(source) {
+    if !is_asx_source_file(path) && looks_like_backend_ax(source) {
         return match parse_backend_ax(source) {
             Ok(document) => check_backend_requirements(path, source, root, &document),
             Err(error) => vec![diagnostic_from_parse_error(
@@ -8498,7 +8716,15 @@ fn import_source_line(source: &str, import_source: &str) -> usize {
 }
 
 fn looks_like_backend_ax(source: &str) -> bool {
-    source.lines().map(str::trim_start).any(|line| {
+    let lines = source.lines().map(str::trim_start).collect::<Vec<_>>();
+    if lines.iter().any(|line| {
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        line.starts_with("page ") || line.starts_with("layout ") || line.starts_with("component ")
+    }) {
+        return false;
+    }
+
+    lines.into_iter().any(|line| {
         let line = line.strip_prefix("export ").unwrap_or(line);
         line.starts_with("route ")
             || line == "backend"
@@ -8761,7 +8987,7 @@ fn hint_for_error(error: &anyhow::Error) -> Option<&'static str> {
     }
 
     if combined.contains("failed to render route") {
-        return Some("Run `cargo ax check`, then inspect the route's page.ax, layout.ax, loader.ax, and imports.");
+        return Some("Run `cargo ax check`, then inspect the route's page.asx, layout.asx, loader.ax, and imports.");
     }
 
     None
@@ -9179,7 +9405,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
         println!("Tokio max connections: {}.", runtime_config.max_connections);
     }
     println!(
-        "Routes come from app/**/page.ax with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
+        "Routes come from app/**/page.asx with nested layouts, route-local loader.ax, actions.ax POST handling, and routes/**/*.ax API endpoints."
     );
     println!(
         "Request body limit: {}",
@@ -10805,8 +11031,7 @@ fn collect_app_route_manifest_from(
     dir: &Path,
     out: &mut Vec<RouteManifestItem>,
 ) -> Result<()> {
-    let page_path = dir.join("page.ax");
-    if page_path.exists() {
+    if let Some(page_path) = frontend_source_path(dir, "page")? {
         out.push(app_route_manifest_item(root, app_root, dir, &page_path)?);
     }
 
@@ -10845,16 +11070,14 @@ fn app_route_manifest_item(
         .collect::<Vec<_>>();
 
     let mut layouts = Vec::new();
-    let root_layout = app_root.join("layout.ax");
-    if root_layout.exists() {
+    if let Some(root_layout) = frontend_source_path(app_root, "layout")? {
         layouts.push(display_relative_path(root, &root_layout));
     }
 
     let mut current = app_root.to_path_buf();
     for segment in &segments {
         current = current.join(segment);
-        let layout_path = current.join("layout.ax");
-        if layout_path.exists() {
+        if let Some(layout_path) = frontend_source_path(&current, "layout")? {
             layouts.push(display_relative_path(root, &layout_path));
         }
     }
@@ -11467,7 +11690,7 @@ fn print_graph_text(report: &MeltReport) {
 
 fn print_routes_text(report: &RoutesReport) {
     if report.routes.is_empty() {
-        println!("No routes found in app/**/page.ax or routes/**/*.ax.");
+        println!("No routes found in app/**/page.asx or routes/**/*.ax.");
         return;
     }
 
@@ -12511,7 +12734,7 @@ fn state_scope_for_path(root: &Path, path: &Path) -> String {
         .unwrap_or("");
     let parent = relative.parent().unwrap_or_else(|| Path::new(""));
 
-    if file_name == "layout.ax" && parent.components().next().is_none() {
+    if matches!(file_name, "layout.asx" | "layout.ax") && parent.components().next().is_none() {
         return "app".to_string();
     }
 
@@ -12519,9 +12742,12 @@ fn state_scope_for_path(root: &Path, path: &Path) -> String {
     let route_scope = scope_route_fragment(&route);
 
     match file_name {
-        "layout.ax" => format!("layout:{route_scope}"),
-        "page.ax" => format!("page:{route_scope}"),
-        other => format!("file:{}", other.trim_end_matches(".ax")),
+        "layout.asx" | "layout.ax" => format!("layout:{route_scope}"),
+        "page.asx" | "page.ax" => format!("page:{route_scope}"),
+        other => format!(
+            "file:{}",
+            other.trim_end_matches(".asx").trim_end_matches(".ax")
+        ),
     }
 }
 
@@ -12534,15 +12760,15 @@ fn state_owner_for_path(root: &Path, path: &Path) -> String {
         .unwrap_or("");
     let parent = relative.parent().unwrap_or_else(|| Path::new(""));
 
-    if file_name == "layout.ax" && parent.components().next().is_none() {
+    if matches!(file_name, "layout.asx" | "layout.ax") && parent.components().next().is_none() {
         return "app".to_string();
     }
 
     let route = route_pattern_for_app_relative_dir(parent);
 
     match file_name {
-        "layout.ax" => format!("layout:{route}"),
-        "page.ax" => format!("page:{route}"),
+        "layout.asx" | "layout.ax" => format!("layout:{route}"),
+        "page.asx" | "page.ax" => format!("page:{route}"),
         other => format!("file:{other}"),
     }
 }
@@ -12904,15 +13130,15 @@ fn collect_backend_like_sources_in_dir(
 }
 
 fn scaffold_docs_module(root: &Path) -> Result<()> {
-    write_if_missing(root, "app/docs/layout.ax", DOCS_LAYOUT_AX)?;
-    write_if_missing(root, "app/docs/page.ax", DOCS_HOME_AX)?;
+    write_if_missing(root, "app/docs/layout.asx", DOCS_LAYOUT_AX)?;
+    write_if_missing(root, "app/docs/page.asx", DOCS_HOME_AX)?;
     write_if_missing(
         root,
-        "app/docs/getting-started/page.ax",
+        "app/docs/getting-started/page.asx",
         DOCS_GETTING_STARTED_AX,
     )?;
-    write_if_missing(root, "app/docs/reference/page.ax", DOCS_REFERENCE_AX)?;
-    write_if_missing(root, "app/docs/examples/page.ax", DOCS_EXAMPLES_AX)?;
+    write_if_missing(root, "app/docs/reference/page.asx", DOCS_REFERENCE_AX)?;
+    write_if_missing(root, "app/docs/examples/page.asx", DOCS_EXAMPLES_AX)?;
     Ok(())
 }
 
@@ -12922,7 +13148,7 @@ fn add_ui_module(root: &Path, axonyx_toml: &Path) -> Result<()> {
     enable_module(&axonyx_toml.to_path_buf(), "ui")?;
 
     println!("Ensured Cargo dependency: axonyx-ui = \"{AXONYX_UI_VERSION}\".");
-    println!("Updated app/layout.ax with silver theme and Axonyx UI package use when possible.");
+    println!("Updated app/layout.asx with silver theme and Axonyx UI package use when possible.");
     println!("You can now import components such as:");
     println!("  import {{ SectionCard }} from \"@axonyx/ui/foundry/SectionCard\"");
     Ok(())
@@ -13084,10 +13310,10 @@ fn copy_dir_all_filtered(
 }
 
 fn ensure_ui_layout_setup(root: &Path) -> Result<bool> {
-    let layout_path = root.join("app").join("layout.ax");
-    if !layout_path.exists() {
+    let app_root = root.join("app");
+    let Some(layout_path) = preferred_frontend_source_path(&app_root, "layout") else {
         return Ok(false);
-    }
+    };
 
     let source = fs::read_to_string(&layout_path)
         .with_context(|| format!("failed to read '{}'", layout_path.display()))?;
@@ -15310,19 +15536,18 @@ fn resolve_route(root: &Path, request_path: &str) -> Result<Option<ResolvedRoute
     else {
         return Ok(None);
     };
-    let page_path = page_dir.join("page.ax");
+    let page_path = frontend_source_path(&page_dir, "page")?
+        .ok_or_else(|| anyhow::anyhow!("resolved route directory has no page.asx or page.ax"))?;
 
     let mut layout_paths = Vec::new();
-    let root_layout = app_root.join("layout.ax");
-    if root_layout.exists() {
+    if let Some(root_layout) = frontend_source_path(&app_root, "layout")? {
         layout_paths.push(root_layout);
     }
 
     let mut current = app_root;
     for segment in &matched_dirs {
         current = current.join(segment);
-        let layout_path = current.join("layout.ax");
-        if layout_path.exists() {
+        if let Some(layout_path) = frontend_source_path(&current, "layout")? {
             layout_paths.push(layout_path);
         }
     }
@@ -15364,23 +15589,24 @@ fn resolve_boundary_route(
     }
 
     for boundary_dir in candidate_dirs.into_iter().rev() {
-        let page_path = boundary_dir.join(file_name);
-        if !page_path.exists() || !page_path.is_file() {
+        let stem = file_name
+            .strip_suffix(".asx")
+            .or_else(|| file_name.strip_suffix(".ax"))
+            .unwrap_or(file_name);
+        let Some(page_path) = preferred_frontend_source_path(&boundary_dir, stem) else {
             continue;
-        }
+        };
 
         let mut layout_paths = Vec::new();
         let mut current = app_root.clone();
-        let root_layout = current.join("layout.ax");
-        if root_layout.exists() {
+        if let Some(root_layout) = preferred_frontend_source_path(&current, "layout") {
             layout_paths.push(root_layout);
         }
 
         if let Ok(relative) = boundary_dir.strip_prefix(&app_root) {
             for segment in relative.components() {
                 current.push(segment.as_os_str());
-                let layout_path = current.join("layout.ax");
-                if layout_path.exists() {
+                if let Some(layout_path) = preferred_frontend_source_path(&current, "layout") {
                     layout_paths.push(layout_path);
                 }
             }
@@ -15431,7 +15657,7 @@ fn resolve_app_route_dir_from(
     )>,
 > {
     if segments.is_empty() {
-        if current.join("page.ax").exists() {
+        if preferred_frontend_source_path(current, "page").is_some() {
             return Ok(Some((current.to_path_buf(), matched_dirs, params)));
         }
         return Ok(None);
@@ -15832,7 +16058,7 @@ fn render_not_found_response(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
-    if let Some(route) = resolve_boundary_route(&state.root, "not-found.ax", request_target) {
+    if let Some(route) = resolve_boundary_route(&state.root, "not-found.asx", request_target) {
         return render_route_response_with_status(
             state,
             &route,
@@ -15843,7 +16069,7 @@ fn render_not_found_response(
     }
 
     let html = format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx 404</title></head><body><h1>Route not found</h1><p>No <code>page.ax</code> matched <code>{}</code>.</p></body></html>",
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Axonyx 404</title></head><body><h1>Route not found</h1><p>No <code>page.asx</code> matched <code>{}</code>.</p></body></html>",
         html_escape(request_target)
     );
     Ok(AxHttpResponse::html(404, html).with_no_store())
@@ -15856,7 +16082,7 @@ fn render_error_response(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
-    if let Some(route) = resolve_boundary_route(&state.root, "error.ax", request_target) {
+    if let Some(route) = resolve_boundary_route(&state.root, "error.asx", request_target) {
         match render_route_response_with_status(
             state,
             &route,
@@ -16066,7 +16292,7 @@ fn resolve_backend_import_path(
         }
         path
     } else {
-        resolve_app_import_path(root, source)?
+        resolve_app_backend_import_path(root, source)?
     };
 
     let normalized = normalize_content_path(&path).ok()?;
@@ -16086,10 +16312,20 @@ fn resolve_app_import_path(root: &Path, source: &str) -> Option<PathBuf> {
         }
     }
 
+    Some(resolve_frontend_import_extension(path))
+}
+
+fn resolve_app_backend_import_path(root: &Path, source: &str) -> Option<PathBuf> {
+    let relative = source.strip_prefix("@/")?;
+    let mut path = root.join("app");
+    for segment in relative.split('/') {
+        if !segment.is_empty() {
+            path.push(segment);
+        }
+    }
     if path.extension().is_none() {
         path.set_extension("ax");
     }
-
     Some(path)
 }
 
@@ -16277,11 +16513,27 @@ fn join_import_relative(mut base: PathBuf, relative: &str) -> PathBuf {
         }
     }
 
-    if base.extension().is_none() {
-        base.set_extension("ax");
+    resolve_frontend_import_extension(base)
+}
+
+fn resolve_frontend_import_extension(path: PathBuf) -> PathBuf {
+    if path.extension().is_some() {
+        return path;
     }
 
-    base
+    let mut canonical = path.clone();
+    canonical.set_extension("asx");
+    if canonical.is_file() {
+        return canonical;
+    }
+
+    let mut legacy = path;
+    legacy.set_extension("ax");
+    if legacy.is_file() {
+        return legacy;
+    }
+
+    canonical
 }
 
 fn resolve_config_path(root: &Path, target: &str) -> Option<PathBuf> {
@@ -16296,17 +16548,13 @@ fn resolve_config_path(root: &Path, target: &str) -> Option<PathBuf> {
     }
 
     let path = PathBuf::from(target);
-    let mut path = if path.is_absolute() {
+    let path = if path.is_absolute() {
         path
     } else {
         root.join(path)
     };
 
-    if path.extension().is_none() {
-        path.set_extension("ax");
-    }
-
-    Some(path)
+    Some(resolve_frontend_import_extension(path))
 }
 
 fn resolve_config_base_path(root: &Path, target: &str) -> Option<PathBuf> {
@@ -16876,6 +17124,105 @@ page SectionCard
     }
 
     #[test]
+    fn resolve_route_prefers_canonical_asx_pages_and_layouts() {
+        let root = make_temp_dir("canonical-asx-route");
+        fs::create_dir_all(root.join("app/docs")).expect("docs dir should exist");
+        fs::write(root.join("app/layout.asx"), "page RootLayout\n<Slot />\n")
+            .expect("layout should write");
+        fs::write(
+            root.join("app/docs/page.asx"),
+            "page Docs\n<Copy>Docs</Copy>\n",
+        )
+        .expect("page should write");
+
+        let route = resolve_route(&root, "/docs")
+            .expect("route resolution should work")
+            .expect("route should exist");
+
+        assert!(route.page_path.ends_with("app/docs/page.asx"));
+        assert_eq!(route.layout_paths.len(), 1);
+        assert!(route.layout_paths[0].ends_with("app/layout.asx"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn route_manifest_rejects_duplicate_asx_and_legacy_ax_pages() {
+        let root = make_temp_dir("ambiguous-asx-route");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("app/page.asx"), "page Home\n<Copy>ASX</Copy>\n")
+            .expect("asx page should write");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>AX</Copy>\n")
+            .expect("legacy page should write");
+
+        let error = collect_page_route_manifest(&root).expect_err("duplicate pages should fail");
+        assert!(error.to_string().contains("ambiguous frontend source"));
+        assert!(error.to_string().contains("page.asx"));
+        assert!(error.to_string().contains("page.ax"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn asx_page_text_cannot_trigger_backend_source_detection() {
+        let path = PathBuf::from("app/page.asx");
+        let source = "page Guide() {\n  return ASX {\n    <p>\n      loader return contracts supply page types.\n    </p>\n  }\n}\n";
+
+        let diagnostics = check_ax_source_with_root(&path, source, None);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn migrate_asx_renames_frontend_files_and_preserves_backend_ax() {
+        let root = make_temp_dir("migrate-asx");
+        fs::create_dir_all(root.join("app/components")).expect("component dir should exist");
+        fs::create_dir_all(root.join("app/posts")).expect("posts dir should exist");
+        fs::write(
+            root.join("app/components/PostCard.ax"),
+            "component PostCard() {\n  render ASX { <Card>Post</Card> }\n}\n",
+        )
+        .expect("component should write");
+        fs::write(
+            root.join("app/posts/page.ax"),
+            "import { PostCard } from \"@/components/PostCard.ax\"\n\npage Posts() {\n  return ASX { <PostCard /> }\n}\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/posts/loader.ax"),
+            "query loadPosts() -> String {\n  return \"posts\"\n}\n",
+        )
+        .expect("loader should write");
+
+        migrate_asx_files(&root, false).expect("migration should pass");
+
+        assert!(root.join("app/components/PostCard.asx").is_file());
+        assert!(root.join("app/posts/page.asx").is_file());
+        assert!(root.join("app/posts/loader.ax").is_file());
+        assert!(!root.join("app/components/PostCard.ax").exists());
+        assert!(!root.join("app/posts/page.ax").exists());
+        let page =
+            fs::read_to_string(root.join("app/posts/page.asx")).expect("migrated page should read");
+        assert!(page.contains("@/components/PostCard.asx"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn migrate_asx_dry_run_does_not_change_files() {
+        let root = make_temp_dir("migrate-asx-dry-run");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
+            .expect("page should write");
+
+        migrate_asx_files(&root, true).expect("dry run should pass");
+
+        assert!(root.join("app/page.ax").is_file());
+        assert!(!root.join("app/page.asx").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn resolve_route_prefers_static_app_segment_over_dynamic_one() {
         let root = make_temp_dir("dynamic-static-route");
         fs::create_dir_all(root.join("app/posts/[slug]")).expect("dynamic app dir should exist");
@@ -17301,7 +17648,7 @@ route DELETE "/api/posts/:slug"
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
         fs::create_dir_all(root.join("routes/api")).expect("api routes dir should exist");
         fs::write(
-            root.join("app/page.ax"),
+            root.join("app/page.asx"),
             r#"
 page Home
 
@@ -18245,7 +18592,7 @@ action SetDocsTheme(theme: string) {
         let root = make_temp_dir("state-report");
         fs::create_dir_all(root.join("app/settings")).expect("settings dir should exist");
         fs::write(
-            root.join("app/layout.ax"),
+            root.join("app/layout.asx"),
             r#"
 page RootLayout
 
@@ -18256,7 +18603,7 @@ app state language: String = "sr"
         )
         .expect("root layout should write");
         fs::write(
-            root.join("app/page.ax"),
+            root.join("app/page.asx"),
             r#"
 page Home
 
@@ -18268,7 +18615,7 @@ page state count: Number = 0
         )
         .expect("home page should write");
         fs::write(
-            root.join("app/settings/layout.ax"),
+            root.join("app/settings/layout.asx"),
             r#"
 page SettingsLayout
 
@@ -18279,7 +18626,7 @@ layout state sidebarOpen: Bool = false
         )
         .expect("settings layout should write");
         fs::write(
-            root.join("app/settings/page.ax"),
+            root.join("app/settings/page.asx"),
             r#"
 page Settings
 
@@ -18298,13 +18645,13 @@ page state enabled = signal(true)
         let report = collect_state_report(&root).expect("state report should collect");
 
         assert_eq!(report.files.len(), 4);
-        assert_eq!(report.files[0].file, "app/layout.ax");
+        assert_eq!(report.files[0].file, "app/layout.asx");
         assert_eq!(report.files[0].signals[0].name, "language");
         assert_eq!(report.files[0].signals[0].key, "app:language:1");
         assert_eq!(report.files[0].signals[0].scope, "app");
         assert_eq!(report.files[0].signals[0].owner, "app");
 
-        assert_eq!(report.files[1].file, "app/page.ax");
+        assert_eq!(report.files[1].file, "app/page.asx");
         assert_eq!(report.files[1].signals.len(), 2);
         assert_eq!(report.files[1].signals[0].name, "theme");
         assert_eq!(report.files[1].signals[0].key, "page:root:theme:1");
@@ -18316,7 +18663,7 @@ page state enabled = signal(true)
             AxStateValue::String("silver".to_string())
         );
 
-        assert_eq!(report.files[2].file, "app/settings/layout.ax");
+        assert_eq!(report.files[2].file, "app/settings/layout.asx");
         assert_eq!(report.files[2].signals[0].name, "sidebarOpen");
         assert_eq!(
             report.files[2].signals[0].key,
@@ -18325,7 +18672,7 @@ page state enabled = signal(true)
         assert_eq!(report.files[2].signals[0].scope, "layout:settings");
         assert_eq!(report.files[2].signals[0].owner, "layout:/settings");
 
-        assert_eq!(report.files[3].file, "app/settings/page.ax");
+        assert_eq!(report.files[3].file, "app/settings/page.asx");
         assert_eq!(report.files[3].signals[0].name, "enabled");
         assert_eq!(report.files[3].signals[0].key, "page:settings:enabled:1");
         assert_eq!(report.files[3].signals[0].scope, "page:settings");
@@ -20372,7 +20719,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.69\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.70\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -21125,7 +21472,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
-        assert!(updated.contains("version = \"0.0.69\""));
+        assert!(updated.contains("version = \"0.0.70\""));
 
         fs::write(
             &cargo_toml,
@@ -24059,9 +24406,9 @@ axonyx-ui = {{ path = "{ui_path}" }}
         fs::write(
             root.join("app/layout.ax"),
             r#"
-import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
-import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
-import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
+import { SiteShell } from "@axonyx/ui/foundry/SiteShell.asx"
+import { TextLink } from "@axonyx/ui/foundry/TextLink.asx"
+import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.asx"
 
 page RootLayout
 
@@ -24074,12 +24421,12 @@ page RootLayout
         )
         .expect("layout should write");
         fs::write(
-            root.join("app/page.ax"),
+            root.join("app/page.asx"),
             r#"
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { Copy } from "@axonyx/ui/foundry/Copy.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
 
 page Home
 
@@ -24092,7 +24439,7 @@ page Home
 "#,
         )
         .expect("page should write");
-        let text_link_path = resolve_preview_import_path(&root, "@axonyx/ui/foundry/TextLink.ax")
+        let text_link_path = resolve_preview_import_path(&root, "@axonyx/ui/foundry/TextLink.asx")
             .expect("TextLink import path should resolve");
         assert!(
             text_link_path.exists(),

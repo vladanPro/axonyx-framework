@@ -1,10 +1,10 @@
 use "@axonyx/ui"
-import { AppShell } from "@axonyx/ui/foundry/AppShell.ax"
-import { Badge } from "@axonyx/ui/foundry/Badge.ax"
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { Navbar } from "@axonyx/ui/foundry/Navbar.ax"
-import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
-import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
+import { AppShell } from "@axonyx/ui/foundry/AppShell.asx"
+import { Badge } from "@axonyx/ui/foundry/Badge.asx"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { Navbar } from "@axonyx/ui/foundry/Navbar.asx"
+import { SiteShell } from "@axonyx/ui/foundry/SiteShell.asx"
+import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.asx"
 
 page DocsLayout() {
   return ASX {

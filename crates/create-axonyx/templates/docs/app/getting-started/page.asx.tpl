@@ -1,9 +1,9 @@
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { CommandList } from "@axonyx/ui/foundry/CommandList.ax"
-import { DocsSection } from "@axonyx/ui/foundry/DocsSection.ax"
-import { DocsCodeBlock } from "@axonyx/ui/foundry/DocsCodeBlock.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { CommandList } from "@axonyx/ui/foundry/CommandList.asx"
+import { DocsSection } from "@axonyx/ui/foundry/DocsSection.asx"
+import { DocsCodeBlock } from "@axonyx/ui/foundry/DocsCodeBlock.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
 
 page GettingStarted() {
   return ASX {
@@ -56,16 +56,16 @@ page GettingStarted() {
 
         <DocsCodeBlock title="Starter page shape">
           <Copy slot="eyebrow">ASX</Copy>
-          {"import { PageHeader } from \"@axonyx/ui/foundry/PageHeader.ax\"\n\npage Guide() {\n  return ASX {\n    <Container max=\"xl\">\n      <PageHeader title=\"Guide\">\n        <Copy tone=\"lead\">Write docs in .ax.</Copy>\n      </PageHeader>\n    </Container>\n  }\n}"}
+          {"import { PageHeader } from \"@axonyx/ui/foundry/PageHeader.asx\"\n\npage Guide() {\n  return ASX {\n    <Container max=\"xl\">\n      <PageHeader title=\"Guide\">\n        <Copy tone=\"lead\">Write docs in .asx.</Copy>\n      </PageHeader>\n    </Container>\n  }\n}"}
         </DocsCodeBlock>
       </ContentGrid>
 
       <DocsSection title="Good first files">
         <Copy slot="eyebrow">Route shape</Copy>
-        <Copy>`app/layout.ax` defines the shell, metadata, theme, nav, and sidebar.</Copy>
-        <Copy>`app/page.ax` is the overview route at `/`.</Copy>
-        <Copy>`app/getting-started/page.ax` is this page.</Copy>
-        <Copy slot="aside" tone="muted">Add `app/guides/page.ax` to create `/guides`.</Copy>
+        <Copy>`app/layout.asx` defines the shell, metadata, theme, nav, and sidebar.</Copy>
+        <Copy>`app/page.asx` is the overview route at `/`.</Copy>
+        <Copy>`app/getting-started/page.asx` is this page.</Copy>
+        <Copy slot="aside" tone="muted">Add `app/guides/page.asx` to create `/guides`.</Copy>
         <Copy slot="aside" tone="muted">Keep `routes/` and `jobs/` out until your docs need server behavior.</Copy>
         <a slot="actions" href="/reference">Open route reference</a>
       </DocsSection>
@@ -73,7 +73,7 @@ page GettingStarted() {
       <ContentGrid cols={2} gap="md">
         <SectionCard title="Edit">
           <Copy>
-            Change one title in `app/page.ax`, reload the browser, then move
+            Change one title in `app/page.asx`, reload the browser, then move
             into nested pages as your docs grow.
           </Copy>
         </SectionCard>
@@ -85,7 +85,7 @@ page GettingStarted() {
         </SectionCard>
         <SectionCard title="Style">
           <Copy>
-            Foundry UI is activated by `use "@axonyx/ui"` in `app/layout.ax`.
+            Foundry UI is activated by `use "@axonyx/ui"` in `app/layout.asx`.
             Change the default theme from silver to bronze or gold there.
           </Copy>
         </SectionCard>

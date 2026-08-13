@@ -116,8 +116,8 @@ probe without touching app routes.
 
 and the app should still be authored through:
 
-- `app/**/page.ax`
-- nested `layout.ax`
+- `app/**/page.asx`
+- nested `layout.asx`
 - route-local `loader.ax`
 - route-local `actions.ax`
 - `routes/**/*.ax` API handlers

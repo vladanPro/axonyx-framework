@@ -1,8 +1,8 @@
-import { Badge } from "@axonyx/ui/foundry/Badge.ax"
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { Card } from "@axonyx/ui/foundry/Card.ax"
-import { Copy } from "@axonyx/ui/foundry/Copy.ax"
-import { Stack } from "@axonyx/ui/foundry/Stack.ax"
+import { Badge } from "@axonyx/ui/foundry/Badge.asx"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { Card } from "@axonyx/ui/foundry/Card.asx"
+import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page BlogPost() {
   data posts = loadPost(params.slug)

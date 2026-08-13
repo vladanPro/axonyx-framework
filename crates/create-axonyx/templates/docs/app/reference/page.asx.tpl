@@ -1,7 +1,7 @@
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { DocsSection } from "@axonyx/ui/foundry/DocsSection.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { DocsSection } from "@axonyx/ui/foundry/DocsSection.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
 
 page Reference() {
   return ASX {

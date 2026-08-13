@@ -6,7 +6,7 @@ Generated with `create-axonyx` using the `docs` template.
 
 This starter is focused on product docs, framework references, and example-driven documentation pages built directly in Axonyx.
 
-The `docs` template already depends on the published `axonyx-ui` Cargo package, activates Foundry assets with `use "@axonyx/ui"`, and starts with a preflight `silver` theme in `app/layout.ax`.
+The `docs` template already depends on the published `axonyx-ui` Cargo package, activates Foundry assets with `use "@axonyx/ui"`, and starts with a preflight `silver` theme in `app/layout.asx`.
 
 It includes a product-docs shell with:
 
@@ -20,13 +20,13 @@ It includes a product-docs shell with:
 
 This starter follows the recommended AX v2 authoring path:
 
-- JSX-like `.ax` files
-- `app/layout.ax` and `app/page.ax` route entrypoints
-- nested docs pages under `app/.../page.ax`
+- JSX-like `.asx` files
+- `app/layout.asx` and `app/page.asx` route entrypoints
+- nested docs pages under `app/.../page.asx`
 - imports from `@axonyx/ui/...` for Foundry primitives
 
 Older indentation-first `.ax` syntax still exists for compatibility, but new docs pages
-should be authored in JSX-like `.ax`.
+should be authored in JSX-like `.asx`.
 
 ## Build And Run
 
@@ -92,14 +92,14 @@ client. On hosted platforms, pass the platform `PORT` value to `--port`.
 
 Suggested first edit:
 
-- open `app/getting-started/page.ax`
+- open `app/getting-started/page.asx`
 - update one section title or paragraph
 - run `cargo ax run dev`
 - reload `http://127.0.0.1:3000/getting-started`
 
 ## Starter Shape
 
-- docs-first `app/page.ax`
+- docs-first `app/page.asx`
 - section pages for `getting-started`, `components`, `reference`, and `examples`
 - reusable Foundry imports from `@axonyx/ui/...`
 - static brand assets in `public/`
