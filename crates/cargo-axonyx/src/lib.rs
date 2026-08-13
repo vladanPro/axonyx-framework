@@ -8879,7 +8879,10 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::InvalidStateInitializer { .. }
         | AxConvertV2Error::UnsupportedComponentStateType { .. }
         | AxConvertV2Error::UnknownStateBinding { .. }
-        | AxConvertV2Error::InvalidStateBinding { .. } => Some(1),
+        | AxConvertV2Error::InvalidStateBinding { .. }
+        | AxConvertV2Error::UnsupportedStateEvent { .. }
+        | AxConvertV2Error::UnknownStateEvent { .. }
+        | AxConvertV2Error::InvalidStateEvent { .. } => Some(1),
     }
 }
 
