@@ -10915,6 +10915,17 @@ fn write_state_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize>
     fs::create_dir_all(&state_dir)
         .with_context(|| format!("failed to create '{}'", state_dir.display()))?;
 
+    let runtime_dir = output_dir.join("_ax").join("runtime");
+    fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("failed to create '{}'", runtime_dir.display()))?;
+    let wasm_target = runtime_dir.join("axonyx-state-v0.wasm");
+    fs::write(&wasm_target, ax_state_wasm_bytes()).with_context(|| {
+        format!(
+            "failed to write WASM state executor to '{}'",
+            wasm_target.display()
+        )
+    })?;
+
     let manifest_target = state_dir.join("manifest.json");
     let manifest_json =
         serde_json::to_string_pretty(&report).context("failed to render state manifest as JSON")?;
@@ -19795,6 +19806,10 @@ page state count: Number = 1
         assert!(snapshot.contains("\"key\": \"page:root:count:2\""));
         assert!(snapshot.contains("\"kind\": \"number\""));
         assert!(snapshot.contains("\"value\": 1.0"));
+
+        let wasm = fs::read(root.join("dist/_ax/runtime/axonyx-state-v0.wasm"))
+            .expect("WASM state executor should exist");
+        assert!(wasm.starts_with(b"\0asm"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
