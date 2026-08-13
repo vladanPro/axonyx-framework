@@ -3161,8 +3161,8 @@ fn doctor_framework_layer_status_lines(checks: &[DoctorCheck]) -> Vec<String> {
             "Axonyx Pages",
             "ax-sources",
             checks,
-            ".ax pages, layouts, route params, and API source diagnostics pass",
-            ".ax page/route source diagnostics need attention",
+            ".asx pages and layouts plus .ax API source diagnostics pass",
+            ".asx page or .ax backend source diagnostics need attention",
             ".ax page/route source diagnostics could not be fully checked",
         ),
         doctor_layer_line(
