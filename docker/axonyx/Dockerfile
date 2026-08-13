@@ -1,8 +1,8 @@
 FROM rust:1.95-slim
 
-ARG CARGO_AXONYX_VERSION=0.1.95
-ARG CREATE_AXONYX_VERSION=0.1.62
-ARG AXONYX_RUNTIME_VERSION=0.1.49
+ARG CARGO_AXONYX_VERSION=0.2.2
+ARG CREATE_AXONYX_VERSION=0.2.2
+ARG AXONYX_RUNTIME_VERSION=0.1.53
 
 LABEL org.opencontainers.image.title="Axonyx"
 LABEL org.opencontainers.image.description="Rust-first Axonyx framework demo image with a generated docs starter"

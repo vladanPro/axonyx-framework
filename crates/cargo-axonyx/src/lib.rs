@@ -62,7 +62,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.52";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.53";
 const AXONYX_UI_VERSION: &str = "0.0.70";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -8879,7 +8879,10 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::InvalidStateInitializer { .. }
         | AxConvertV2Error::UnsupportedComponentStateType { .. }
         | AxConvertV2Error::UnknownStateBinding { .. }
-        | AxConvertV2Error::InvalidStateBinding { .. } => Some(1),
+        | AxConvertV2Error::InvalidStateBinding { .. }
+        | AxConvertV2Error::UnsupportedStateEvent { .. }
+        | AxConvertV2Error::UnknownStateEvent { .. }
+        | AxConvertV2Error::InvalidStateEvent { .. } => Some(1),
     }
 }
 
