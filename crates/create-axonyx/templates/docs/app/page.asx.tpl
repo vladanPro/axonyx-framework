@@ -1,10 +1,10 @@
-import { Alert } from "@axonyx/ui/foundry/Alert.ax"
-import { Badge } from "@axonyx/ui/foundry/Badge.ax"
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { Card } from "@axonyx/ui/foundry/Card.ax"
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
-import { Stack } from "@axonyx/ui/foundry/Stack.ax"
+import { Alert } from "@axonyx/ui/foundry/Alert.asx"
+import { Badge } from "@axonyx/ui/foundry/Badge.asx"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { Card } from "@axonyx/ui/foundry/Card.asx"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
+import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page DocsHome() {
 
@@ -52,7 +52,7 @@ return ASX {
       </Card>
       <Card title="Route-first docs">
         <Copy>
-          Each section is a normal `app/**/page.ax` route, wrapped by the shared
+          Each section is a normal `app/**/page.asx` route, wrapped by the shared
           docs layout and sidebar.
         </Copy>
         <Button href="/getting-started" variant="ghost" size="sm">Open guide</Button>
@@ -68,9 +68,9 @@ return ASX {
 
     <ContentGrid cols={2} gap="lg">
       <Card title="What to edit first">
-        <Copy>Edit `app/page.ax` for the overview page.</Copy>
-        <Copy>Edit `app/layout.ax` for the shell, nav, theme, and sidebar.</Copy>
-        <Copy>Add nested folders with `page.ax` to create new routes.</Copy>
+        <Copy>Edit `app/page.asx` for the overview page.</Copy>
+        <Copy>Edit `app/layout.asx` for the shell, nav, theme, and sidebar.</Copy>
+        <Copy>Add nested folders with `page.asx` to create new routes.</Copy>
       </Card>
       <Card title="Production loop">
         <Copy>`cargo ax check` validates `.ax` sources.</Copy>

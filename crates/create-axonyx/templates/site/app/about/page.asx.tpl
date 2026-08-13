@@ -1,9 +1,9 @@
-import { Badge } from "@axonyx/ui/foundry/Badge.ax"
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { Copy } from "@axonyx/ui/foundry/Copy.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
-import { Stack } from "@axonyx/ui/foundry/Stack.ax"
+import { Badge } from "@axonyx/ui/foundry/Badge.asx"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
+import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page About() {
   return ASX {

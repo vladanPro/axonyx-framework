@@ -8,7 +8,7 @@ return ASX {
 
   <Container max="xl" recipe="app-shell">
     <Copy tone="eyebrow">{{APP_NAME}}</Copy>
-    <Copy tone="muted">app/layout.ax wraps app/page.ax during preview.</Copy>
+    <Copy tone="muted">app/layout.asx wraps app/page.asx during preview.</Copy>
     <Slot />
   </Container>
 }

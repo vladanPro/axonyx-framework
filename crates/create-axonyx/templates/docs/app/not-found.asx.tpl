@@ -1,5 +1,5 @@
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
 
 page NotFound() {
 
@@ -15,7 +15,7 @@ return ASX {
       This docs route does not exist yet.
     </Copy>
     <Copy>
-      Create a new app/**/page.ax file or return to the docs index.
+      Create a new app/**/page.asx file or return to the docs index.
     </Copy>
     <Button slot="actions" href="/" variant="primary">Docs home</Button>
     <Button slot="actions" href="/getting-started" variant="ghost">Getting started</Button>

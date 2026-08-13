@@ -1,9 +1,9 @@
 use "@axonyx/ui"
-import { Header } from "@axonyx/ui/foundry/Header.ax"
-import { Navbar } from "@axonyx/ui/foundry/Navbar.ax"
-import { SiteShell } from "@axonyx/ui/foundry/SiteShell.ax"
-import { TextLink } from "@axonyx/ui/foundry/TextLink.ax"
-import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.ax"
+import { Header } from "@axonyx/ui/foundry/Header.asx"
+import { Navbar } from "@axonyx/ui/foundry/Navbar.asx"
+import { SiteShell } from "@axonyx/ui/foundry/SiteShell.asx"
+import { TextLink } from "@axonyx/ui/foundry/TextLink.asx"
+import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.asx"
 
 page BlogLayout() {
   return ASX {

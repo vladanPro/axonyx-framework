@@ -1,6 +1,6 @@
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
 
 page Examples() {
   return ASX {
@@ -26,7 +26,7 @@ page Examples() {
         </SectionCard>
         <SectionCard title="Docs module">
           <Copy>
-            Add `app/guides/page.ax`, link it from `app/layout.ax`, then run
+            Add `app/guides/page.asx`, link it from `app/layout.asx`, then run
             `cargo ax check` to confirm the route tree.
           </Copy>
         </SectionCard>

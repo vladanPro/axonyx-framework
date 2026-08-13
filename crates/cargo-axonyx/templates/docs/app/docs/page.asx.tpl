@@ -1,7 +1,7 @@
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { Stack } from "@axonyx/ui/foundry/Stack.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { Stack } from "@axonyx/ui/foundry/Stack.asx"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
 
 page DocsHome
 

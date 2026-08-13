@@ -4,20 +4,20 @@ This document describes the recommended authoring path for Axonyx today.
 
 ## Current Recommendation
 
-When writing new Axonyx pages and components, prefer JSX-like `.ax` files.
+When writing new Axonyx pages and components, prefer JSX-like `.asx` files.
 
 That means:
 
-- `app/layout.ax` for shared layout structure
-- `app/page.ax` for the root page
-- nested `app/.../page.ax` files for route trees
+- `app/layout.asx` for shared layout structure
+- `app/page.asx` for the root page
+- nested `app/.../page.asx` files for route trees
 - optional `loader.ax` and `actions.ax` files for route-local backend behavior
 - component imports from `@/components/...` or `@axonyx/ui/...`
 
 ## Example
 
 ```ax
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
 import { SiteHero } from "@/components/SiteHero.ax"
 
 page Home() {
@@ -83,4 +83,4 @@ If we are creating:
 - a new site page
 - a new UI component import example
 
-we should default to JSX-like `.ax`.
+we should default to JSX-like `.asx`.

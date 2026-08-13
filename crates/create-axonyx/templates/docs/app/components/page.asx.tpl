@@ -1,12 +1,12 @@
-import { Alert } from "@axonyx/ui/foundry/Alert.ax"
-import { Badge } from "@axonyx/ui/foundry/Badge.ax"
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { ButtonGroup } from "@axonyx/ui/foundry/ButtonGroup.ax"
-import { Card } from "@axonyx/ui/foundry/Card.ax"
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
-import { Progress } from "@axonyx/ui/foundry/Progress.ax"
-import { Stack } from "@axonyx/ui/foundry/Stack.ax"
+import { Alert } from "@axonyx/ui/foundry/Alert.asx"
+import { Badge } from "@axonyx/ui/foundry/Badge.asx"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { ButtonGroup } from "@axonyx/ui/foundry/ButtonGroup.asx"
+import { Card } from "@axonyx/ui/foundry/Card.asx"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
+import { Progress } from "@axonyx/ui/foundry/Progress.asx"
+import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page ComponentsShowcase() {
 
@@ -123,7 +123,7 @@ return ASX {
     <div class="ax-accordion__item">
       <div class="ax-accordion__trigger">Can I add more pages?</div>
       <div class="ax-accordion__content">
-        <Copy>Yes. Add `app/my-section/page.ax` and link it from `app/layout.ax`.</Copy>
+        <Copy>Yes. Add `app/my-section/page.asx` and link it from `app/layout.asx`.</Copy>
       </div>
     </div>
   </div>
