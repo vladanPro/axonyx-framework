@@ -63,7 +63,7 @@ const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/referen
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const AXONYX_RUNTIME_VERSION: &str = "0.1.53";
-const AXONYX_UI_VERSION: &str = "0.0.70";
+const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -20764,7 +20764,7 @@ axonyx-runtime = "0.1.0"
 
         let cargo_toml =
             fs::read_to_string(app_root.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.70\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.71\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -21517,7 +21517,7 @@ serde_json = "1"
 
         let updated = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(updated.contains(&format!("axonyx-runtime = \"{AXONYX_RUNTIME_VERSION}\"")));
-        assert!(updated.contains("version = \"0.0.70\""));
+        assert!(updated.contains("version = \"0.0.71\""));
 
         fs::write(
             &cargo_toml,
@@ -21528,7 +21528,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-ui = "0.0.70"
+axonyx-ui = "0.0.71"
 "#,
         )
         .expect("newer manifest should write");
@@ -21538,7 +21538,7 @@ axonyx-ui = "0.0.70"
                 .expect("newer UI dependency should remain unchanged")
         );
         let unchanged = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
-        assert!(unchanged.contains("axonyx-ui = \"0.0.70\""));
+        assert!(unchanged.contains("axonyx-ui = \"0.0.71\""));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -24471,6 +24471,7 @@ page RootLayout
 import { Button } from "@axonyx/ui/foundry/Button.asx"
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
 import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
 
 page Home
@@ -24478,7 +24479,8 @@ page Home
 <ContentGrid cols="2" gap="lg">
   <SectionCard title="Foundry import smoke">
     <Copy>Rendered from the real axonyx-ui package.</Copy>
-    <Button href="/posts" variant="primary" surface="forged">Open posts</Button>
+    <Button variant="primary" surface="forged">Save draft</Button>
+    <LinkButton href="/posts" variant="ghost">Open posts</LinkButton>
   </SectionCard>
 </ContentGrid>
 "#,
@@ -24503,6 +24505,10 @@ page Home
         assert!(html.contains(r#"data-ax-theme-storage-key="smoke-theme""#));
         assert!(html.contains(r#"data-max="xl""#));
         assert!(html.contains("Foundry import smoke"));
+        assert!(html.contains(r#"<button class="ax-button""#));
+        assert!(html.contains(r#"type="button""#));
+        assert!(html.contains("Save draft"));
+        assert!(html.contains(r#"<a class="ax-button""#));
         assert!(html.contains(r#"href="/posts""#));
         assert!(html.contains("Rendered from the real axonyx-ui package."));
 
