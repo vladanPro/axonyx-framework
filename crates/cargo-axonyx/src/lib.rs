@@ -1423,11 +1423,6 @@ fn migrate_asx_files(root: &Path, dry_run: bool) -> Result<()> {
         renames.insert(path.clone(), target);
     }
 
-    if renames.is_empty() {
-        println!("No legacy frontend .ax files found. The project already uses .asx.");
-        return Ok(());
-    }
-
     let mut project_sources = Vec::new();
     for relative in ["app", "routes", "features", "jobs"] {
         collect_ax_files(&root.join(relative), &mut project_sources)?;
@@ -1442,6 +1437,11 @@ fn migrate_asx_files(root: &Path, dry_run: bool) -> Result<()> {
         let mut migrated = source.clone();
         for import_source in migration_import_sources(&source) {
             if !import_source.ends_with(".ax") {
+                continue;
+            }
+            if import_source.starts_with("@axonyx/ui/") {
+                let replacement = format!("{}.asx", import_source.trim_end_matches(".ax"));
+                migrated = migrated.replace(&import_source, &replacement);
                 continue;
             }
             let resolved = resolve_migration_import_path(root, path, &import_source);
@@ -1459,6 +1459,29 @@ fn migrate_asx_files(root: &Path, dry_run: bool) -> Result<()> {
         }
     }
 
+    let config_path = root.join("Axonyx.toml");
+    let config_rewrite = if config_path.is_file() {
+        let source = fs::read_to_string(&config_path).with_context(|| {
+            format!(
+                "failed to read migration config '{}'",
+                config_path.display()
+            )
+        })?;
+        let migrated = source
+            .replace("app/page.ax", "app/page.asx")
+            .replace("app/layout.ax", "app/layout.asx");
+        (migrated != source).then_some((config_path, migrated))
+    } else {
+        None
+    };
+
+    if renames.is_empty() && rewrites.is_empty() && config_rewrite.is_none() {
+        println!(
+            "No legacy frontend .ax files or references found. The project already uses .asx."
+        );
+        return Ok(());
+    }
+
     let mode = if dry_run {
         "Would migrate"
     } else {
@@ -1474,12 +1497,18 @@ fn migrate_asx_files(root: &Path, dry_run: bool) -> Result<()> {
     for (path, _) in &rewrites {
         println!("{mode} imports in {}", display_relative_path(root, path));
     }
+    if let Some((path, _)) = &config_rewrite {
+        println!(
+            "{mode} frontend paths in {}",
+            display_relative_path(root, path)
+        );
+    }
 
     if dry_run {
         println!(
-            "Dry run complete: {} file rename(s), {} import rewrite(s).",
+            "Dry run complete: {} file rename(s), {} source rewrite(s).",
             renames.len(),
-            rewrites.len()
+            rewrites.len() + usize::from(config_rewrite.is_some())
         );
         return Ok(());
     }
@@ -1488,6 +1517,10 @@ fn migrate_asx_files(root: &Path, dry_run: bool) -> Result<()> {
     for (path, source) in rewrites {
         fs::write(&path, source)
             .with_context(|| format!("failed to rewrite imports in '{}'", path.display()))?;
+    }
+    if let Some((path, source)) = config_rewrite {
+        fs::write(&path, source)
+            .with_context(|| format!("failed to rewrite frontend paths in '{}'", path.display()))?;
     }
     for (source, target) in &renames {
         fs::rename(source, target).with_context(|| {
@@ -17184,7 +17217,7 @@ page SectionCard
         .expect("component should write");
         fs::write(
             root.join("app/posts/page.ax"),
-            "import { PostCard } from \"@/components/PostCard.ax\"\n\npage Posts() {\n  return ASX { <PostCard /> }\n}\n",
+            "import { Card } from \"@axonyx/ui/foundry/Card.ax\"\nimport { PostCard } from \"@/components/PostCard.ax\"\n\npage Posts() {\n  return ASX { <Card><PostCard /></Card> }\n}\n",
         )
         .expect("page should write");
         fs::write(
@@ -17192,6 +17225,11 @@ page SectionCard
             "query loadPosts() -> String {\n  return \"posts\"\n}\n",
         )
         .expect("loader should write");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[ui]\nentry = \"app/page.ax\"\nlayout = \"app/layout.ax\"\n",
+        )
+        .expect("config should write");
 
         migrate_asx_files(&root, false).expect("migration should pass");
 
@@ -17203,6 +17241,10 @@ page SectionCard
         let page =
             fs::read_to_string(root.join("app/posts/page.asx")).expect("migrated page should read");
         assert!(page.contains("@/components/PostCard.asx"));
+        assert!(page.contains("@axonyx/ui/foundry/Card.asx"));
+        let config = fs::read_to_string(root.join("Axonyx.toml")).expect("config should read");
+        assert!(config.contains("app/page.asx"));
+        assert!(config.contains("app/layout.asx"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
