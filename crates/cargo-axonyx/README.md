@@ -20,6 +20,7 @@ cargo ax db check
 cargo ax db pull
 cargo ax doctor
 cargo ax melt
+cargo ax migrate asx --dry-run
 cargo ax build --clean
 cargo ax run dev
 cargo ax run dev --transport std
@@ -52,9 +53,17 @@ variable when `--port` is omitted:
 PORT=3000 cargo ax run start --host 0.0.0.0
 ```
 
-`cargo ax run start` also performs the same `.ax` source diagnostics preflight
+`cargo ax run start` also performs the same `.asx` and `.ax` source diagnostics preflight
 as `cargo ax build`, so production starts fail before binding a port when a page
 has import, syntax, or route-source errors.
+
+Axonyx 0.2 separates frontend `.asx` files from backend `.ax` files. Upgrade an
+existing application after a dry run:
+
+```bash
+cargo ax migrate asx --dry-run
+cargo ax migrate asx
+```
 
 The server accepts request bodies up to `1mb` by default. Apps can change this
 in `Axonyx.toml`:
@@ -132,7 +141,7 @@ Generated apps depend on published Cargo packages by default:
 
 ```toml
 axonyx-runtime = "0.1.14"
-axonyx-ui = "0.0.58"
+axonyx-ui = "0.0.70"
 ```
 
 Local path and package override flows are still supported for framework development and UI dogfooding.

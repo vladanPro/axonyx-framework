@@ -19,12 +19,12 @@ const APP_GENERATED_BACKEND_RS: &str =
 const APP_DOMAIN_POSTS_RS: &str = include_str!("../templates/minimal/src/domain/posts.rs.tpl");
 const APP_DB_MOD_RS: &str = include_str!("../templates/minimal/src/db/mod.rs.tpl");
 const APP_AXONYX_TOML: &str = include_str!("../templates/minimal/Axonyx.toml.tpl");
-const APP_LAYOUT_AX: &str = include_str!("../templates/minimal/app/layout.ax.tpl");
+const APP_LAYOUT_AX: &str = include_str!("../templates/minimal/app/layout.asx.tpl");
 const APP_BACKEND_AX: &str = include_str!("../templates/minimal/app/backend.ax.tpl");
-const APP_PAGE_AX: &str = include_str!("../templates/minimal/app/page.ax.tpl");
-const APP_NOT_FOUND_AX: &str = include_str!("../templates/minimal/app/not-found.ax.tpl");
-const APP_ERROR_AX: &str = include_str!("../templates/minimal/app/error.ax.tpl");
-const APP_POSTS_PAGE_AX: &str = include_str!("../templates/minimal/app/posts/page.ax.tpl");
+const APP_PAGE_AX: &str = include_str!("../templates/minimal/app/page.asx.tpl");
+const APP_NOT_FOUND_AX: &str = include_str!("../templates/minimal/app/not-found.asx.tpl");
+const APP_ERROR_AX: &str = include_str!("../templates/minimal/app/error.asx.tpl");
+const APP_POSTS_PAGE_AX: &str = include_str!("../templates/minimal/app/posts/page.asx.tpl");
 const APP_POSTS_LOADER_AX: &str = include_str!("../templates/minimal/app/posts/loader.ax.tpl");
 const APP_POSTS_ACTIONS_AX: &str = include_str!("../templates/minimal/app/posts/actions.ax.tpl");
 const APP_ROUTE_POSTS_AX: &str = include_str!("../templates/minimal/routes/api/posts.ax.tpl");
@@ -38,29 +38,29 @@ const STATIC_APP_MAIN_RS: &str = include_str!("../templates/static/src/main.rs.t
 const STATIC_GENERATED_BACKEND_RS: &str =
     include_str!("../templates/static/src/generated/backend.rs.tpl");
 
-const SITE_APP_LAYOUT_AX: &str = include_str!("../templates/site/app/layout.ax.tpl");
-const SITE_APP_PAGE_AX: &str = include_str!("../templates/site/app/page.ax.tpl");
-const SITE_APP_NOT_FOUND_AX: &str = include_str!("../templates/site/app/not-found.ax.tpl");
-const SITE_APP_ERROR_AX: &str = include_str!("../templates/site/app/error.ax.tpl");
+const SITE_APP_LAYOUT_AX: &str = include_str!("../templates/site/app/layout.asx.tpl");
+const SITE_APP_PAGE_AX: &str = include_str!("../templates/site/app/page.asx.tpl");
+const SITE_APP_NOT_FOUND_AX: &str = include_str!("../templates/site/app/not-found.asx.tpl");
+const SITE_APP_ERROR_AX: &str = include_str!("../templates/site/app/error.asx.tpl");
 const SITE_APP_README: &str = include_str!("../templates/site/README.md.tpl");
 const SITE_APP_AEGIS_TOML: &str = include_str!("../templates/site/aegis.toml.tpl");
 const SITE_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/site/public/favicon.svg.tpl");
 const SITE_PUBLIC_BRAND_MARK_SVG: &str =
     include_str!("../templates/site/public/brand-mark.svg.tpl");
 
-const SITE_APP_ABOUT_AX: &str = include_str!("../templates/site/app/about/page.ax.tpl");
-const SITE_APP_CONTACT_AX: &str = include_str!("../templates/site/app/contact/page.ax.tpl");
+const SITE_APP_ABOUT_AX: &str = include_str!("../templates/site/app/about/page.asx.tpl");
+const SITE_APP_CONTACT_AX: &str = include_str!("../templates/site/app/contact/page.asx.tpl");
 
 const BLOG_AXONYX_TOML: &str = include_str!("../templates/blog/Axonyx.toml.tpl");
-const BLOG_APP_LAYOUT_AX: &str = include_str!("../templates/blog/app/layout.ax.tpl");
-const BLOG_APP_PAGE_AX: &str = include_str!("../templates/blog/app/page.ax.tpl");
+const BLOG_APP_LAYOUT_AX: &str = include_str!("../templates/blog/app/layout.asx.tpl");
+const BLOG_APP_PAGE_AX: &str = include_str!("../templates/blog/app/page.asx.tpl");
 const BLOG_APP_LOADER_AX: &str = include_str!("../templates/blog/app/loader.ax.tpl");
-const BLOG_APP_ABOUT_AX: &str = include_str!("../templates/blog/app/about/page.ax.tpl");
-const BLOG_APP_POST_AX: &str = include_str!("../templates/blog/app/blog/[slug]/page.ax.tpl");
+const BLOG_APP_ABOUT_AX: &str = include_str!("../templates/blog/app/about/page.asx.tpl");
+const BLOG_APP_POST_AX: &str = include_str!("../templates/blog/app/blog/[slug]/page.asx.tpl");
 const BLOG_APP_POST_LOADER_AX: &str =
     include_str!("../templates/blog/app/blog/[slug]/loader.ax.tpl");
-const BLOG_APP_NOT_FOUND_AX: &str = include_str!("../templates/blog/app/not-found.ax.tpl");
-const BLOG_APP_ERROR_AX: &str = include_str!("../templates/blog/app/error.ax.tpl");
+const BLOG_APP_NOT_FOUND_AX: &str = include_str!("../templates/blog/app/not-found.asx.tpl");
+const BLOG_APP_ERROR_AX: &str = include_str!("../templates/blog/app/error.asx.tpl");
 const BLOG_CONTENT_HELLO_AXONYX: &str =
     include_str!("../templates/blog/content/posts/hello-axonyx.md.tpl");
 const BLOG_CONTENT_FOUNDRY_NOTES: &str =
@@ -73,15 +73,15 @@ const BLOG_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/blog/public/fav
 const BLOG_PUBLIC_BRAND_MARK_SVG: &str =
     include_str!("../templates/blog/public/brand-mark.svg.tpl");
 
-const DOCS_APP_LAYOUT_AX: &str = include_str!("../templates/docs/app/layout.ax.tpl");
-const DOCS_APP_PAGE_AX: &str = include_str!("../templates/docs/app/page.ax.tpl");
-const DOCS_APP_NOT_FOUND_AX: &str = include_str!("../templates/docs/app/not-found.ax.tpl");
-const DOCS_APP_ERROR_AX: &str = include_str!("../templates/docs/app/error.ax.tpl");
+const DOCS_APP_LAYOUT_AX: &str = include_str!("../templates/docs/app/layout.asx.tpl");
+const DOCS_APP_PAGE_AX: &str = include_str!("../templates/docs/app/page.asx.tpl");
+const DOCS_APP_NOT_FOUND_AX: &str = include_str!("../templates/docs/app/not-found.asx.tpl");
+const DOCS_APP_ERROR_AX: &str = include_str!("../templates/docs/app/error.asx.tpl");
 const DOCS_APP_GETTING_STARTED_AX: &str =
-    include_str!("../templates/docs/app/getting-started/page.ax.tpl");
-const DOCS_APP_REFERENCE_AX: &str = include_str!("../templates/docs/app/reference/page.ax.tpl");
-const DOCS_APP_EXAMPLES_AX: &str = include_str!("../templates/docs/app/examples/page.ax.tpl");
-const DOCS_APP_COMPONENTS_AX: &str = include_str!("../templates/docs/app/components/page.ax.tpl");
+    include_str!("../templates/docs/app/getting-started/page.asx.tpl");
+const DOCS_APP_REFERENCE_AX: &str = include_str!("../templates/docs/app/reference/page.asx.tpl");
+const DOCS_APP_EXAMPLES_AX: &str = include_str!("../templates/docs/app/examples/page.asx.tpl");
+const DOCS_APP_COMPONENTS_AX: &str = include_str!("../templates/docs/app/components/page.asx.tpl");
 const DOCS_APP_README: &str = include_str!("../templates/docs/README.md.tpl");
 const DOCS_APP_AEGIS_TOML: &str = include_str!("../templates/docs/aegis.toml.tpl");
 const DOCS_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/docs/public/favicon.svg.tpl");
@@ -176,7 +176,7 @@ pub fn template_files(
         AppTemplate::Minimal => {
             files.extend([
                 TemplateFile {
-                    relative_path: "app/layout.ax",
+                    relative_path: "app/layout.asx",
                     contents: apply_vars(APP_LAYOUT_AX, &vars),
                 },
                 TemplateFile {
@@ -184,19 +184,19 @@ pub fn template_files(
                     contents: apply_vars(APP_BACKEND_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/page.ax",
+                    relative_path: "app/page.asx",
                     contents: apply_vars(APP_PAGE_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/not-found.ax",
+                    relative_path: "app/not-found.asx",
                     contents: apply_vars(APP_NOT_FOUND_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/error.ax",
+                    relative_path: "app/error.asx",
                     contents: apply_vars(APP_ERROR_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/posts/page.ax",
+                    relative_path: "app/posts/page.asx",
                     contents: apply_vars(APP_POSTS_PAGE_AX, &vars),
                 },
                 TemplateFile {
@@ -228,27 +228,27 @@ pub fn template_files(
         AppTemplate::Site => {
             files.extend([
                 TemplateFile {
-                    relative_path: "app/layout.ax",
+                    relative_path: "app/layout.asx",
                     contents: apply_vars(SITE_APP_LAYOUT_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/page.ax",
+                    relative_path: "app/page.asx",
                     contents: apply_vars(SITE_APP_PAGE_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/not-found.ax",
+                    relative_path: "app/not-found.asx",
                     contents: apply_vars(SITE_APP_NOT_FOUND_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/error.ax",
+                    relative_path: "app/error.asx",
                     contents: apply_vars(SITE_APP_ERROR_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/about/page.ax",
+                    relative_path: "app/about/page.asx",
                     contents: apply_vars(SITE_APP_ABOUT_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/contact/page.ax",
+                    relative_path: "app/contact/page.asx",
                     contents: apply_vars(SITE_APP_CONTACT_AX, &vars),
                 },
                 TemplateFile {
@@ -268,11 +268,11 @@ pub fn template_files(
         AppTemplate::Blog => {
             files.extend([
                 TemplateFile {
-                    relative_path: "app/layout.ax",
+                    relative_path: "app/layout.asx",
                     contents: apply_vars(BLOG_APP_LAYOUT_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/page.ax",
+                    relative_path: "app/page.asx",
                     contents: apply_vars(BLOG_APP_PAGE_AX, &vars),
                 },
                 TemplateFile {
@@ -280,11 +280,11 @@ pub fn template_files(
                     contents: apply_vars(BLOG_APP_LOADER_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/about/page.ax",
+                    relative_path: "app/about/page.asx",
                     contents: apply_vars(BLOG_APP_ABOUT_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/blog/[slug]/page.ax",
+                    relative_path: "app/blog/[slug]/page.asx",
                     contents: apply_vars(BLOG_APP_POST_AX, &vars),
                 },
                 TemplateFile {
@@ -292,11 +292,11 @@ pub fn template_files(
                     contents: apply_vars(BLOG_APP_POST_LOADER_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/not-found.ax",
+                    relative_path: "app/not-found.asx",
                     contents: apply_vars(BLOG_APP_NOT_FOUND_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/error.ax",
+                    relative_path: "app/error.asx",
                     contents: apply_vars(BLOG_APP_ERROR_AX, &vars),
                 },
                 TemplateFile {
@@ -328,35 +328,35 @@ pub fn template_files(
         AppTemplate::Docs => {
             files.extend([
                 TemplateFile {
-                    relative_path: "app/layout.ax",
+                    relative_path: "app/layout.asx",
                     contents: apply_vars(DOCS_APP_LAYOUT_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/page.ax",
+                    relative_path: "app/page.asx",
                     contents: apply_vars(DOCS_APP_PAGE_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/not-found.ax",
+                    relative_path: "app/not-found.asx",
                     contents: apply_vars(DOCS_APP_NOT_FOUND_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/error.ax",
+                    relative_path: "app/error.asx",
                     contents: apply_vars(DOCS_APP_ERROR_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/getting-started/page.ax",
+                    relative_path: "app/getting-started/page.asx",
                     contents: apply_vars(DOCS_APP_GETTING_STARTED_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/reference/page.ax",
+                    relative_path: "app/reference/page.asx",
                     contents: apply_vars(DOCS_APP_REFERENCE_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/examples/page.ax",
+                    relative_path: "app/examples/page.asx",
                     contents: apply_vars(DOCS_APP_EXAMPLES_AX, &vars),
                 },
                 TemplateFile {
-                    relative_path: "app/components/page.ax",
+                    relative_path: "app/components/page.asx",
                     contents: apply_vars(DOCS_APP_COMPONENTS_AX, &vars),
                 },
                 TemplateFile {

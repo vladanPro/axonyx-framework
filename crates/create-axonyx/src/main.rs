@@ -12,7 +12,7 @@ const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runti
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
 const DEFAULT_RUNTIME_VERSION: &str = "0.1.52";
 const DEFAULT_UI_PACKAGE: &str = "axonyx-ui";
-const DEFAULT_UI_VERSION: &str = "0.0.58";
+const DEFAULT_UI_VERSION: &str = "0.0.70";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonyx")]
@@ -726,12 +726,12 @@ mod tests {
         assert!(!target_dir.join("public/css/axonyx-ui").exists());
 
         let layout =
-            fs::read_to_string(target_dir.join("app/layout.ax")).expect("layout should read");
-        assert!(layout.contains("@axonyx/ui/foundry/SiteShell.ax"));
+            fs::read_to_string(target_dir.join("app/layout.asx")).expect("layout should read");
+        assert!(layout.contains("@axonyx/ui/foundry/SiteShell.asx"));
         assert!(layout.contains(
             r#"<Theme storageKey="demo-site-theme" default="silver" preflight="true" />"#
         ));
-        assert!(layout.contains("@axonyx/ui/foundry/ThemeSwitcher.ax"));
+        assert!(layout.contains("@axonyx/ui/foundry/ThemeSwitcher.asx"));
         assert!(layout.contains("use \"@axonyx/ui\""));
 
         assert!(!target_dir.join("app/backend.ax").exists());
@@ -745,22 +745,22 @@ mod tests {
         assert!(
             cargo_toml.contains("axonyx-runtime = { version = \"0.1.52\", features = [\"axum\"] }")
         );
-        assert!(cargo_toml.contains("axonyx-ui = \"0.0.58\""));
+        assert!(cargo_toml.contains("axonyx-ui = \"0.0.70\""));
 
-        let page = fs::read_to_string(target_dir.join("app/page.ax")).expect("page should read");
+        let page = fs::read_to_string(target_dir.join("app/page.asx")).expect("page should read");
         assert!(page.contains("page Home()"));
         assert!(page.contains("return ASX {"));
-        assert!(page.contains("@axonyx/ui/foundry/SectionCard.ax"));
-        assert!(target_dir.join("app/not-found.ax").exists());
-        assert!(target_dir.join("app/error.ax").exists());
+        assert!(page.contains("@axonyx/ui/foundry/SectionCard.asx"));
+        assert!(target_dir.join("app/not-found.asx").exists());
+        assert!(target_dir.join("app/error.asx").exists());
 
         let axonyx_toml =
             fs::read_to_string(target_dir.join("Axonyx.toml")).expect("config should read");
         assert!(axonyx_toml.contains("enabled = [\"ui\"]"));
         assert!(!axonyx_toml.contains("[package_overrides]"));
 
-        assert!(target_dir.join("app/about/page.ax").exists());
-        assert!(target_dir.join("app/contact/page.ax").exists());
+        assert!(target_dir.join("app/about/page.asx").exists());
+        assert!(target_dir.join("app/contact/page.asx").exists());
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }
@@ -785,7 +785,7 @@ mod tests {
 
         let loader = fs::read_to_string(target_dir.join("app/posts/loader.ax"))
             .expect("posts loader should read");
-        let page = fs::read_to_string(target_dir.join("app/posts/page.ax"))
+        let page = fs::read_to_string(target_dir.join("app/posts/page.asx"))
             .expect("posts page should read");
 
         assert!(loader.contains("export type Post {"));
@@ -820,7 +820,7 @@ mod tests {
         assert!(config.contains("[prerender.collections.posts]"));
         assert!(config.contains("route = \"/blog/:slug\""));
         assert!(target_dir.join("content/posts/hello-axonyx.md").exists());
-        assert!(target_dir.join("app/blog/[slug]/page.ax").exists());
+        assert!(target_dir.join("app/blog/[slug]/page.asx").exists());
         assert!(target_dir.join("app/blog/[slug]/loader.ax").exists());
         assert!(!target_dir.join("app/backend.ax").exists());
         assert!(!target_dir.join(".env.example").exists());
@@ -843,9 +843,9 @@ mod tests {
 
         assert!(!paths.contains(&"app/backend.ax"));
         assert!(!paths.contains(&"app/feedback/actions.ax"));
-        assert!(!paths.contains(&"app/feedback/page.ax"));
-        assert!(paths.contains(&"app/getting-started/page.ax"));
-        assert!(paths.contains(&"app/reference/page.ax"));
+        assert!(!paths.contains(&"app/feedback/page.asx"));
+        assert!(paths.contains(&"app/getting-started/page.asx"));
+        assert!(paths.contains(&"app/reference/page.asx"));
     }
 
     #[test]
@@ -862,7 +862,7 @@ mod tests {
             .expect("docs template should include README");
         let reference = files
             .iter()
-            .find(|file| file.relative_path == "app/reference/page.ax")
+            .find(|file| file.relative_path == "app/reference/page.asx")
             .expect("docs template should include reference page");
 
         assert!(readme.contents.contains("cargo ax run dev"));

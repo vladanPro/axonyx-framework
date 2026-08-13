@@ -1,6 +1,6 @@
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { Copy } from "@axonyx/ui/foundry/Copy.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
 
 page NotFound() {
   return ASX {

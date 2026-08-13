@@ -1,7 +1,7 @@
-import { Copy } from "@axonyx/ui/foundry/Copy.ax"
-import { PageHeader } from "@axonyx/ui/foundry/PageHeader.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
-import { Stack } from "@axonyx/ui/foundry/Stack.ax"
+import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
+import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page AboutBlog() {
   return ASX {

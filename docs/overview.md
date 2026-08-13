@@ -41,8 +41,8 @@ The goal is to make these three developer stories feel real:
 
 For framework work today, the recommended Axonyx path is:
 
-- JSX-like `.ax` files
-- `app/layout.ax` and `app/page.ax` as the main route entrypoints
+- JSX-like `.asx` files
+- `app/layout.asx` and `app/page.asx` as the main route entrypoints
 - nested app routes for site structure
 - `loader.ax` and `actions.ax` for route-local backend behavior
 - imports from local components and `@axonyx/ui`
@@ -56,5 +56,5 @@ Axonyx still contains older indentation-first `.ax` parsing because it is useful
 compatibility, reference material, and transition work.
 
 But if we are deciding how to write new pages, new examples, or new starter templates,
-the preferred answer should be the JSX-like `.ax` direction rather than the indentation
+the preferred answer should be the JSX-like `.asx` direction rather than the indentation
 syntax.

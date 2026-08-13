@@ -12,10 +12,10 @@ state signals.
 
 ## What Works Today
 
-- JSX-like `.ax` authoring in `app/**/page.ax` and `app/**/layout.ax`
+- JSX-like `.asx` authoring in `app/**/page.asx` and `app/**/layout.asx`
 - nested app routes
 - dynamic route params and query context
-- route boundaries through `app/not-found.ax` and `app/error.ax`
+- route boundaries through `app/not-found.asx` and `app/error.asx`
 - route-local `loader.ax` and `actions.ax` draft support
 - first action patch response contract through `application/ax-patch+json`
 - backend-oriented `.ax` files for loaders, actions, routes, and jobs
@@ -148,7 +148,7 @@ cargo run -p create-axonyx -- my-site --yes --template site
 
 Recommended authoring path today:
 
-- JSX-like `.ax` files in `app/**/page.ax` and `app/**/layout.ax`
+- JSX-like `.asx` files in `app/**/page.asx` and `app/**/layout.asx`
 - nested app routes with route-local `loader.ax` and `actions.ax` when needed
 - imports from local app components via `@/components/...`
 - imports from Axonyx UI packages via `@axonyx/ui/...`
@@ -157,19 +157,19 @@ Example route tree:
 
 ```text
 app/
-  layout.ax
-  page.ax
+  layout.asx
+  page.asx
   docs/
-    page.ax
+    page.asx
   components/
-    page.ax
+    page.asx
   blog/
     [slug]/
-      page.ax
+      page.asx
       loader.ax
 ```
 
-Legacy indentation-first `.ax` syntax still exists for compatibility and reference work, but new examples and new framework authoring should prefer the JSX-like `.ax` direction.
+Legacy indentation-first `.ax` syntax still exists for compatibility and reference work, but new examples and new framework authoring should prefer the JSX-like `.asx` direction.
 
 Typed data is available in the JSX-like path:
 
@@ -205,7 +205,7 @@ query loadPosts() -> Post[] {
 Use `post?.summary` when a missing field is intentional and should render as an empty string.
 Use `summary?: String` in the type when the field is part of the schema but optional.
 
-Early UI state authoring is also available in JSX-like `.ax`:
+Early UI state authoring is also available in JSX-like `.asx`:
 
 ```ax
 page Settings() {
@@ -283,6 +283,7 @@ From an app root:
 ```bash
 cargo ax doctor
 cargo ax check
+cargo ax migrate asx --dry-run
 cargo ax contracts
 cargo ax schema pull ./sample-posts.json --name Post
 cargo ax actions
@@ -291,6 +292,15 @@ cargo ax state
 cargo ax build
 cargo ax run dev
 cargo ax test
+```
+
+Axonyx 0.2 uses `.asx` for pages, layouts, boundaries, and UI components while
+keeping `.ax` for loaders, actions, API routes, domain code, and jobs. Existing
+projects can preview and apply the mechanical migration with:
+
+```bash
+cargo ax migrate asx --dry-run
+cargo ax migrate asx
 ```
 
 `cargo ax schema pull` accepts sample JSON as a draft, but it can also read a typed
@@ -372,7 +382,7 @@ and regenerates:
 src/generated/backend.rs
 ```
 
-It also renders static page routes from `app/**/page.ax` into:
+It also renders static page routes from `app/**/page.asx` into:
 
 ```text
 dist/
@@ -430,7 +440,7 @@ Inspect the route tree:
 cargo ax routes
 ```
 
-This lists `app/**/page.ax` page routes, `routes/**/*.ax` backend routes, dynamic params, nested layout count, and route-local `loader.ax` / `actions.ax` files.
+This lists `app/**/page.asx` page routes, `routes/**/*.ax` backend routes, dynamic params, nested layout count, and route-local `loader.ax` / `actions.ax` files.
 
 Inspect route-local action contracts:
 

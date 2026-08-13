@@ -13,7 +13,7 @@ cargo run -p create-axonyx -- proof-app --yes --template site
 Expected:
 
 - app is generated without manual file fixes
-- `app/layout.ax` and `app/page.ax` exist
+- `app/layout.asx` and `app/page.asx` exist
 - template README mentions AX v2 direction
 
 ## 2) Run Loop
@@ -33,7 +33,7 @@ Expected:
 
 ## 3) AX v2 Page Edit
 
-Edit `app/page.ax` and change visible copy.
+Edit `app/page.asx` and change visible copy.
 
 Expected:
 
@@ -43,7 +43,7 @@ Expected:
 
 ## 4) Nested Route
 
-Add `app/docs/page.ax` and open `/docs`.
+Add `app/docs/page.asx` and open `/docs`.
 
 Expected:
 
@@ -52,7 +52,7 @@ Expected:
 
 ## 5) Dynamic Route Params
 
-Add `app/posts/[slug]/page.ax` and open `/posts/hello-axonyx`.
+Add `app/posts/[slug]/page.asx` and open `/posts/hello-axonyx`.
 
 Expected:
 
@@ -69,7 +69,7 @@ Expected:
 
 ## 7) Local Component Import
 
-Create `app/components/HeroCard.ax`, import it in `app/page.ax`.
+Create `app/components/HeroCard.ax`, import it in `app/page.asx`.
 
 Expected:
 

@@ -50,10 +50,10 @@ static route for every Markdown entry.
 
 ## First edits
 
-1. Replace the intro copy in `app/page.ax`.
+1. Replace the intro copy in `app/page.asx`.
 2. Add or edit Markdown files in `content/posts`.
-3. Update `app/about/page.ax` with your publishing point of view.
-4. Choose the default reading theme in `app/layout.ax`.
+3. Update `app/about/page.asx` with your publishing point of view.
+4. Choose the default reading theme in `app/layout.asx`.
 5. Run `cargo ax content` before deploy when a post is missing.
 
 ## Template contract

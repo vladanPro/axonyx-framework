@@ -3,8 +3,8 @@ name = "{{APP_NAME}}"
 runtime = "native"
 
 [ui]
-entry = "app/page.ax"
-layout = "app/layout.ax"
+entry = "app/page.asx"
+layout = "app/layout.asx"
 render_mode = "server"
 
 [server]

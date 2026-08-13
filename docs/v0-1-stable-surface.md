@@ -18,10 +18,10 @@ The `v0.1` stable surface should guarantee:
 
 Recommended and expected path:
 
-- JSX-like `.ax` syntax
+- JSX-like `.asx` syntax
 - top-level `page <Name>`
-- `app/layout.ax` and `app/page.ax` route entrypoints
-- nested `app/**/page.ax` for route trees
+- `app/layout.asx` and `app/page.asx` route entrypoints
+- nested `app/**/page.asx` for route trees
 - local imports via `@/components/...`
 - UI package imports via `@axonyx/ui/...`
 - `Head` tags: `Title`, `Theme`, `Meta`, `Link`, `Script`

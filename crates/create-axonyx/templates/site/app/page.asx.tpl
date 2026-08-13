@@ -1,12 +1,12 @@
-import { Badge } from "@axonyx/ui/foundry/Badge.ax"
-import { Button } from "@axonyx/ui/foundry/Button.ax"
-import { ButtonGroup } from "@axonyx/ui/foundry/ButtonGroup.ax"
-import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.ax"
-import { Copy } from "@axonyx/ui/foundry/Copy.ax"
-import { FeatureSection } from "@axonyx/ui/foundry/FeatureSection.ax"
-import { HeroCard } from "@axonyx/ui/foundry/HeroCard.ax"
-import { SectionCard } from "@axonyx/ui/foundry/SectionCard.ax"
-import { Stack } from "@axonyx/ui/foundry/Stack.ax"
+import { Badge } from "@axonyx/ui/foundry/Badge.asx"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { ButtonGroup } from "@axonyx/ui/foundry/ButtonGroup.asx"
+import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
+import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+import { FeatureSection } from "@axonyx/ui/foundry/FeatureSection.asx"
+import { HeroCard } from "@axonyx/ui/foundry/HeroCard.asx"
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
+import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page Home() {
   return ASX {

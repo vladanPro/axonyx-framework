@@ -56,7 +56,7 @@ Runtime source and UI package source are separate concerns.
 The framework can resolve `.ax` imports such as:
 
 ```ax
-import { Button } from "@axonyx/ui/foundry/Button.ax"
+import { Button } from "@axonyx/ui/foundry/Button.asx"
 ```
 
 from an `axonyx-ui` Cargo dependency when that package exposes `Axonyx.package.toml`.

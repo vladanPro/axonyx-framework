@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use axonyx_runtime::preview_ax_app;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let layout_source = fs::read_to_string("app/layout.ax").ok();
-    let page_source = fs::read_to_string("app/page.ax")?;
+    let layout_source = fs::read_to_string("app/layout.asx").ok();
+    let page_source = fs::read_to_string("app/page.asx")?;
     let preview_html = preview_ax_app(layout_source.as_deref(), &page_source)?;
     let preview_path = PathBuf::from("target").join("axonyx-preview.html");
 
