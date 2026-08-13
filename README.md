@@ -283,6 +283,7 @@ From an app root:
 ```bash
 cargo ax doctor
 cargo ax check
+cargo ax contracts
 cargo ax schema pull ./sample-posts.json --name Post
 cargo ax actions
 cargo ax content
@@ -327,7 +328,34 @@ cargo ax doctor --format json
 cargo ax routes --format json
 cargo ax actions --format json
 cargo ax state --format json
+cargo ax contracts --format json
 ```
+
+`cargo ax contracts` is the stable, versioned application contract surface for
+tools. Contract V1 combines named `.ax` types, structured component props,
+page data bindings, loader/action signatures, API routes, and scopes without
+exposing the full internal Melt graph. Write it explicitly with:
+
+```bash
+cargo ax contracts --format json --out public/axonyx-contracts.json
+```
+
+Every production build also emits the same schema at
+`dist/_ax/contracts/manifest.json`. Missing type annotations remain visible as
+unknown/empty metadata unless a direct route-local loader call provides a
+declared return contract. For example, `data posts = loadPosts()` inherits
+`List<Post>` from `app/posts/loader.ax` when `loadPosts` returns `Post[]`.
+Explicit page types are checked against that loader contract, and mismatches
+fail `cargo ax check` instead of silently changing the public manifest.
+When no route-local loader matches, a uniquely named shared query under
+`app/**` can provide the same type contract. Route-local loaders take priority;
+ambiguous shared query names fail diagnostics rather than depending on file
+system traversal order.
+
+UI package tooling uses the same structured prop shape. With `axonyx-ui`
+installed, `cargo ax registry --format json` parses each registry component and
+adds its `props` contract (`name`, `ty`, `required`, and `default`) without
+changing the existing `cargo ax add` copy/install path.
 
 ## Build
 
