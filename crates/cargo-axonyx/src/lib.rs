@@ -41,7 +41,7 @@ use axonyx_runtime::server_prelude::{
     AxSseEvent,
 };
 use axonyx_runtime::{
-    backend_prelude as ax_backend_runtime, execute_preview_action_sources,
+    ax_state_wasm_bytes, backend_prelude as ax_backend_runtime, execute_preview_action_sources,
     execute_preview_action_sources_with_runtime, execute_preview_route_request_sources,
     execute_preview_route_request_sources_with_runtime,
     preview_ax_route_with_request_context_and_imports,
@@ -62,7 +62,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.53";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.54";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -2329,6 +2329,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     }
 
     checks.push(doctor_state_manifest_check(root));
+    checks.push(doctor_state_runtime_check(root));
     checks.push(doctor_ax_sources_check(root));
     checks.push(doctor_melt_graph_check(root));
     if let Some(target) = deploy {
@@ -2620,6 +2621,47 @@ fn doctor_state_manifest_check(root: &Path) -> DoctorCheck {
             message: format!("State manifest failed: {error}"),
             hint: Some("Run `cargo ax state` to inspect state declarations and manifest output."),
         },
+    }
+}
+
+fn doctor_state_runtime_check(root: &Path) -> DoctorCheck {
+    let signal_count = collect_state_report(root)
+        .map(|report| {
+            report
+                .files
+                .iter()
+                .map(|file| file.signals.len())
+                .sum::<usize>()
+        })
+        .unwrap_or_default();
+
+    if signal_count == 0 {
+        return DoctorCheck {
+            code: "state-runtime",
+            severity: DoctorSeverity::Ok,
+            message: "State runtime is inactive because the app has no state signals.".to_string(),
+            hint: None,
+        };
+    }
+
+    let wasm = ax_state_wasm_bytes();
+    if !wasm.starts_with(b"\0asm") {
+        return DoctorCheck {
+            code: "state-runtime",
+            severity: DoctorSeverity::Error,
+            message: "Bundled WASM state executor is invalid.".to_string(),
+            hint: Some("Reinstall cargo-axonyx before building or deploying this app."),
+        };
+    }
+
+    DoctorCheck {
+        code: "state-runtime",
+        severity: DoctorSeverity::Ok,
+        message: format!(
+            "WASM state executor v0 is bundled ({} bytes); interactive routes prefer WASM and retain the JS fallback.",
+            wasm.len()
+        ),
+        hint: None,
     }
 }
 
@@ -13602,6 +13644,15 @@ fn handle_http_request(
     }
 
     if request.method == "GET" {
+        if request.target == axonyx_runtime::AX_STATE_WASM_PATH {
+            return Ok(AxHttpResponse::bytes(
+                200,
+                "application/wasm",
+                ax_state_wasm_bytes().to_vec(),
+            )
+            .with_header("Cache-Control", REVALIDATE_ASSET_CACHE_CONTROL));
+        }
+
         if let Some(asset) = load_dist_ax_asset(&state.root, &request.target)? {
             return Ok(internal_asset_response(asset));
         }
@@ -19199,6 +19250,36 @@ route GET "/api/posts"
     }
 
     #[test]
+    fn server_serves_bundled_wasm_state_executor() {
+        let root = make_temp_dir("wasm-state-executor-asset");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+            runtime_config: AxServerRuntimeConfig::from_root(&root)
+                .expect("runtime config should load"),
+        };
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: axonyx_runtime::AX_STATE_WASM_PATH.to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "application/wasm");
+        assert_eq!(
+            response.header_value("Cache-Control"),
+            Some(REVALIDATE_ASSET_CACHE_CONTROL)
+        );
+        assert!(response.body.into_bytes().starts_with(b"\0asm"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn missing_public_asset_returns_none() {
         let root = make_temp_dir("missing-public");
 
@@ -21335,6 +21416,12 @@ state theme = "silver"
             .expect("state manifest check should exist");
 
         assert_eq!(state.severity, DoctorSeverity::Ok);
+        let runtime = checks
+            .iter()
+            .find(|check| check.code == "state-runtime")
+            .expect("state runtime check should exist");
+        assert_eq!(runtime.severity, DoctorSeverity::Ok);
+        assert!(runtime.message.contains("WASM state executor v0"));
         assert!(state.message.contains("1 signal"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
