@@ -2658,7 +2658,7 @@ fn doctor_state_runtime_check(root: &Path) -> DoctorCheck {
         code: "state-runtime",
         severity: DoctorSeverity::Ok,
         message: format!(
-            "WASM state executor v1 is bundled ({} bytes); String, Number, and Bool local operations prefer WASM and retain the JS fallback.",
+            "WASM state executor v1 is bundled ({} bytes); String, Number, and Bool local operations prefer WASM, browser events use the validated ax-state-event/1 envelope, and the JS fallback remains available.",
             wasm.len()
         ),
         hint: None,
