@@ -46,7 +46,7 @@ use axonyx_runtime::{
     execute_preview_route_request_sources_with_runtime,
     preview_ax_route_with_request_context_and_imports,
     preview_ax_route_with_request_context_and_runtime_and_imports, AxPreviewActionResult,
-    AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
+    AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore, AX_STATE_WASM_PATH,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::write::GzEncoder;
@@ -62,7 +62,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.54";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.55";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -2658,7 +2658,7 @@ fn doctor_state_runtime_check(root: &Path) -> DoctorCheck {
         code: "state-runtime",
         severity: DoctorSeverity::Ok,
         message: format!(
-            "WASM state executor v0 is bundled ({} bytes); interactive routes prefer WASM and retain the JS fallback.",
+            "WASM state executor v1 is bundled ({} bytes); String, Number, and Bool local operations prefer WASM and retain the JS fallback.",
             wasm.len()
         ),
         hint: None,
@@ -10918,7 +10918,10 @@ fn write_state_manifest_to_dist(root: &Path, output_dir: &Path) -> Result<usize>
     let runtime_dir = output_dir.join("_ax").join("runtime");
     fs::create_dir_all(&runtime_dir)
         .with_context(|| format!("failed to create '{}'", runtime_dir.display()))?;
-    let wasm_target = runtime_dir.join("axonyx-state-v0.wasm");
+    let wasm_file_name = Path::new(AX_STATE_WASM_PATH)
+        .file_name()
+        .context("Axonyx state WASM path must include a file name")?;
+    let wasm_target = runtime_dir.join(wasm_file_name);
     fs::write(&wasm_target, ax_state_wasm_bytes()).with_context(|| {
         format!(
             "failed to write WASM state executor to '{}'",
@@ -19807,7 +19810,10 @@ page state count: Number = 1
         assert!(snapshot.contains("\"kind\": \"number\""));
         assert!(snapshot.contains("\"value\": 1.0"));
 
-        let wasm = fs::read(root.join("dist/_ax/runtime/axonyx-state-v0.wasm"))
+        let wasm_file_name = Path::new(AX_STATE_WASM_PATH)
+            .file_name()
+            .expect("state WASM path should include a file name");
+        let wasm = fs::read(root.join("dist/_ax/runtime").join(wasm_file_name))
             .expect("WASM state executor should exist");
         assert!(wasm.starts_with(b"\0asm"));
 
@@ -21436,7 +21442,8 @@ state theme = "silver"
             .find(|check| check.code == "state-runtime")
             .expect("state runtime check should exist");
         assert_eq!(runtime.severity, DoctorSeverity::Ok);
-        assert!(runtime.message.contains("WASM state executor v0"));
+        assert!(runtime.message.contains("WASM state executor v1"));
+        assert!(runtime.message.contains("String, Number, and Bool"));
         assert!(state.message.contains("1 signal"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
