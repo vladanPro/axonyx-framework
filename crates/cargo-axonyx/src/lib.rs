@@ -62,7 +62,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.55";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.56";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -2658,7 +2658,7 @@ fn doctor_state_runtime_check(root: &Path) -> DoctorCheck {
         code: "state-runtime",
         severity: DoctorSeverity::Ok,
         message: format!(
-            "WASM state executor v1 is bundled ({} bytes); String, Number, and Bool local operations prefer WASM and retain the JS fallback.",
+            "WASM state executor v1 is bundled ({} bytes); String, Number, and Bool local operations prefer WASM, browser events use the validated ax-state-event/1 envelope, and the JS fallback remains available.",
             wasm.len()
         ),
         hint: None,
