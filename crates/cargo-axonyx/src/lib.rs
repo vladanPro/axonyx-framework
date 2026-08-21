@@ -34,7 +34,8 @@ use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext, AxRecordType, AxType};
 use axonyx_core::state_prelude::{
-    build_state_manifest_with_scope, build_state_manifest_with_scope_mapper, AxStateValue,
+    build_state_manifest_with_scope, build_state_manifest_with_scope_mapper, AxStatePersistence,
+    AxStateValue,
 };
 use axonyx_runtime::server_prelude::{
     axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
@@ -62,7 +63,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.57";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.58";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -932,6 +933,8 @@ struct StateReportSignal {
     owner: String,
     ty: String,
     initial: AxStateValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persistence: Option<AxStatePersistence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -8888,6 +8891,7 @@ fn line_from_ax_parse_v2_error(error: &AxParseV2Error) -> Option<usize> {
         | AxParseV2Error::InvalidType { line }
         | AxParseV2Error::InvalidLet { line }
         | AxParseV2Error::InvalidState { line }
+        | AxParseV2Error::InvalidStatePersistence { line, .. }
         | AxParseV2Error::InvalidFunction { line }
         | AxParseV2Error::InvalidComponent { line }
         | AxParseV2Error::InvalidReturnAsx { line }
@@ -12528,6 +12532,7 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
                     .unwrap_or_else(|| state_owner_for_path(root, &path)),
                 ty: signal.ty,
                 initial: signal.initial,
+                persistence: signal.persistence,
             })
             .collect::<Vec<_>>();
 
@@ -12563,6 +12568,7 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
                     owner: component_scope.clone(),
                     ty: signal.ty,
                     initial: signal.initial,
+                    persistence: signal.persistence,
                 });
             }
         }
@@ -12750,6 +12756,7 @@ fn component_state_signals_from_source(source: &str) -> Vec<StateReportSignal> {
                 owner: scope,
                 ty,
                 initial,
+                persistence: None,
             });
         }
 
@@ -18283,6 +18290,7 @@ scope Blog <Domain> {
                         owner: "app".to_string(),
                         ty: "String".to_string(),
                         initial: AxStateValue::String("sr".to_string()),
+                        persistence: None,
                     },
                     StateReportSignal {
                         name: "sidebarOpen".to_string(),
@@ -18291,6 +18299,7 @@ scope Blog <Domain> {
                         owner: "layout:/docs".to_string(),
                         ty: "Bool".to_string(),
                         initial: AxStateValue::Bool(false),
+                        persistence: None,
                     },
                     StateReportSignal {
                         name: "filter".to_string(),
@@ -18299,6 +18308,7 @@ scope Blog <Domain> {
                         owner: "page:/docs/getting-started".to_string(),
                         ty: "String".to_string(),
                         initial: AxStateValue::String(String::new()),
+                        persistence: None,
                     },
                 ],
             }],
@@ -19758,7 +19768,7 @@ page Docs
             r#"
 page Home
 
-page state theme: String = "silver"
+page state theme: String = "silver" persist local("axonyx:theme")
 page state count: Number = 1
 
 <main>
@@ -19795,6 +19805,9 @@ page state count: Number = 1
         assert!(manifest.contains("\"key\": \"page:root:theme:1\""));
         assert!(manifest.contains("\"owner\": \"page:/\""));
         assert!(manifest.contains("\"ty\": \"String\""));
+        assert!(manifest.contains("\"protocol\": \"ax-storage-capability/1\""));
+        assert!(manifest.contains("\"scope\": \"local\""));
+        assert!(manifest.contains("\"key\": \"axonyx:theme\""));
         assert!(manifest.contains("\"name\": \"count\""));
         assert!(manifest.contains("\"key\": \"page:root:count:2\""));
 
