@@ -32,7 +32,9 @@ use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
-use axonyx_core::ax_types_prelude::{check_document_types, AxDataContext, AxRecordType, AxType};
+use axonyx_core::ax_types_prelude::{
+    check_document_types, AxDataContext, AxRecordType, AxType, AxTypeParseError,
+};
 use axonyx_core::state_prelude::{
     build_state_manifest_with_scope, build_state_manifest_with_scope_mapper, AxStatePersistence,
     AxStateValue,
@@ -914,6 +916,7 @@ struct ActionInputReport {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct StateReport {
+    types: Vec<ApiSchemaReport>,
     files: Vec<StateReportFile>,
     graph: StateGraphReport,
     patches: Vec<StatePatchUsageReport>,
@@ -2661,7 +2664,7 @@ fn doctor_state_runtime_check(root: &Path) -> DoctorCheck {
         code: "state-runtime",
         severity: DoctorSeverity::Ok,
         message: format!(
-            "WASM state executor v1 is bundled ({} bytes); String, Number, and Bool local operations prefer WASM, browser events use the validated ax-state-event/1 envelope, and the JS fallback remains available.",
+            "WASM state executor v2 / ABI 3 is bundled ({} bytes); canonical scalar operations and structured List, Map, Set, Optional, Result, Json, Bytes, and record SET values prefer the binary ax-value/1 WASM bridge, while the validated JS host remains available.",
             wasm.len()
         ),
         hint: None,
@@ -6722,6 +6725,7 @@ fn check_ax_source_with_context(
             Ok(document) => check_backend_requirements(path, source, root, &document),
             Err(error) => vec![diagnostic_from_parse_error(
                 path,
+                source,
                 CheckParseError::Backend(error),
             )],
         };
@@ -6754,6 +6758,7 @@ fn check_ax_source_with_context(
         Err(error) => {
             return vec![diagnostic_from_parse_error(
                 path,
+                source,
                 CheckParseError::Page(error),
             )]
         }
@@ -7263,6 +7268,17 @@ fn collect_db_surface_diagnostics_from_expr(
                     path,
                     source,
                     item,
+                    resources,
+                    diagnostics,
+                );
+            }
+        }
+        AxExpr::Object(fields) => {
+            for value in fields.values() {
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    value,
                     resources,
                     diagnostics,
                 );
@@ -8820,13 +8836,26 @@ enum CheckParseError {
     Backend(AxBackendParseError),
 }
 
-fn diagnostic_from_parse_error(path: &Path, error: CheckParseError) -> CheckDiagnostic {
+fn diagnostic_from_parse_error(
+    path: &Path,
+    source: &str,
+    error: CheckParseError,
+) -> CheckDiagnostic {
     let (line, code, message) = match error {
-        CheckParseError::Page(error) => (
-            line_from_auto_parse_error(&error).unwrap_or(1),
-            "axonyx-parse",
-            message_from_auto_parse_error(&error),
-        ),
+        CheckParseError::Page(error) => match &error {
+            AxAutoParseError::Convert(AxConvertV2Error::InvalidStateTypeContract {
+                error: type_error,
+            }) => (
+                line_from_type_contract_error(source, type_error),
+                "axonyx-type",
+                message_from_auto_parse_error(&error),
+            ),
+            _ => (
+                line_from_auto_parse_error(&error).unwrap_or(1),
+                "axonyx-parse",
+                message_from_auto_parse_error(&error),
+            ),
+        },
         CheckParseError::Backend(error) => (
             line_from_backend_parse_error(&error).unwrap_or(1),
             "axonyx-backend-parse",
@@ -8841,6 +8870,23 @@ fn diagnostic_from_parse_error(path: &Path, error: CheckParseError) -> CheckDiag
         severity: "error",
         code,
         message,
+    }
+}
+
+fn line_from_type_contract_error(source: &str, error: &AxTypeParseError) -> usize {
+    match error {
+        AxTypeParseError::DuplicateRecord { name } => {
+            line_for_repeated_source_pattern(source, &format!("type {name}"), 2)
+        }
+        AxTypeParseError::DuplicateField { field, .. } => source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.trim_start().starts_with(&format!("{field}:")))
+            .nth(1)
+            .map(|(index, _)| index + 1)
+            .unwrap_or_else(|| line_for_source_pattern(source, field)),
+        AxTypeParseError::Invalid { raw } => line_for_source_pattern(source, raw),
+        AxTypeParseError::Empty => typed_let_line(source).unwrap_or(1),
     }
 }
 
@@ -8922,6 +8968,7 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::HeadValueInvalidChild { .. }
         | AxConvertV2Error::HeadTagChildrenNotSupported { .. }
         | AxConvertV2Error::DuplicateClassAttr { .. }
+        | AxConvertV2Error::InvalidStateTypeContract { .. }
         | AxConvertV2Error::InvalidStateInitializer { .. }
         | AxConvertV2Error::UnsupportedComponentStateType { .. }
         | AxConvertV2Error::UnknownStateBinding { .. }
@@ -12422,6 +12469,14 @@ fn format_ax_expr(expr: &AxExpr) -> String {
                 .join(", ");
             format!("[{items}]")
         }
+        AxExpr::Object(fields) => {
+            let fields = fields
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", format_ax_expr(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{fields}}}")
+        }
         AxExpr::Identifier(value) => value.clone(),
         AxExpr::Unary { op, expr } => {
             format!("{}{}", format_ax_unary_op(*op), format_ax_expr(expr))
@@ -12590,7 +12645,9 @@ fn collect_state_report(root: &Path) -> Result<StateReport> {
 
     let graph = build_state_graph_report(root, &files)?;
     let patches = collect_state_patch_usage_report(root)?;
+    let types = collect_project_type_schemas(root)?;
     Ok(StateReport {
+        types,
         files,
         graph,
         patches,
@@ -13085,6 +13142,30 @@ fn format_state_value(value: &AxStateValue) -> String {
                 value.to_string()
             }
         }
+        AxStateValue::Bytes(values) => format!(
+            "bytes[{}]",
+            values
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AxStateValue::List(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(format_state_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AxStateValue::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("{key:?}: {}", format_state_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -18281,6 +18362,7 @@ scope Blog <Domain> {
     #[test]
     fn state_graph_maps_app_layout_and_page_signals_to_routes() {
         let report = StateReport {
+            types: Vec::new(),
             files: vec![StateReportFile {
                 file: "app/page.ax".to_string(),
                 signals: vec![
@@ -18330,6 +18412,7 @@ scope Blog <Domain> {
     #[test]
     fn state_route_focus_reports_only_visible_route_signals() {
         let report = StateReport {
+            types: Vec::new(),
             files: Vec::new(),
             graph: StateGraphReport {
                 scopes: Vec::new(),
@@ -18367,6 +18450,7 @@ scope Blog <Domain> {
     #[test]
     fn state_route_focus_returns_empty_report_for_routes_without_state() {
         let report = StateReport {
+            types: Vec::new(),
             files: Vec::new(),
             graph: StateGraphReport {
                 scopes: Vec::new(),
@@ -18728,6 +18812,11 @@ app state language: String = "sr"
             r#"
 page Home
 
+type Post {
+  title: String
+  summary?: String
+}
+
 page state theme: String = "silver"
 page state count: Number = 0
 
@@ -18765,6 +18854,10 @@ page state enabled = signal(true)
 
         let report = collect_state_report(&root).expect("state report should collect");
 
+        assert_eq!(report.types.len(), 1);
+        assert_eq!(report.types[0].name, "Post");
+        assert_eq!(report.types[0].fields.len(), 2);
+        assert!(report.types[0].fields[1].optional);
         assert_eq!(report.files.len(), 4);
         assert_eq!(report.files[0].file, "app/layout.asx");
         assert_eq!(report.files[0].signals[0].name, "language");
@@ -19769,8 +19862,14 @@ page Docs
             r#"
 page Home
 
+type Post {
+  title: String
+  summary?: String
+}
+
 page state theme: String = "silver" persist local("axonyx:theme")
 page state count: Number = 1
+page state items: List<Optional<Post>> = [{ title: "First", summary: null }, null]
 
 <main>
   <select bind:value={theme}>
@@ -19793,7 +19892,7 @@ page state count: Number = 1
                 melt_graph_written,
                 ..
             } => {
-                assert_eq!(state_signal_count, 2);
+                assert_eq!(state_signal_count, 3);
                 assert!(melt_graph_written);
             }
             StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
@@ -19811,6 +19910,11 @@ page state count: Number = 1
         assert!(manifest.contains("\"key\": \"axonyx:theme\""));
         assert!(manifest.contains("\"name\": \"count\""));
         assert!(manifest.contains("\"key\": \"page:root:count:2\""));
+        assert!(manifest.contains("\"name\": \"Post\""));
+        assert!(manifest.contains("\"name\": \"summary\""));
+        assert!(manifest.contains("\"optional\": true"));
+        assert!(manifest.contains("\"name\": \"items\""));
+        assert!(manifest.contains("\"ty\": \"List<Optional<Post>>\""));
 
         let snapshot = fs::read_to_string(root.join("dist/_ax/state/snapshot.json"))
             .expect("state snapshot should exist");
@@ -19823,6 +19927,11 @@ page state count: Number = 1
         assert!(snapshot.contains("\"key\": \"page:root:count:2\""));
         assert!(snapshot.contains("\"kind\": \"number\""));
         assert!(snapshot.contains("\"value\": 1.0"));
+        assert!(snapshot.contains("\"key\": \"page:root:items:3\""));
+        assert!(snapshot.contains("\"kind\": \"list\""));
+        assert!(snapshot.contains("\"kind\": \"object\""));
+        assert!(snapshot.contains("\"value\": \"First\""));
+        assert!(snapshot.contains("\"kind\": \"null\""));
 
         let wasm_file_name = Path::new(AX_STATE_WASM_PATH)
             .file_name()
@@ -19830,6 +19939,7 @@ page state count: Number = 1
         let wasm = fs::read(root.join("dist/_ax/runtime").join(wasm_file_name))
             .expect("WASM state executor should exist");
         assert!(wasm.starts_with(b"\0asm"));
+        assert_eq!(wasm_file_name, "axonyx-state-v2.wasm");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -21456,8 +21566,9 @@ state theme = "silver"
             .find(|check| check.code == "state-runtime")
             .expect("state runtime check should exist");
         assert_eq!(runtime.severity, DoctorSeverity::Ok);
-        assert!(runtime.message.contains("WASM state executor v1"));
-        assert!(runtime.message.contains("String, Number, and Bool"));
+        assert!(runtime.message.contains("WASM state executor v2 / ABI 3"));
+        assert!(runtime.message.contains("binary ax-value/1 WASM bridge"));
+        assert!(runtime.message.contains("structured List, Map, Set"));
         assert!(state.message.contains("1 signal"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
