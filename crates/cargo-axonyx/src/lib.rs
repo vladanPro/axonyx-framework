@@ -7261,7 +7261,11 @@ fn collect_db_surface_diagnostics_from_expr(
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     match expr {
-        AxExpr::String(_) | AxExpr::Number(_) | AxExpr::Bool(_) | AxExpr::Identifier(_) => {}
+        AxExpr::String(_)
+        | AxExpr::Number(_)
+        | AxExpr::Float(_)
+        | AxExpr::Bool(_)
+        | AxExpr::Identifier(_) => {}
         AxExpr::List(items) => {
             for item in items {
                 collect_db_surface_diagnostics_from_expr(
@@ -9845,6 +9849,7 @@ fn compiled_loader_arg_source(expr: &AxExpr) -> Option<String> {
     match expr {
         AxExpr::String(value) => Some(format!("Value::String({value:?}.to_string())")),
         AxExpr::Number(value) => Some(format!("Value::from({value})")),
+        AxExpr::Float(value) => Some(format!("Value::from({:?}_f64)", value.get())),
         AxExpr::Bool(value) => Some(format!("Value::Bool({value})")),
         AxExpr::Member { object, property }
             if matches!(object.as_ref(), AxExpr::Identifier(name) if name == "params")
@@ -12460,6 +12465,7 @@ fn format_ax_expr(expr: &AxExpr) -> String {
     match expr {
         AxExpr::String(value) => format!("{value:?}"),
         AxExpr::Number(value) => value.to_string(),
+        AxExpr::Float(value) => value.get().to_string(),
         AxExpr::Bool(value) => value.to_string(),
         AxExpr::List(items) => {
             let items = items
@@ -15274,8 +15280,12 @@ impl RouteStateManifest {
 
 fn state_patch_value_matches_type(value: &AxValue, expected_ty: &str) -> bool {
     match expected_ty {
-        "String" => matches!(value, AxValue::String(_)),
-        "Number" => matches!(value, AxValue::Number(_)),
+        "String" | "DateTime" | "Date" | "Time" | "Uuid" => {
+            matches!(value, AxValue::String(_))
+        }
+        "Number" => matches!(value, AxValue::Number(_) | AxValue::Float(_)),
+        "Int" => matches!(value, AxValue::Number(_)),
+        "Float" => matches!(value, AxValue::Number(_) | AxValue::Float(_)),
         "Bool" => matches!(value, AxValue::Bool(_)),
         "Unknown" => true,
         _ => true,
@@ -15287,6 +15297,7 @@ fn ax_value_type_name(value: &AxValue) -> &'static str {
         AxValue::Null => "Null",
         AxValue::String(_) => "String",
         AxValue::Number(_) => "Number",
+        AxValue::Float(_) => "Float",
         AxValue::Bool(_) => "Bool",
         AxValue::Record(_) => "Record",
         AxValue::List(_) => "List",
@@ -15324,6 +15335,9 @@ fn ax_value_to_json(value: &AxValue) -> serde_json::Value {
         AxValue::Null => serde_json::Value::Null,
         AxValue::String(value) => serde_json::Value::String(value.clone()),
         AxValue::Number(value) => serde_json::Value::Number((*value).into()),
+        AxValue::Float(value) => serde_json::Number::from_f64(value.get())
+            .map(serde_json::Value::Number)
+            .expect("AxFloat always contains a finite value"),
         AxValue::Bool(value) => serde_json::Value::Bool(*value),
         AxValue::Record(fields) => serde_json::Value::Object(
             fields
@@ -19869,6 +19883,8 @@ type Post {
 
 page state theme: String = "silver" persist local("axonyx:theme")
 page state count: Number = 1
+page state ratio: Float = 0.625
+page state publishedAt: DateTime = "2026-08-23T10:15:30Z"
 page state items: List<Optional<Post>> = [{ title: "First", summary: null }, null]
 
 <main>
@@ -19892,7 +19908,7 @@ page state items: List<Optional<Post>> = [{ title: "First", summary: null }, nul
                 melt_graph_written,
                 ..
             } => {
-                assert_eq!(state_signal_count, 3);
+                assert_eq!(state_signal_count, 5);
                 assert!(melt_graph_written);
             }
             StaticBuildStatus::NoPages { .. } => panic!("static pages should be found"),
@@ -19910,6 +19926,10 @@ page state items: List<Optional<Post>> = [{ title: "First", summary: null }, nul
         assert!(manifest.contains("\"key\": \"axonyx:theme\""));
         assert!(manifest.contains("\"name\": \"count\""));
         assert!(manifest.contains("\"key\": \"page:root:count:2\""));
+        assert!(manifest.contains("\"name\": \"ratio\""));
+        assert!(manifest.contains("\"ty\": \"Float\""));
+        assert!(manifest.contains("\"name\": \"publishedAt\""));
+        assert!(manifest.contains("\"ty\": \"DateTime\""));
         assert!(manifest.contains("\"name\": \"Post\""));
         assert!(manifest.contains("\"name\": \"summary\""));
         assert!(manifest.contains("\"optional\": true"));
@@ -19927,7 +19947,11 @@ page state items: List<Optional<Post>> = [{ title: "First", summary: null }, nul
         assert!(snapshot.contains("\"key\": \"page:root:count:2\""));
         assert!(snapshot.contains("\"kind\": \"number\""));
         assert!(snapshot.contains("\"value\": 1.0"));
-        assert!(snapshot.contains("\"key\": \"page:root:items:3\""));
+        assert!(snapshot.contains("\"key\": \"page:root:ratio:3\""));
+        assert!(snapshot.contains("\"value\": 0.625"));
+        assert!(snapshot.contains("\"key\": \"page:root:publishedAt:4\""));
+        assert!(snapshot.contains("\"value\": \"2026-08-23T10:15:30Z\""));
+        assert!(snapshot.contains("\"key\": \"page:root:items:5\""));
         assert!(snapshot.contains("\"kind\": \"list\""));
         assert!(snapshot.contains("\"kind\": \"object\""));
         assert!(snapshot.contains("\"value\": \"First\""));
