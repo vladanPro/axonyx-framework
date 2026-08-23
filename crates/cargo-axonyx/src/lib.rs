@@ -8958,6 +8958,7 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidEnvDeclaration { line }
         | AxBackendParseError::InvalidInputSection { line }
         | AxBackendParseError::InvalidField { line }
+        | AxBackendParseError::InvalidTypeDeclaration { line }
         | AxBackendParseError::InvalidMutation { line }
         | AxBackendParseError::InvalidAssignment { line }
         | AxBackendParseError::InvalidHeader { line }
