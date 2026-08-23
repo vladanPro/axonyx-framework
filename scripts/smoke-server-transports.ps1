@@ -1,6 +1,6 @@
 param(
   [ValidateSet("minimal", "site", "docs")]
-  [string] $Template = "minimal",
+  [string] $Template = "site",
 
   [int] $Port = 3925,
 
@@ -123,7 +123,8 @@ function Wait-ForServer {
     [string] $Stderr
   )
 
-  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+  # A clean app compiles its path runtime before binding; leave enough room for cold CI hosts.
+  for ($attempt = 0; $attempt -lt 200; $attempt++) {
     Start-Sleep -Milliseconds 300
     try {
       Invoke-SmokeRequest -Url $Url -ExpectedStatus 200 -Expect "Axonyx" | Out-Null
@@ -135,7 +136,9 @@ function Wait-ForServer {
     }
   }
 
-  throw "Server did not respond at $Url"
+  $stdoutLog = if (Test-Path -LiteralPath $Stdout) { Get-Content -LiteralPath $Stdout -Raw } else { "<missing>" }
+  $stderrLog = if (Test-Path -LiteralPath $Stderr) { Get-Content -LiteralPath $Stderr -Raw } else { "<missing>" }
+  throw "Server did not respond at $Url. stdout: $stdoutLog stderr: $stderrLog"
 }
 
 $frameworkRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path

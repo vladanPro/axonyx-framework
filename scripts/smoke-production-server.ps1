@@ -377,7 +377,7 @@ try {
   Invoke-SmokeRequest -Url "$baseUrl/favicon.svg" -ExpectedStatus 200 -ExpectHeader "Cache-Control" -ExpectHeaderValue "public, max-age=31536000, immutable" | Out-Null
   if ($Template -ne "minimal") {
     Invoke-SmokeRequest -Url "$baseUrl/_ax/pkg/axonyx-ui/index.css" -ExpectedStatus 200 -Expect "@import|--ax-" -ExpectHeader "Content-Type" -ExpectHeaderValue "text/css" | Out-Null
-    Invoke-SmokeRequest -Url "$baseUrl/_ax/pkg/axonyx-ui/index.css" -ExpectedStatus 200 -ExpectHeader "Cache-Control" -ExpectHeaderValue "public, max-age=31536000, immutable" | Out-Null
+    Invoke-SmokeRequest -Url "$baseUrl/_ax/pkg/axonyx-ui/index.css" -ExpectedStatus 200 -ExpectHeader "Cache-Control" -ExpectHeaderValue "public, max-age=0, must-revalidate" | Out-Null
   }
   Invoke-SmokeRequest -Url "$baseUrl/" -Method "HEAD" -ExpectedStatus 200 | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/definitely-missing" -ExpectedStatus 404 -Expect "404|not found|Not found|Page not found|Back to home" | Out-Null
