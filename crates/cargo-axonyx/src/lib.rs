@@ -864,6 +864,8 @@ struct RouteHookReport {
 struct ApiSchemaReport {
     name: String,
     fields: Vec<ApiSchemaFieldReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    literals: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -7415,6 +7417,7 @@ fn line_for_db_call(source: &str, call_path: &[String]) -> usize {
 fn collect_project_database_resources(root: &Path) -> Result<std::collections::BTreeSet<String>> {
     Ok(collect_project_type_schemas(root)?
         .into_iter()
+        .filter(|schema| schema.literals.is_empty())
         .flat_map(|schema| database_resource_names_for_type(&schema.name))
         .collect())
 }
@@ -7609,6 +7612,7 @@ fn collect_type_schemas_from_source(source: &str) -> Vec<ApiSchemaReport> {
             .into_iter()
             .map(|ty| ApiSchemaReport {
                 name: ty.name,
+                literals: ty.literals,
                 fields: ty
                     .fields
                     .into_iter()
@@ -7629,6 +7633,29 @@ fn collect_type_schemas_from_source(source: &str) -> Vec<ApiSchemaReport> {
 }
 
 fn collect_backend_type_schemas_from_source(source: &str) -> Vec<ApiSchemaReport> {
+    if let Ok(document) = parse_backend_ax(source) {
+        return document
+            .types
+            .into_iter()
+            .map(|ty| ApiSchemaReport {
+                name: ty.name,
+                literals: ty.literals,
+                fields: ty
+                    .fields
+                    .into_iter()
+                    .map(|field| {
+                        let (ty, optional) = normalize_api_schema_field_type(&field.ty);
+                        ApiSchemaFieldReport {
+                            name: field.name,
+                            ty,
+                            optional,
+                        }
+                    })
+                    .collect(),
+            })
+            .collect();
+    }
+
     let lines = source.lines().collect::<Vec<_>>();
     let mut schemas = Vec::new();
     let mut index = 0;
@@ -7684,6 +7711,7 @@ fn collect_backend_type_schemas_from_source(source: &str) -> Vec<ApiSchemaReport
         schemas.push(ApiSchemaReport {
             name: name.to_string(),
             fields,
+            literals: Vec::new(),
         });
     }
 
@@ -8264,7 +8292,14 @@ fn check_type_annotations(
 
 fn add_project_type_schemas_to_context(context: &mut AxDataContext, root: &Path) -> Result<()> {
     for schema in collect_project_type_schemas(root)? {
-        if context.records.contains_key(&schema.name) {
+        if context.records.contains_key(&schema.name)
+            || context.literal_unions.contains_key(&schema.name)
+        {
+            continue;
+        }
+
+        if !schema.literals.is_empty() {
+            context.literal_unions.insert(schema.name, schema.literals);
             continue;
         }
 
@@ -12240,6 +12275,13 @@ fn openapi_components_schemas(schemas: &[ApiSchemaReport]) -> serde_json::Value 
 }
 
 fn openapi_component_schema(schema: &ApiSchemaReport) -> serde_json::Value {
+    if !schema.literals.is_empty() {
+        return serde_json::json!({
+            "type": "string",
+            "enum": schema.literals,
+        });
+    }
+
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
 
@@ -17806,6 +17848,7 @@ route DELETE "/api/posts/:slug"
             }],
             schemas: vec![ApiSchemaReport {
                 name: "Post".to_string(),
+                literals: Vec::new(),
                 fields: vec![
                     ApiSchemaFieldReport {
                         name: "title".to_string(),
@@ -17870,6 +17913,8 @@ type Post {
   summary: Optional<String>
 }
 
+type Theme = "silver" | "bronze" | "gold"
+
 <Copy>Home</Copy>
 "#,
         )
@@ -17886,7 +17931,7 @@ route GET "/api/posts" -> Post[]
         let report = collect_api_report(&root).expect("api report should collect");
         let value = api_report_openapi_value(&report);
 
-        assert_eq!(report.schemas.len(), 1);
+        assert_eq!(report.schemas.len(), 2);
         assert_eq!(report.schemas[0].name, "Post");
         assert_eq!(
             value["components"]["schemas"]["Post"]["properties"]["summary"]["type"],
@@ -17897,6 +17942,14 @@ route GET "/api/posts" -> Post[]
             .expect("required should be array")
             .iter()
             .all(|field| field != "summary"));
+        assert_eq!(
+            value["components"]["schemas"]["Theme"]["enum"],
+            serde_json::json!(["silver", "bronze", "gold"])
+        );
+        let resources =
+            collect_project_database_resources(&root).expect("resources should collect");
+        assert!(!resources.contains("theme"));
+        assert!(!resources.contains("themes"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -19881,7 +19934,9 @@ type Post {
   summary?: String
 }
 
-page state theme: String = "silver" persist local("axonyx:theme")
+type Theme = "silver" | "bronze" | "gold"
+
+page state theme: Theme = "silver" persist local("axonyx:theme")
 page state count: Number = 1
 page state ratio: Float = 0.625
 page state publishedAt: DateTime = "2026-08-23T10:15:30Z"
@@ -19920,7 +19975,9 @@ page state items: List<Optional<Post>> = [{ title: "First", summary: null }, nul
         assert!(manifest.contains("\"name\": \"theme\""));
         assert!(manifest.contains("\"key\": \"page:root:theme:1\""));
         assert!(manifest.contains("\"owner\": \"page:/\""));
-        assert!(manifest.contains("\"ty\": \"String\""));
+        assert!(manifest.contains("\"ty\": \"Theme\""));
+        assert!(manifest.contains("\"literals\": ["));
+        assert!(manifest.contains("\"bronze\""));
         assert!(manifest.contains("\"protocol\": \"ax-storage-capability/1\""));
         assert!(manifest.contains("\"scope\": \"local\""));
         assert!(manifest.contains("\"key\": \"axonyx:theme\""));
@@ -19941,7 +19998,7 @@ page state items: List<Optional<Post>> = [{ title: "First", summary: null }, nul
         assert!(snapshot.contains("\"version\": 1"));
         assert!(snapshot.contains("\"key\": \"page:root:theme:1\""));
         assert!(snapshot.contains("\"owner\": \"page:/\""));
-        assert!(snapshot.contains("\"ty\": \"String\""));
+        assert!(snapshot.contains("\"ty\": \"Theme\""));
         assert!(snapshot.contains("\"kind\": \"string\""));
         assert!(snapshot.contains("\"value\": \"silver\""));
         assert!(snapshot.contains("\"key\": \"page:root:count:2\""));
