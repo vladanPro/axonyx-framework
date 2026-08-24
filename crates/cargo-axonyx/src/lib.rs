@@ -27,7 +27,9 @@ use axonyx_core::ax_backend_lowering_prelude::{
 };
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_lowering_prelude::AxValue;
-use axonyx_core::ax_parser_auto_prelude::{parse_ax_auto, AxAutoParseError, AxConvertV2Error};
+use axonyx_core::ax_parser_auto_prelude::{
+    convert_ax_v2_file, parse_ax_auto, AxAutoParseError, AxConvertV2Error,
+};
 use axonyx_core::ax_parser_prelude::AxParseError;
 use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
 use axonyx_core::ax_query_ast_prelude::AxQuerySource;
@@ -65,7 +67,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.61";
+const AXONYX_RUNTIME_VERSION: &str = "0.1.62";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -6733,9 +6735,19 @@ fn check_ax_source_with_context(
         };
     }
 
-    if let Some(component_file) =
-        parse_component_report_source(source).filter(|file| !file.components.is_empty())
+    let is_component_only = !source
+        .lines()
+        .any(|line| line.trim_start().starts_with("page "));
+    if let Some(component_file) = parse_component_report_source(source)
+        .filter(|file| is_component_only && !file.components.is_empty())
     {
+        if let Err(error) = convert_ax_v2_file(&component_file) {
+            return vec![diagnostic_from_parse_error(
+                path,
+                source,
+                CheckParseError::Page(AxAutoParseError::Convert(error)),
+            )];
+        }
         let mut diagnostics = Vec::new();
         if let Some(root) = root {
             let imports = component_file
@@ -8889,6 +8901,14 @@ fn diagnostic_from_parse_error(
                 "axonyx-type",
                 message_from_auto_parse_error(&error),
             ),
+            AxAutoParseError::Convert(
+                AxConvertV2Error::InvalidComponentParamType { name, .. }
+                | AxConvertV2Error::InvalidComponentParamDefault { name, .. },
+            ) => (
+                line_for_source_pattern(source, &format!("{name}:")),
+                "axonyx-type",
+                message_from_auto_parse_error(&error),
+            ),
             _ => (
                 line_from_auto_parse_error(&error).unwrap_or(1),
                 "axonyx-parse",
@@ -9008,6 +9028,8 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::HeadTagChildrenNotSupported { .. }
         | AxConvertV2Error::DuplicateClassAttr { .. }
         | AxConvertV2Error::InvalidStateTypeContract { .. }
+        | AxConvertV2Error::InvalidComponentParamType { .. }
+        | AxConvertV2Error::InvalidComponentParamDefault { .. }
         | AxConvertV2Error::InvalidStateInitializer { .. }
         | AxConvertV2Error::UnsupportedComponentStateType { .. }
         | AxConvertV2Error::UnknownStateBinding { .. }
@@ -25066,6 +25088,49 @@ let posts: List<Post>> = load PostsList
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 4);
         assert_eq!(diagnostics[0].code, "axonyx-type");
+    }
+
+    #[test]
+    fn check_ax_source_reports_invalid_literal_union_component_default() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page Home() {
+  type Theme = "silver" | "bronze" | "gold"
+
+  component ThemeSwitcher(theme: Theme = "purple") {
+    <Copy>{theme}</Copy>
+  }
+
+  return ASX { <ThemeSwitcher /> }
+}"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 4);
+        assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert!(diagnostics[0].message.contains("theme"));
+        assert!(diagnostics[0].message.contains("purple"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_invalid_literal_union_default_in_component_module() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/components/ThemeSwitcher.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"type Theme = "silver" | "bronze" | "gold"
+
+component ThemeSwitcher(theme: Theme = "purple") {
+  <Copy>{theme}</Copy>
+}"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 3);
+        assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert!(diagnostics[0].message.contains("purple"));
     }
 
     #[test]
