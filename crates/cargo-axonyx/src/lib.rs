@@ -25141,6 +25141,32 @@ let posts: List<Post>> = load PostsList
     }
 
     #[test]
+    fn check_ax_source_accepts_reactive_literal_union_match() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page ThemePreview() {
+  type Theme = "silver" | "bronze" | "gold"
+  state theme: Theme = "silver"
+
+  return ASX {
+    <>
+      <Button on:click={theme = "gold"}>Gold</Button>
+      <Match value={theme}>
+        <Case is="silver"><Copy>Silver</Copy></Case>
+        <Case is="bronze"><Copy>Bronze</Copy></Case>
+        <Case is="gold"><Copy>Gold</Copy></Case>
+      </Match>
+    </>
+  }
+}"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
     fn check_ax_source_reports_invalid_literal_union_default_in_component_module() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/app/components/ThemeSwitcher.asx");
         let diagnostics = check_ax_source_with_root(
