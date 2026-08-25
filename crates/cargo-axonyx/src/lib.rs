@@ -9020,6 +9020,8 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::DuplicateControlBranch { .. }
         | AxConvertV2Error::ControlBranchMustBeLast { .. }
         | AxConvertV2Error::UnexpectedControlBranch { .. }
+        | AxConvertV2Error::InvalidMatchChild
+        | AxConvertV2Error::InvalidMatchCaseValue
         | AxConvertV2Error::InvalidHeadChild
         | AxConvertV2Error::UnsupportedHeadTag { .. }
         | AxConvertV2Error::HeadValueAttrsNotSupported { .. }
@@ -25112,6 +25114,30 @@ let posts: List<Post>> = load PostsList
         assert_eq!(diagnostics[0].code, "axonyx-type");
         assert!(diagnostics[0].message.contains("theme"));
         assert!(diagnostics[0].message.contains("purple"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_non_exhaustive_literal_union_match() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page ThemePreview() {
+  type Theme = "silver" | "bronze" | "gold"
+  state theme: Theme = "silver"
+
+  return ASX {
+    <Match value={theme}>
+      <Case is="silver"><Copy>Silver</Copy></Case>
+    </Match>
+  }
+}"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert!(diagnostics[0].message.contains("not exhaustive"));
+        assert!(diagnostics[0].message.contains("bronze, gold"));
     }
 
     #[test]
