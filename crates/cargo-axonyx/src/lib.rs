@@ -25194,7 +25194,31 @@ let posts: List<Post>> = load PostsList
         assert_eq!(diagnostics[0].line, 5);
         assert_eq!(diagnostics[0].code, "axonyx-reactive-expression");
         assert!(diagnostics[0].message.contains("format(count)"));
-        assert!(diagnostics[0].message.contains("not supported in V0"));
+        assert!(diagnostics[0].message.contains("not a local pure function"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_local_pure_reactive_functions() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page Counter() {
+  state count: Int = 2
+  state limit: Int = 5
+  fn double(value: Int) = value * 2
+  fn reached(value: Int, maximum: Int) = value >= maximum
+
+  return ASX {
+    <>
+      <Copy>{double(count)}</Copy>
+      <Button disabled={reached(count, limit)}>Increase</Button>
+    </>
+  }
+}"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
     }
 
     #[test]
