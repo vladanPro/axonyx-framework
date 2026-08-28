@@ -67,7 +67,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.1.62";
+const AXONYX_RUNTIME_VERSION: &str = "0.2.0";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -8909,6 +8909,14 @@ fn diagnostic_from_parse_error(
                 "axonyx-type",
                 message_from_auto_parse_error(&error),
             ),
+            AxAutoParseError::Convert(AxConvertV2Error::UnsupportedReactiveExpression {
+                expr_source,
+                ..
+            }) => (
+                line_for_source_pattern(source, expr_source),
+                "axonyx-reactive-expression",
+                message_from_auto_parse_error(&error),
+            ),
             _ => (
                 line_from_auto_parse_error(&error).unwrap_or(1),
                 "axonyx-parse",
@@ -9020,6 +9028,8 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::DuplicateControlBranch { .. }
         | AxConvertV2Error::ControlBranchMustBeLast { .. }
         | AxConvertV2Error::UnexpectedControlBranch { .. }
+        | AxConvertV2Error::InvalidMatchChild
+        | AxConvertV2Error::InvalidMatchCaseValue
         | AxConvertV2Error::InvalidHeadChild
         | AxConvertV2Error::UnsupportedHeadTag { .. }
         | AxConvertV2Error::HeadValueAttrsNotSupported { .. }
@@ -9036,7 +9046,10 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::InvalidStateBinding { .. }
         | AxConvertV2Error::UnsupportedStateEvent { .. }
         | AxConvertV2Error::UnknownStateEvent { .. }
-        | AxConvertV2Error::InvalidStateEvent { .. } => Some(1),
+        | AxConvertV2Error::InvalidStateEvent { .. }
+        | AxConvertV2Error::UnsupportedReactiveExpression { .. }
+        | AxConvertV2Error::ReactiveEachRequiresKey { .. }
+        | AxConvertV2Error::InvalidEachKey { .. } => Some(1),
     }
 }
 
@@ -25115,6 +25128,124 @@ let posts: List<Post>> = load PostsList
     }
 
     #[test]
+    fn check_ax_source_reports_non_exhaustive_literal_union_match() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page ThemePreview() {
+  type Theme = "silver" | "bronze" | "gold"
+  state theme: Theme = "silver"
+
+  return ASX {
+    <Match value={theme}>
+      <Case is="silver"><Copy>Silver</Copy></Case>
+    </Match>
+  }
+}"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert!(diagnostics[0].message.contains("not exhaustive"));
+        assert!(diagnostics[0].message.contains("bronze, gold"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_reactive_literal_union_match() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page ThemePreview() {
+  type Theme = "silver" | "bronze" | "gold"
+  state theme: Theme = "silver"
+
+  return ASX {
+    <>
+      <Button on:click={theme = "gold"}>Gold</Button>
+      <Match value={theme}>
+        <Case is="silver"><Copy>Silver</Copy></Case>
+        <Case is="bronze"><Copy>Bronze</Copy></Case>
+        <Case is="gold"><Copy>Gold</Copy></Case>
+      </Match>
+    </>
+  }
+}"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_reports_unsupported_reactive_expression_at_source_line() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page Counter() {
+  state count: Int = 2
+
+  return ASX {
+    <Copy>{format(count)}</Copy>
+  }
+}"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].line, 5);
+        assert_eq!(diagnostics[0].code, "axonyx-reactive-expression");
+        assert!(diagnostics[0].message.contains("format(count)"));
+        assert!(diagnostics[0].message.contains("not a local pure function"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_local_pure_reactive_functions() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page Counter() {
+  state count: Int = 2
+  state limit: Int = 5
+  fn double(value: Int) = value * 2
+  fn reached(value: Int, maximum: Int) = value >= maximum
+
+  return ASX {
+    <>
+      <Copy>{double(count)}</Copy>
+      <Button disabled={reached(count, limit)}>Increase</Button>
+    </>
+  }
+}"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_reactive_collection_literals() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page CollectionProbe() {
+  state count: Int = 2
+  state limit: Int = 3
+
+  return ASX {
+    <>
+      <Copy>{count in [1, 2, 3]}</Copy>
+      <button disabled={({active: count >= limit}).active}>Locked</button>
+    </>
+  }
+}"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
     fn check_ax_source_reports_invalid_literal_union_default_in_component_module() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/app/components/ThemeSwitcher.asx");
         let diagnostics = check_ax_source_with_root(
@@ -25186,6 +25317,50 @@ return ASX {
         assert!(diagnostics[0].message.contains("post.summary"));
         assert!(diagnostics[0].message.contains("summary"));
         assert!(diagnostics[0].message.contains("unknown field"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_keyed_each_over_state_list() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Posts() {
+  state posts = [{ id: "first", title: "Hello" }]
+  return ASX {
+    <Each items={posts} as="post" key={post.id}>
+      <Card title={post.title} />
+    </Each>
+  }
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_requires_key_for_each_over_state_list() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Posts() {
+  state posts = [{ id: "first" }]
+  return ASX {
+    <Each items={posts} as="post">
+      <Copy>{post.id}</Copy>
+    </Each>
+  }
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-parse");
+        assert!(diagnostics[0].message.contains("requires `key={item.id}`"));
     }
 
     #[test]
