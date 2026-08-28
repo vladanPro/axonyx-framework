@@ -8909,6 +8909,14 @@ fn diagnostic_from_parse_error(
                 "axonyx-type",
                 message_from_auto_parse_error(&error),
             ),
+            AxAutoParseError::Convert(AxConvertV2Error::UnsupportedReactiveExpression {
+                expr_source,
+                ..
+            }) => (
+                line_for_source_pattern(source, expr_source),
+                "axonyx-reactive-expression",
+                message_from_auto_parse_error(&error),
+            ),
             _ => (
                 line_from_auto_parse_error(&error).unwrap_or(1),
                 "axonyx-parse",
@@ -9038,7 +9046,8 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::InvalidStateBinding { .. }
         | AxConvertV2Error::UnsupportedStateEvent { .. }
         | AxConvertV2Error::UnknownStateEvent { .. }
-        | AxConvertV2Error::InvalidStateEvent { .. } => Some(1),
+        | AxConvertV2Error::InvalidStateEvent { .. }
+        | AxConvertV2Error::UnsupportedReactiveExpression { .. } => Some(1),
     }
 }
 
@@ -25164,6 +25173,28 @@ let posts: List<Post>> = load PostsList
         );
 
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_reports_unsupported_reactive_expression_at_source_line() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page Counter() {
+  state count: Int = 2
+
+  return ASX {
+    <Copy>{format(count)}</Copy>
+  }
+}"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].line, 5);
+        assert_eq!(diagnostics[0].code, "axonyx-reactive-expression");
+        assert!(diagnostics[0].message.contains("format(count)"));
+        assert!(diagnostics[0].message.contains("not supported in V0"));
     }
 
     #[test]
