@@ -9047,7 +9047,9 @@ fn line_from_convert_error(error: &AxConvertV2Error) -> Option<usize> {
         | AxConvertV2Error::UnsupportedStateEvent { .. }
         | AxConvertV2Error::UnknownStateEvent { .. }
         | AxConvertV2Error::InvalidStateEvent { .. }
-        | AxConvertV2Error::UnsupportedReactiveExpression { .. } => Some(1),
+        | AxConvertV2Error::UnsupportedReactiveExpression { .. }
+        | AxConvertV2Error::ReactiveEachRequiresKey { .. }
+        | AxConvertV2Error::InvalidEachKey { .. } => Some(1),
     }
 }
 
@@ -25315,6 +25317,50 @@ return ASX {
         assert!(diagnostics[0].message.contains("post.summary"));
         assert!(diagnostics[0].message.contains("summary"));
         assert!(diagnostics[0].message.contains("unknown field"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_keyed_each_over_state_list() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Posts() {
+  state posts = [{ id: "first", title: "Hello" }]
+  return ASX {
+    <Each items={posts} as="post" key={post.id}>
+      <Card title={post.title} />
+    </Each>
+  }
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_requires_key_for_each_over_state_list() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+page Posts() {
+  state posts = [{ id: "first" }]
+  return ASX {
+    <Each items={posts} as="post">
+      <Copy>{post.id}</Copy>
+    </Each>
+  }
+}
+"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-parse");
+        assert!(diagnostics[0].message.contains("requires `key={item.id}`"));
     }
 
     #[test]
