@@ -25222,6 +25222,28 @@ let posts: List<Post>> = load PostsList
     }
 
     #[test]
+    fn check_ax_source_accepts_reactive_collection_literals() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page CollectionProbe() {
+  state count: Int = 2
+  state limit: Int = 3
+
+  return ASX {
+    <>
+      <Copy>{count in [1, 2, 3]}</Copy>
+      <button disabled={({active: count >= limit}).active}>Locked</button>
+    </>
+  }
+}"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
     fn check_ax_source_reports_invalid_literal_union_default_in_component_module() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/app/components/ThemeSwitcher.asx");
         let diagnostics = check_ax_source_with_root(
