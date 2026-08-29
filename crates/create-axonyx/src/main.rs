@@ -10,7 +10,7 @@ use clap::{Parser, ValueEnum};
 
 const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runtime";
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
-const DEFAULT_RUNTIME_VERSION: &str = "0.1.62";
+const DEFAULT_RUNTIME_VERSION: &str = "0.2.0";
 const DEFAULT_UI_PACKAGE: &str = "axonyx-ui";
 const DEFAULT_UI_VERSION: &str = "0.0.71";
 
@@ -756,7 +756,7 @@ mod tests {
         let cargo_toml =
             fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
         assert!(
-            cargo_toml.contains("axonyx-runtime = { version = \"0.1.62\", features = [\"axum\"] }")
+            cargo_toml.contains("axonyx-runtime = { version = \"0.2.0\", features = [\"axum\"] }")
         );
         assert!(cargo_toml.contains("axonyx-ui = \"0.0.71\""));
 
