@@ -106,8 +106,16 @@ function Invoke-SmokeRequest {
       if ([string]::IsNullOrEmpty($actual)) {
         throw "Expected response header '$ExpectHeader' from $Url"
       }
-      if (![string]::IsNullOrEmpty($ExpectHeaderValue) -and $actual -notmatch $ExpectHeaderValue) {
-        throw "Expected response header '$ExpectHeader' from $Url to match '$ExpectHeaderValue', got '$actual'"
+      if (![string]::IsNullOrEmpty($ExpectHeaderValue)) {
+        $matchesExpected = $actual -match $ExpectHeaderValue
+        if ($ExpectHeader -ieq "Cache-Control") {
+          $actualDirectives = @($actual.Split(",") | ForEach-Object { $_.Trim().ToLowerInvariant() } | Sort-Object)
+          $expectedDirectives = @($ExpectHeaderValue.Split(",") | ForEach-Object { $_.Trim().ToLowerInvariant() } | Sort-Object)
+          $matchesExpected = ($actualDirectives -join ",") -eq ($expectedDirectives -join ",")
+        }
+        if (!$matchesExpected) {
+          throw "Expected response header '$ExpectHeader' from $Url to match '$ExpectHeaderValue', got '$actual'"
+        }
       }
     }
 
