@@ -67,7 +67,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.2.0";
+const AXONYX_RUNTIME_VERSION: &str = "0.2.1";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -91,7 +91,7 @@ static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String
     name = "ax",
     version = AXONYX_CLI_VERSION,
     about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.",
-    long_about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.\n\nCommon commands:\n  cargo ax run dev      Start the local development server\n  cargo ax build --clean Build a production-ready static/server bundle\n  cargo ax check        Run .ax diagnostics before build/deploy\n  cargo ax doctor       Inspect app, runtime, UI, server, and deploy readiness"
+    long_about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.\n\nCommon commands:\n  cargo ax run dev      Start the local development server\n  cargo ax build --clean Build a production-ready static/server bundle\n  cargo ax check        Run .ax diagnostics before build/deploy\n  cargo ax g component Alert Generate a reusable app component\n  cargo ax doctor       Inspect app, runtime, UI, server, and deploy readiness"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -122,6 +122,11 @@ enum Commands {
     Doctor(DoctorArgs),
     #[command(about = "Print the Melt graph for framework internals.")]
     Graph(GraphArgs),
+    #[command(
+        alias = "g",
+        about = "Generate canonical Axonyx components, islands, and pages."
+    )]
+    Generate(GenerateArgs),
     #[command(about = "Inspect or validate the Melt compiler graph.")]
     Melt(MeltArgs),
     #[command(about = "Migrate an Axonyx project between authoring contracts.")]
@@ -235,6 +240,34 @@ struct UpgradeArgs {
 struct MigrateArgs {
     #[command(subcommand)]
     command: MigrateCommands,
+}
+
+#[derive(Debug, Parser)]
+struct GenerateArgs {
+    #[command(subcommand)]
+    command: GenerateCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum GenerateCommands {
+    #[command(about = "Generate a reusable server-rendered .asx component.")]
+    Component(GenerateNameArgs),
+    #[command(about = "Generate a component with an explicit route-scoped client JS file.")]
+    Island(GenerateNameArgs),
+    #[command(about = "Generate an app route page, for example components/button.")]
+    Page(GeneratePageArgs),
+}
+
+#[derive(Debug, Parser)]
+struct GenerateNameArgs {
+    /// Component name, for example Alert or ThemeSwitcher.
+    name: String,
+}
+
+#[derive(Debug, Parser)]
+struct GeneratePageArgs {
+    /// Route path relative to app/, for example components/button.
+    route: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1377,6 +1410,7 @@ fn run() -> Result<()> {
         Commands::Dev(args) => run_dev_server(args),
         Commands::Doctor(args) => doctor_command(args),
         Commands::Graph(args) => graph_command(args),
+        Commands::Generate(args) => generate_command(args),
         Commands::Melt(args) => melt_command(args),
         Commands::Migrate(args) => migrate_command(args),
         Commands::Routes(args) => routes_command(args),
@@ -1388,6 +1422,179 @@ fn run() -> Result<()> {
         Commands::Test(args) => test_command(args),
         Commands::Upgrade(args) => upgrade_command(args),
     }
+}
+
+fn generate_command(args: GenerateArgs) -> Result<()> {
+    let root = app_root()?;
+    generate_in_root(&root, args.command)
+}
+
+fn generate_in_root(root: &Path, command: GenerateCommands) -> Result<()> {
+    let files = match command {
+        GenerateCommands::Component(args) => scaffold_component_files(&args.name, false)?,
+        GenerateCommands::Island(args) => scaffold_component_files(&args.name, true)?,
+        GenerateCommands::Page(args) => scaffold_page_files(&args.route)?,
+    };
+
+    for (relative, _) in &files {
+        let path = root.join(relative);
+        if path.exists() {
+            bail!(
+                "refusing to overwrite existing scaffold file '{}'",
+                path.display()
+            );
+        }
+    }
+
+    for (relative, contents) in &files {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create scaffold directory '{}'", parent.display())
+            })?;
+        }
+        fs::write(&path, contents)
+            .with_context(|| format!("failed to write scaffold file '{}'", path.display()))?;
+        println!("Generated {}", relative.display());
+    }
+
+    Ok(())
+}
+
+fn scaffold_component_files(name: &str, island: bool) -> Result<Vec<(PathBuf, String)>> {
+    let (component_name, file_stem) = scaffold_component_identity(name)?;
+    let component_path = PathBuf::from("app")
+        .join("components")
+        .join(format!("{file_stem}.asx"));
+    let client_declaration = if island {
+        format!("  client JS from \"./{file_stem}.client.js\"\n\n")
+    } else {
+        String::new()
+    };
+    let marker = if island {
+        format!(" data-ax-island=\"{file_stem}\"")
+    } else {
+        String::new()
+    };
+    let component = format!(
+        "component {component_name}(tone: String = \"default\") {{\n{client_declaration}  render ASX {{\n    <div class=\"ax-{file_stem}\" data-tone={{tone}}{marker}>\n      <Slot />\n    </div>\n  }}\n}}\n"
+    );
+    let mut files = vec![(component_path, component)];
+
+    if island {
+        let client_path = PathBuf::from("app")
+            .join("components")
+            .join(format!("{file_stem}.client.js"));
+        let client = format!(
+            "document.querySelectorAll('[data-ax-island=\"{file_stem}\"]').forEach((root) => {{\n  if (root.dataset.axReady === \"true\") return;\n  root.dataset.axReady = \"true\";\n\n  // Add the smallest browser-only behavior this component needs.\n}});\n"
+        );
+        files.push((client_path, client));
+    }
+
+    Ok(files)
+}
+
+fn scaffold_page_files(route: &str) -> Result<Vec<(PathBuf, String)>> {
+    let segments = scaffold_route_segments(route)?;
+    let title_source = segments
+        .last()
+        .expect("validated scaffold route has at least one segment")
+        .trim_matches(['[', ']']);
+    let (title, _) = scaffold_component_identity(title_source)?;
+    let page_name = format!("{title}Page");
+    let route_label = format!("/{}", segments.join("/"));
+    let path = segments
+        .iter()
+        .fold(PathBuf::from("app"), |path, segment| path.join(segment));
+    let source = format!(
+        "page {page_name}() {{\n  return ASX {{\n    <main class=\"ax-page\">\n      <header class=\"ax-page__header\">\n        <p class=\"ax-copy\" data-tone=\"eyebrow\">Generated route</p>\n        <h1>{title}</h1>\n        <p class=\"ax-copy\">{route_label}</p>\n      </header>\n    </main>\n  }}\n}}\n"
+    );
+
+    Ok(vec![(path.join("page.asx"), source)])
+}
+
+fn scaffold_component_identity(value: &str) -> Result<(String, String)> {
+    let words = scaffold_name_words(value)?;
+    let component_name = words
+        .iter()
+        .map(|word| {
+            let mut chars = word.chars();
+            let first = chars.next().expect("validated scaffold word is not empty");
+            format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+        })
+        .collect::<String>();
+    Ok((component_name, words.join("-")))
+}
+
+fn scaffold_name_words(value: &str) -> Result<Vec<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("scaffold name cannot be empty");
+    }
+    if !value
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic())
+    {
+        bail!("scaffold name must start with an ASCII letter");
+    }
+
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut previous_was_lower_or_digit = false;
+    for ch in value.chars() {
+        if matches!(ch, '-' | '_' | ' ') {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            previous_was_lower_or_digit = false;
+            continue;
+        }
+        if !ch.is_ascii_alphanumeric() {
+            bail!(
+                "scaffold name '{}' contains unsupported character '{}'",
+                value,
+                ch
+            );
+        }
+        if ch.is_ascii_uppercase() && previous_was_lower_or_digit && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push(ch.to_ascii_lowercase());
+        previous_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    if words.is_empty() {
+        bail!("scaffold name must contain an ASCII letter");
+    }
+    Ok(words)
+}
+
+fn scaffold_route_segments(route: &str) -> Result<Vec<String>> {
+    let route = route.trim();
+    if route.is_empty() || route.starts_with('/') || route.contains('\\') {
+        bail!("page route must be a non-empty path relative to app/");
+    }
+
+    let segments = route.split('/').map(str::to_string).collect::<Vec<_>>();
+    for segment in &segments {
+        let dynamic = segment.starts_with('[')
+            && segment.ends_with(']')
+            && segment.len() > 2
+            && !segment[1..segment.len() - 1].contains(['[', ']']);
+        let regular = !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'));
+        if !regular && !dynamic {
+            bail!("invalid page route segment '{}'", segment);
+        }
+    }
+    Ok(segments)
 }
 
 fn migrate_command(args: MigrateArgs) -> Result<()> {
@@ -21035,6 +21242,157 @@ return ASX { <Copy>{posts}</Copy> }
             panic!("expected test command");
         };
         assert!(matches!(args.command, Some(TestCommands::Browser)));
+    }
+
+    #[test]
+    fn parses_generate_command_and_short_alias() {
+        let component = Cli::try_parse_from(["cargo-ax", "generate", "component", "Alert"])
+            .expect("generate component should parse");
+        let Commands::Generate(args) = component.command else {
+            panic!("expected generate command");
+        };
+        let GenerateCommands::Component(args) = args.command else {
+            panic!("expected component generator");
+        };
+        assert_eq!(args.name, "Alert");
+
+        let page = Cli::try_parse_from(["cargo-ax", "g", "page", "components/button"])
+            .expect("short generate alias should parse");
+        let Commands::Generate(args) = page.command else {
+            panic!("expected aliased generate command");
+        };
+        let GenerateCommands::Page(args) = args.command else {
+            panic!("expected page generator");
+        };
+        assert_eq!(args.route, "components/button");
+    }
+
+    #[test]
+    fn generates_canonical_component_and_refuses_overwrite() {
+        let root = make_temp_dir("generate-component");
+        generate_in_root(
+            &root,
+            GenerateCommands::Component(GenerateNameArgs {
+                name: "ThemeSwitcher".to_string(),
+            }),
+        )
+        .expect("component should generate");
+
+        let path = root.join("app/components/theme-switcher.asx");
+        let source = fs::read_to_string(&path).expect("component source should exist");
+        assert!(source.contains("component ThemeSwitcher"));
+        assert!(source.contains("class=\"ax-theme-switcher\""));
+        parse_component_report_source(&source).expect("generated component should parse");
+
+        fs::write(
+            root.join("app/page.asx"),
+            r#"
+import { ThemeSwitcher } from "@/components/theme-switcher.asx"
+
+page Home() {
+  return ASX { <ThemeSwitcher tone="forged">Generated body</ThemeSwitcher> }
+}
+"#,
+        )
+        .expect("consumer page should write");
+        let route = resolve_route(&root, "/")
+            .expect("generated consumer route should resolve")
+            .expect("generated consumer route should exist");
+        let html = render_route_html(&test_dev_state(&root), &route)
+            .expect("generated component should render through an app import");
+        assert!(html.contains("class=\"ax-theme-switcher\""));
+        assert!(html.contains("data-tone=\"forged\""));
+        assert!(html.contains("Generated body"));
+
+        let error = generate_in_root(
+            &root,
+            GenerateCommands::Component(GenerateNameArgs {
+                name: "ThemeSwitcher".to_string(),
+            }),
+        )
+        .expect_err("existing component must not be overwritten");
+        assert!(error.to_string().contains("refusing to overwrite"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn generates_island_with_explicit_client_asset() {
+        let root = make_temp_dir("generate-island");
+        generate_in_root(
+            &root,
+            GenerateCommands::Island(GenerateNameArgs {
+                name: "CommandPalette".to_string(),
+            }),
+        )
+        .expect("island should generate");
+
+        let source = fs::read_to_string(root.join("app/components/command-palette.asx"))
+            .expect("island source should exist");
+        assert!(source.contains("client JS from \"./command-palette.client.js\""));
+        assert!(source.contains("data-ax-island=\"command-palette\""));
+        parse_component_report_source(&source).expect("generated island should parse");
+
+        let client = fs::read_to_string(root.join("app/components/command-palette.client.js"))
+            .expect("island client should exist");
+        assert!(client.contains("data-ax-island=\"command-palette\""));
+        assert!(client.contains("axReady"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn island_generation_is_atomic_when_one_target_exists() {
+        let root = make_temp_dir("generate-island-atomic");
+        let components = root.join("app/components");
+        fs::create_dir_all(&components).expect("components dir should exist");
+        fs::write(
+            components.join("tabs.client.js"),
+            "// existing client asset\n",
+        )
+        .expect("existing client should write");
+
+        let error = generate_in_root(
+            &root,
+            GenerateCommands::Island(GenerateNameArgs {
+                name: "Tabs".to_string(),
+            }),
+        )
+        .expect_err("island generation should stop before writing any file");
+
+        assert!(error.to_string().contains("refusing to overwrite"));
+        assert!(!components.join("tabs.asx").exists());
+        assert_eq!(
+            fs::read_to_string(components.join("tabs.client.js")).unwrap(),
+            "// existing client asset\n"
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn generates_nested_page_and_rejects_unsafe_routes() {
+        let root = make_temp_dir("generate-page");
+        generate_in_root(
+            &root,
+            GenerateCommands::Page(GeneratePageArgs {
+                route: "components/button".to_string(),
+            }),
+        )
+        .expect("page should generate");
+
+        let source = fs::read_to_string(root.join("app/components/button/page.asx"))
+            .expect("page source should exist");
+        assert!(source.contains("page ButtonPage()"));
+        assert!(source.contains("/components/button"));
+        parse_ax_auto(&source).expect("generated page should parse");
+
+        for route in ["../secret", "/absolute", "posts//draft", "posts\\draft"] {
+            let error = scaffold_page_files(route).expect_err("unsafe route should fail");
+            assert!(error.to_string().contains("route"));
+        }
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]

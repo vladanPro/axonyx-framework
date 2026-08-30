@@ -284,6 +284,9 @@ From an app root:
 cargo ax doctor
 cargo ax check
 cargo ax migrate asx --dry-run
+cargo ax g component ThemeSwitcher
+cargo ax g island CommandPalette
+cargo ax g page settings/profile
 cargo ax contracts
 cargo ax schema pull ./sample-posts.json --name Post
 cargo ax actions
