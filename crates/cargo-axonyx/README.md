@@ -19,6 +19,9 @@ cargo ax content
 cargo ax db check
 cargo ax db pull
 cargo ax doctor
+cargo ax generate component Alert
+cargo ax g island CommandPalette
+cargo ax g page components/button
 cargo ax melt
 cargo ax migrate asx --dry-run
 cargo ax build --clean
@@ -64,6 +67,25 @@ existing application after a dry run:
 cargo ax migrate asx --dry-run
 cargo ax migrate asx
 ```
+
+Generate canonical app-owned source without hand-building folders:
+
+```bash
+cargo ax g component ThemeSwitcher
+# app/components/theme-switcher.asx
+
+cargo ax g island CommandPalette
+# app/components/command-palette.asx
+# app/components/command-palette.client.js
+
+cargo ax g page settings/profile
+# app/settings/profile/page.asx
+```
+
+The generator writes modern function-shaped ASX, uses component-owned client
+assets for islands, and refuses to overwrite existing files. Generated
+components can be imported with paths such as
+`@/components/theme-switcher.asx`.
 
 The server accepts request bodies up to `1mb` by default. Apps can change this
 in `Axonyx.toml`:
@@ -140,7 +162,7 @@ foundation for live state patch streams, CMS events, and build/runtime signals.
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.1.14"
+axonyx-runtime = "0.2.0"
 axonyx-ui = "0.0.71"
 ```
 
