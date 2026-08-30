@@ -8483,8 +8483,23 @@ fn check_type_annotations(
             context.bind(binding.name.clone(), inferred);
         }
     }
-    if context.records.is_empty() && context.bindings.is_empty() {
+    let uses_route_context =
+        source.contains("route.") || source.contains("params.") || source.contains("query.");
+    if context.records.is_empty() && context.bindings.is_empty() && !uses_route_context {
         return diagnostics;
+    }
+    if uses_route_context {
+        context = context
+            .with_record(
+                AxRecordType::new("__AxRouteContext")
+                    .field("path", AxType::String)
+                    .field("section", AxType::String)
+                    .field("subsection", AxType::String)
+                    .field("params", AxType::Unknown),
+            )
+            .with_binding("route", AxType::record("__AxRouteContext"))
+            .with_binding("params", AxType::Unknown)
+            .with_binding("query", AxType::Unknown);
     }
 
     diagnostics.extend(
@@ -25418,6 +25433,43 @@ page SectionCard
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].line, 2);
         assert_eq!(diagnostics[0].code, "axonyx-parse");
+    }
+
+    #[test]
+    fn check_ax_source_accepts_builtin_route_context() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/layout.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page RootLayout() {
+  return ASX {
+    <nav>
+      <a href="/docs" aria-current={route.section == "docs"}>Docs</a>
+      <a href="/roadmap" aria-current={route.path == "/roadmap"}>Roadmap</a>
+      <span>{route.subsection}</span>
+      <span>{route.params.slug ?? params.slug ?? query.preview}</span>
+    </nav>
+  }
+}"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn check_ax_source_rejects_unknown_route_context_field() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/app/page.asx");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"page Home() {
+  return ASX { <Copy>{route.missing}</Copy> }
+}"#,
+            None,
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics[0].code, "axonyx-type");
+        assert!(diagnostics[0].message.contains("missing"));
     }
 
     #[test]
