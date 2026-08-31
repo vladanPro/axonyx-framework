@@ -1974,50 +1974,79 @@ fn collect_db_check_report(root: &Path, url_override: Option<&str>) -> Result<Db
         .validate()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    if config.driver != ax_backend_runtime::AxDatabaseDriver::Sqlite {
+    if config.transport == ax_backend_runtime::AxDataTransport::Api {
         return Ok(DbCheckReport {
             ok: true,
             driver: config.driver.as_str().to_string(),
             transport: config.transport.as_str().to_string(),
             url: config.url.map(|url| redact_db_url(&url)),
             message: format!(
-                "{} database config is valid. Live table introspection is available for SQLite first; {} introspection is planned next.",
-                display_database_driver(config.driver.as_str()),
-                config.driver.as_str()
+                "{} API transport config is valid. Direct table introspection is not available through an API transport.",
+                display_database_driver(config.driver.as_str())
             ),
             tables: Vec::new(),
         });
     }
 
+    let driver = config.driver.clone();
     let runtime = ax_backend_runtime::runtime_from_env(env)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let value = ax_backend_runtime::AxQueryExecutor::load(
-        &runtime,
-        &ax_backend_runtime::AxQueryRequest {
-            collection: "sqlite_master".to_string(),
-            filters: vec![ax_backend_runtime::AxQueryFilterRequest {
-                field: "type".to_string(),
-                op: ax_backend_runtime::AxQueryFilterOp::Eq,
-                value: serde_json::json!("table"),
-            }],
-            orders: vec![ax_backend_runtime::AxQueryOrderRequest {
-                field: "name".to_string(),
-                direction: ax_backend_runtime::AxQueryOrderDirection::Asc,
-            }],
-            limit: None,
-            offset: None,
-            mode: ax_backend_runtime::AxQueryMode::Many,
-        },
-    )
-    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-
-    let tables = sqlite_master_tables_from_value(&value);
+    let tables = match driver {
+        ax_backend_runtime::AxDatabaseDriver::Sqlite => {
+            let value = ax_backend_runtime::AxQueryExecutor::load(
+                &runtime,
+                &ax_backend_runtime::AxQueryRequest {
+                    collection: "sqlite_master".to_string(),
+                    filters: vec![ax_backend_runtime::AxQueryFilterRequest {
+                        field: "type".to_string(),
+                        op: ax_backend_runtime::AxQueryFilterOp::Eq,
+                        value: serde_json::json!("table"),
+                    }],
+                    orders: vec![ax_backend_runtime::AxQueryOrderRequest {
+                        field: "name".to_string(),
+                        direction: ax_backend_runtime::AxQueryOrderDirection::Asc,
+                    }],
+                    limit: None,
+                    offset: None,
+                    mode: ax_backend_runtime::AxQueryMode::Many,
+                },
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            sqlite_master_tables_from_value(&value)
+        }
+        ax_backend_runtime::AxDatabaseDriver::Postgres => {
+            let value = ax_backend_runtime::AxQueryExecutor::query(
+                &runtime,
+                &ax_backend_runtime::AxRawSqlRequest {
+                    sql: "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name".to_string(),
+                    params: Vec::new(),
+                },
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            postgres_tables_from_value(&value)
+        }
+        ax_backend_runtime::AxDatabaseDriver::MySql
+        | ax_backend_runtime::AxDatabaseDriver::Memory => Vec::new(),
+    };
+    let message = match driver {
+        ax_backend_runtime::AxDatabaseDriver::Sqlite => {
+            format!("SQLite database is reachable ({} table(s)).", tables.len())
+        }
+        ax_backend_runtime::AxDatabaseDriver::Postgres => format!(
+            "Postgres database is reachable ({} public table(s)).",
+            tables.len()
+        ),
+        _ => format!(
+            "{} database config is valid. Live table introspection is not implemented for this driver yet.",
+            display_database_driver(driver.as_str())
+        ),
+    };
     Ok(DbCheckReport {
         ok: true,
         driver: config.driver.as_str().to_string(),
         transport: config.transport.as_str().to_string(),
         url: config.url.map(|url| redact_db_url(&url)),
-        message: format!("SQLite database is reachable ({} table(s)).", tables.len()),
+        message,
         tables,
     })
 }
@@ -2053,18 +2082,30 @@ fn collect_db_pull_report(
         .validate()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    if config.driver != ax_backend_runtime::AxDatabaseDriver::Sqlite {
+    if config.transport != ax_backend_runtime::AxDataTransport::Direct {
+        bail!("cargo ax db pull requires direct database transport");
+    }
+
+    if !matches!(
+        config.driver,
+        ax_backend_runtime::AxDatabaseDriver::Sqlite
+            | ax_backend_runtime::AxDatabaseDriver::Postgres
+    ) {
         bail!(
-            "cargo ax db pull supports SQLite schema pulls first; configured driver is {}",
+            "cargo ax db pull supports SQLite and Postgres; configured driver is {}",
             config.driver.as_str()
         );
     }
 
     let Some(url) = config.url.clone() else {
-        bail!("missing AX_SECRET_DB_URL for SQLite schema pull");
+        bail!("missing AX_SECRET_DB_URL for database schema pull");
     };
 
-    let schema = pull_sqlite_schema(&config, &url)?;
+    let schema = match config.driver {
+        ax_backend_runtime::AxDatabaseDriver::Sqlite => pull_sqlite_schema(&config, &url)?,
+        ax_backend_runtime::AxDatabaseDriver::Postgres => pull_postgres_schema(&config, env)?,
+        _ => unreachable!("unsupported drivers were rejected above"),
+    };
     let out_path = if out.is_absolute() {
         out.to_path_buf()
     } else {
@@ -2087,7 +2128,8 @@ fn collect_db_pull_report(
         ok: true,
         path: out_path.display().to_string(),
         message: format!(
-            "Pulled SQLite schema with {} table(s).",
+            "Pulled {} schema with {} table(s).",
+            display_database_driver(schema.driver.as_str()),
             schema.tables.len()
         ),
         schema,
@@ -2128,6 +2170,94 @@ fn pull_sqlite_schema(
         url: config.url.clone().map(|url| redact_db_url(&url)),
         tables,
     })
+}
+
+fn pull_postgres_schema(
+    config: &ax_backend_runtime::AxDatabaseConfig,
+    env: ax_backend_runtime::AxEnv,
+) -> Result<DbSchemaManifest> {
+    let runtime = ax_backend_runtime::runtime_from_env(env)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let value = ax_backend_runtime::AxQueryExecutor::query(
+        &runtime,
+        &ax_backend_runtime::AxRawSqlRequest {
+            sql: POSTGRES_SCHEMA_QUERY.to_string(),
+            params: Vec::new(),
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    Ok(DbSchemaManifest {
+        version: 1,
+        driver: config.driver.as_str().to_string(),
+        transport: config.transport.as_str().to_string(),
+        url: config.url.clone().map(|url| redact_db_url(&url)),
+        tables: postgres_schema_tables_from_value(&value)?,
+    })
+}
+
+const POSTGRES_SCHEMA_QUERY: &str = r#"
+select
+  c.table_name,
+  c.column_name,
+  case when c.data_type = 'USER-DEFINED' then c.udt_name else c.data_type end as data_type,
+  (c.is_nullable = 'YES') as nullable,
+  c.column_default,
+  exists (
+    select 1
+    from information_schema.table_constraints tc
+    join information_schema.key_column_usage kcu
+      on tc.constraint_name = kcu.constraint_name
+      and tc.table_schema = kcu.table_schema
+      and tc.table_name = kcu.table_name
+    where tc.constraint_type = 'PRIMARY KEY'
+      and tc.table_schema = c.table_schema
+      and tc.table_name = c.table_name
+      and kcu.column_name = c.column_name
+  ) as primary_key
+from information_schema.columns c
+where c.table_schema = 'public'
+order by c.table_name, c.ordinal_position
+"#;
+
+fn postgres_schema_tables_from_value(value: &serde_json::Value) -> Result<Vec<DbSchemaTable>> {
+    let rows = value
+        .as_array()
+        .context("Postgres schema introspection did not return a row array")?;
+    let mut tables = std::collections::BTreeMap::<String, Vec<DbSchemaColumn>>::new();
+
+    for row in rows {
+        let table = postgres_schema_string(row, "table_name")?;
+        let column = DbSchemaColumn {
+            name: postgres_schema_string(row, "column_name")?,
+            ty: postgres_schema_string(row, "data_type")?,
+            nullable: row
+                .get("nullable")
+                .and_then(serde_json::Value::as_bool)
+                .context("Postgres schema row is missing boolean `nullable`")?,
+            primary_key: row
+                .get("primary_key")
+                .and_then(serde_json::Value::as_bool)
+                .context("Postgres schema row is missing boolean `primary_key`")?,
+            default: row
+                .get("column_default")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        };
+        tables.entry(table).or_default().push(column);
+    }
+
+    Ok(tables
+        .into_iter()
+        .map(|(name, columns)| DbSchemaTable { name, columns })
+        .collect())
+}
+
+fn postgres_schema_string(row: &serde_json::Value, field: &str) -> Result<String> {
+    row.get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("Postgres schema row is missing string `{field}`"))
 }
 
 fn sqlite_schema_tables(connection: &rusqlite::Connection) -> Result<Vec<DbSchemaTable>> {
@@ -2191,6 +2321,18 @@ fn sqlite_master_tables_from_value(value: &serde_json::Value) -> Vec<String> {
         .iter()
         .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
         .filter(|name| !name.starts_with("sqlite_"))
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn postgres_tables_from_value(value: &serde_json::Value) -> Vec<String> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(|item| item.get("table_name").and_then(serde_json::Value::as_str))
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -20730,34 +20872,7 @@ page Home
     }
 
     #[test]
-    fn db_check_report_accepts_postgres_url_without_live_introspection() {
-        let root = make_temp_dir("db-check-postgres-url");
-        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
-            .expect("config should write");
-
-        let report = collect_db_check_report(
-            &root,
-            Some("postgresql://postgres:secret@db.example.supabase.co:5432/postgres"),
-        )
-        .expect("postgres config should validate");
-
-        assert!(report.ok);
-        assert_eq!(report.driver, "postgres");
-        assert_eq!(report.transport, "direct");
-        assert!(report.tables.is_empty());
-        assert!(report
-            .url
-            .as_deref()
-            .expect("url should be reported")
-            .contains("<redacted>"));
-        assert!(report.message.contains("config is valid"));
-        assert!(report.message.contains("introspection is planned next"));
-
-        fs::remove_dir_all(root).expect("temp dir should clean up");
-    }
-
-    #[test]
-    fn db_check_report_infers_postgres_driver_from_env_url() {
+    fn db_env_infers_postgres_driver_and_redacts_credentials() {
         let root = make_temp_dir("db-check-postgres-env");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
@@ -20767,12 +20882,85 @@ page Home
         )
         .expect("env should write");
 
-        let report =
-            collect_db_check_report(&root, None).expect("postgres env config should validate");
+        let env = db_env_for_root(&root, None).expect("postgres env should load");
+        let config = env
+            .database_config()
+            .expect("postgres config should resolve");
 
-        assert!(report.ok);
-        assert_eq!(report.driver, "postgres");
-        assert_eq!(report.transport, "direct");
+        assert_eq!(
+            config.driver,
+            ax_backend_runtime::AxDatabaseDriver::Postgres
+        );
+        assert_eq!(
+            config.transport,
+            ax_backend_runtime::AxDataTransport::Direct
+        );
+        assert_eq!(
+            config.url.as_deref().map(redact_db_url),
+            Some("postgres://<redacted>@db.example.supabase.co:5432/postgres".to_string())
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn postgres_schema_rows_build_stable_manifest_tables() {
+        let tables = postgres_schema_tables_from_value(&serde_json::json!([
+            {
+                "table_name": "posts",
+                "column_name": "id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": "gen_random_uuid()",
+                "primary_key": true
+            },
+            {
+                "table_name": "posts",
+                "column_name": "summary",
+                "data_type": "text",
+                "nullable": true,
+                "column_default": null,
+                "primary_key": false
+            }
+        ]))
+        .expect("postgres rows should map");
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "posts");
+        assert_eq!(tables[0].columns[0].name, "id");
+        assert_eq!(tables[0].columns[0].ty, "uuid");
+        assert!(tables[0].columns[0].primary_key);
+        assert!(tables[0].columns[1].nullable);
+    }
+
+    #[test]
+    fn postgres_db_check_and_pull_run_when_test_url_is_configured() {
+        let Ok(url) = std::env::var("AXONYX_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let root = make_temp_dir("db-postgres-live");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+
+        let check =
+            collect_db_check_report(&root, Some(&url)).expect("live postgres check should succeed");
+        assert!(check.ok);
+        assert_eq!(check.driver, "postgres");
+        assert!(check.message.contains("reachable"));
+        let reported_url = check.url.unwrap_or_default();
+        assert!(!reported_url.contains("secret"));
+        if url.contains('@') {
+            assert!(reported_url.contains("<redacted>"));
+        }
+
+        let pull = collect_db_pull_report(
+            &root,
+            Some(&url),
+            Path::new(".axonyx/db/postgres-schema.json"),
+        )
+        .expect("live postgres pull should succeed");
+        assert_eq!(pull.schema.driver, "postgres");
+        assert!(root.join(".axonyx/db/postgres-schema.json").exists());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
