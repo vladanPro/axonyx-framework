@@ -10386,7 +10386,7 @@ fn compiled_production_source(
 use std::path::{{Component, Path, PathBuf}};
 use std::sync::Arc;
 
-use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxEnv}};
+use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv}};
 use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
 use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
@@ -10408,29 +10408,32 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let port = std::env::var("AXONYX_PORT").unwrap_or_else(|_| "3000".to_string());
     let bind = format!("{{host}}:{{port}}");
     let dist = PathBuf::from({dist_literal});
-    let handler: AxCompiledHandler = Arc::new(move |request| handle_request(&dist, request));
+    let runtime = Arc::new(lazy_runtime_from_env(AxEnv::from_env())?);
+    let handler: AxCompiledHandler =
+        Arc::new(move |request| handle_request(&dist, runtime.as_ref(), request));
     println!("Axonyx compiled production server listening at http://{{bind}}");
     serve_compiled_axum(bind, 1024 * 1024, handler)
 }}
 
-fn handle_request(dist: &Path, request: AxHttpRequest) -> AxHttpResponse {{
+fn handle_request(
+    dist: &Path,
+    runtime: &impl AxBackendRuntime,
+    request: AxHttpRequest,
+) -> AxHttpResponse {{
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/health") {{
         return secure(AxHttpResponse::text(200, "ok"));
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/action") {{
-        return secure(handle_compiled_action(&request));
+        return secure(handle_compiled_action(runtime, &request));
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/data") {{
-        return secure(handle_compiled_data(&request));
+        return secure(handle_compiled_data(runtime, &request));
     }}
 
     if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
-        let response = (|| {{
-            let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
-            backend::dispatch_api_route(&runtime, &request)
-        }})();
+        let response = backend::dispatch_api_route(runtime, &request);
         return secure(match response {{
             Ok(Some(response)) => response,
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
@@ -10452,7 +10455,10 @@ fn handle_request(dist: &Path, request: AxHttpRequest) -> AxHttpResponse {{
     secure(response)
 }}
 
-fn handle_compiled_action(request: &AxHttpRequest) -> AxHttpResponse {{
+fn handle_compiled_action(
+    runtime: &impl AxBackendRuntime,
+    request: &AxHttpRequest,
+) -> AxHttpResponse {{
     if !request.method.eq_ignore_ascii_case("POST") {{
         return AxHttpResponse::text(405, "Method Not Allowed")
             .with_header("Allow", "POST")
@@ -10482,10 +10488,7 @@ fn handle_compiled_action(request: &AxHttpRequest) -> AxHttpResponse {{
         .map(safe_action_route)
         .unwrap_or_else(|| "/".to_string());
 
-    let dispatched = (|| {{
-        let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
-        backend::dispatch_action(&runtime, &name, request)
-    }})();
+    let dispatched = backend::dispatch_action(runtime, &name, request);
 
     match dispatched {{
         Ok(Some(mut payload)) => {{
@@ -10556,7 +10559,10 @@ fn normalize_action_payload(route: &str, payload: &mut Value) {{
     }}
 }}
 
-fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
+fn handle_compiled_data(
+    runtime: &impl AxBackendRuntime,
+    request: &AxHttpRequest,
+) -> AxHttpResponse {{
     if !request.method.eq_ignore_ascii_case("GET") {{
         return AxHttpResponse::text(405, "Method Not Allowed")
             .with_header("Allow", "GET")
@@ -10576,7 +10582,6 @@ fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
         return AxHttpResponse::text(404, "data binding not found").with_no_store();
     }};
     let dispatched = (|| {{
-        let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
         let mut loader_values = BTreeMap::new();
         let mut binding_values = BTreeMap::new();
         for route_binding in &bindings {{
@@ -10584,7 +10589,7 @@ fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
             loader_request.target = path.clone();
             let args = compiled_binding_args(route_binding, &path)?;
             let value = backend::dispatch_loader(
-                &runtime,
+                runtime,
                 route_binding.loader,
                 route_binding.pattern,
                 &loader_request,
@@ -21100,6 +21105,14 @@ page Home
         assert!(source.contains("compiled_binding_args"));
         assert!(source.contains("compiled_loader_call_key"));
         assert!(source.contains("render_compiled_page_fragment"));
+        assert!(source.contains("let runtime = Arc::new(lazy_runtime_from_env"));
+        assert_eq!(
+            source
+                .matches("lazy_runtime_from_env(AxEnv::from_env())")
+                .count(),
+            1
+        );
+        assert!(source.contains("handle_request(&dist, runtime.as_ref(), request)"));
         assert!(source.contains("cross_site_action_request"));
         assert!(source.contains("safe_action_route"));
         assert!(source.contains("path.starts_with(\"//\")"));
