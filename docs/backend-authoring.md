@@ -163,13 +163,18 @@ dashboard URL:
 AX_SECRET_DB_URL=postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres
 AX_SECRET_DB_DIALECT=postgres
 AX_SECRET_DB_TRANSPORT=direct
+DB_POOL_MAX_SIZE=10
+DB_POOL_TIMEOUT_MS=5000
 ```
 
 Current Postgres behavior:
 
-- `cargo ax db check` validates the Axonyx env/config contract.
+- Direct runtime queries use a lazy, process-shared connection pool.
+- `DB_POOL_MAX_SIZE` controls the maximum open connections; the default is `10`.
+- `DB_POOL_TIMEOUT_MS` controls how long checkout waits; the default is `5000`.
+- `cargo ax db check` validates the connection and lists visible tables.
 - The printed URL is redacted before display.
-- Live Postgres table/column introspection is planned next.
+- The same contract works with local PostgreSQL and hosted providers such as Supabase.
 
 ## Database Schema Pull
 
@@ -179,10 +184,10 @@ Use `cargo ax db pull` to write the current database schema snapshot to:
 .axonyx/db/schema.json
 ```
 
-Current v0 behavior:
+Current behavior:
 
 - SQLite table/column introspection is supported.
-- Postgres/Supabase schema pull is planned next.
+- Postgres/Supabase table and column introspection is supported.
 - Existing schema output is overwritten, so rerun the command after changing the database.
 
 Example:
