@@ -241,6 +241,69 @@ cargo ax db pull --out .axonyx/db/schema.json
 The schema file is intended to power future checks such as unknown tables,
 unknown columns, generated Axonyx types, and LSP autocomplete.
 
+## Database Migrations
+
+Axonyx V1 migrations are ordered SQL pairs owned by the application. Configure
+their directory in `Axonyx.toml`:
+
+```toml
+[db]
+migrations = "db/migrations"
+```
+
+Create a migration:
+
+```bash
+cargo ax db migration create create_posts
+```
+
+This creates one immutable migration directory:
+
+```text
+db/migrations/
+  20260901123456_001_create_posts/
+    up.sql
+    down.sql
+```
+
+Both files must contain executable SQL. Axonyx owns the transaction boundary,
+so migration files must not contain `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`,
+or `RELEASE` statements.
+
+Use the safe inspection and execution flow:
+
+```bash
+cargo ax db status
+cargo ax db status --format json
+cargo ax db migrate --dry-run
+cargo ax db migrate
+cargo ax db rollback --dry-run
+cargo ax db rollback
+```
+
+`status` and both dry-run commands are read-only. The first successful apply
+creates `_axonyx_migrations`; applying SQL and recording its version/checksum
+happen in the same database transaction. Rollback can only remove the latest
+applied migration and also runs atomically.
+
+The default profile loads `.env` followed by `.env.local`. Named profiles load
+`.env` followed by `.env.<name>`, before shell values are applied:
+
+```bash
+cargo ax db status --env staging
+cargo ax db migrate --env prod --dry-run
+cargo ax db migrate --env prod --confirm
+```
+
+Production apply and rollback commands refuse to run without `--confirm`.
+Axonyx prints the target driver and redacted URL, rejects missing/out-of-order
+migration files, and fails if an already-applied checksum differs from disk.
+
+V1 supports persistent direct SQLite files and Postgres transports. Ephemeral
+SQLite `:memory:` databases are rejected because migration history would vanish
+with the connection. API transport migrations, schema diff generation, seeds,
+and multi-step rollback are deliberately not claimed yet.
+
 For deeper draft details, see:
 
 - [Reactivity v1](./reactivity-v1.md)

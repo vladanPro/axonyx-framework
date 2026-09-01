@@ -27,6 +27,8 @@ toml = "0.8.23"
 semver = "1.0.27"
 axum = "0.8.9"
 flate2 = "1.0.35"
+chrono = "0.4.42"
+sha2 = "0.10.9"
 proc-macro2 = "1.0.106"
 quote = "1.0.45"
 syn = { version = "2.0.117", features = ["full"] }

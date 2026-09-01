@@ -14,5 +14,8 @@ jobs_dir = "jobs"
 stream_pages = false
 max_body_bytes = "1mb"
 
+[db]
+migrations = "db/migrations"
+
 [modules]
 enabled = []
