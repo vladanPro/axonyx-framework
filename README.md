@@ -26,6 +26,7 @@ state signals.
 - first state bridge contracts through stable `SignalId`, `data-ax-signal`, and typed patch events
 - first Melt state manifest for `.ax` `state` declarations
 - reusable Foundry UI imports through `@axonyx/ui/...`
+- atomic SQLite/Postgres migrations through `cargo ax db ...`
 - generated apps consuming published crates from crates.io
 
 ## Packages
@@ -39,8 +40,8 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.1.14"
-axonyx-ui = "0.0.48"
+axonyx-runtime = "0.2.1"
+axonyx-ui = "0.0.71"
 ```
 
 ## Quick Start
@@ -126,6 +127,20 @@ Check and build:
 cargo ax doctor --deny-warnings
 cargo ax build --clean
 ```
+
+For full-stack apps, create and run ordered database migrations through the
+same configured runtime adapter used by loaders, actions, and API routes:
+
+```bash
+cargo ax db migration create create_posts
+cargo ax db status
+cargo ax db migrate --dry-run
+cargo ax db migrate
+```
+
+Production changes require `--env prod --confirm`. See
+[Backend authoring](./docs/backend-authoring.md#database-migrations) for the
+directory, checksum, rollback, and environment contracts.
 
 Available templates today:
 

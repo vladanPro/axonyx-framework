@@ -29,6 +29,45 @@ sources, regenerates `src/generated/backend.rs`, and writes static HTML into
 In this template it shows the `CreatePost` inputs, including the optional
 `status?: string = "draft"` field used by the `ActionForm` on `/posts`.
 
+## Database Migrations
+
+The full-stack template keeps ordered SQL migrations in `db/migrations`, as
+configured by `[db].migrations` in `Axonyx.toml`.
+
+Create and edit the first migration:
+
+```bash
+cargo ax db migration create create_posts
+# edit db/migrations/<version>_create_posts/up.sql
+# edit db/migrations/<version>_create_posts/down.sql
+```
+
+Inspect and apply it locally:
+
+```bash
+cargo ax db status
+cargo ax db migrate --dry-run
+cargo ax db migrate
+```
+
+Rollback always targets the latest applied migration:
+
+```bash
+cargo ax db rollback --dry-run
+cargo ax db rollback
+```
+
+Environment profiles load `.env.local` by default and `.env.<name>` for
+`--env <name>`. Production changes require explicit confirmation:
+
+```bash
+cargo ax db migrate --env prod --dry-run
+cargo ax db migrate --env prod --confirm
+```
+
+Applied checksums are immutable. If an applied migration changes locally,
+Axonyx stops instead of silently rewriting database history.
+
 ## Fast QA
 
 This starter includes `aegis.toml` for fast route checks before deploy.

@@ -236,7 +236,7 @@ fn hint_for_create_error(error: &anyhow::Error) -> Option<&'static str> {
     None
 }
 
-fn create_app(target_dir: &PathBuf, project_name: &str, cli: &Cli) -> Result<()> {
+fn create_app(target_dir: &Path, project_name: &str, cli: &Cli) -> Result<()> {
     let runtime_dependency = runtime_dependency_spec(cli)?;
     let runtime_source_note = runtime_source_note(cli);
     let template = match cli.template {
@@ -324,7 +324,7 @@ fn ensure_ui_cargo_dependency(target_dir: &Path, cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn compile_initial_backend(target_dir: &PathBuf) -> Result<()> {
+fn compile_initial_backend(target_dir: &Path) -> Result<()> {
     let mut sources = Vec::new();
 
     collect_backend_sources(target_dir, &mut sources)?;
@@ -351,7 +351,7 @@ fn compile_initial_backend(target_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn collect_backend_sources(target_dir: &PathBuf, out: &mut Vec<(String, String)>) -> Result<()> {
+fn collect_backend_sources(target_dir: &Path, out: &mut Vec<(String, String)>) -> Result<()> {
     let routes_root = target_dir.join("routes");
     let jobs_root = target_dir.join("jobs");
     let app_root = target_dir.join("app");
@@ -363,8 +363,8 @@ fn collect_backend_sources(target_dir: &PathBuf, out: &mut Vec<(String, String)>
 }
 
 fn collect_backend_sources_in_dir(
-    root: &PathBuf,
-    dir: &PathBuf,
+    root: &Path,
+    dir: &Path,
     out: &mut Vec<(String, String)>,
     recurse: bool,
 ) -> Result<()> {
@@ -403,8 +403,8 @@ fn collect_backend_sources_in_dir(
 }
 
 fn collect_backend_like_sources_in_dir(
-    root: &PathBuf,
-    dir: &PathBuf,
+    root: &Path,
+    dir: &Path,
     out: &mut Vec<(String, String)>,
 ) -> Result<()> {
     if !dir.exists() {
@@ -460,7 +460,7 @@ fn looks_like_backend_ax(source: &str) -> bool {
     })
 }
 
-fn init_git(target_dir: &PathBuf) -> Result<()> {
+fn init_git(target_dir: &Path) -> Result<()> {
     let status = std::process::Command::new("git")
         .arg("init")
         .current_dir(target_dir)
@@ -805,6 +805,14 @@ mod tests {
         assert!(loader.contains("query loadPosts() -> Post[]"));
         assert!(page.contains("data posts: List<Post> = loadPosts()"));
         assert!(!page.contains("type Post {"));
+        let config =
+            fs::read_to_string(target_dir.join("Axonyx.toml")).expect("minimal config should read");
+        assert!(config.contains("[db]"));
+        assert!(config.contains("migrations = \"db/migrations\""));
+        let readme =
+            fs::read_to_string(target_dir.join("README.md")).expect("minimal readme should read");
+        assert!(readme.contains("cargo ax db migration create create_posts"));
+        assert!(readme.contains("cargo ax db migrate --env prod --confirm"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

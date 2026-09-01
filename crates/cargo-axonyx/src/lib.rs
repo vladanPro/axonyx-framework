@@ -53,10 +53,12 @@ use axonyx_runtime::{
     preview_ax_route_with_request_context_and_runtime_and_imports, AxPreviewActionResult,
     AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore, AX_STATE_WASM_PATH,
 };
+use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -311,6 +313,96 @@ struct DbArgs {
 enum DbCommands {
     Check(DbCheckArgs),
     Pull(DbPullArgs),
+    Migration(DbMigrationArgs),
+    Migrate(DbMigrateArgs),
+    Status(DbStatusArgs),
+    Rollback(DbRollbackArgs),
+}
+
+#[derive(Debug, Parser)]
+struct DbMigrationArgs {
+    #[command(subcommand)]
+    command: DbMigrationCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum DbMigrationCommands {
+    Create(DbMigrationCreateArgs),
+}
+
+#[derive(Debug, Parser)]
+struct DbMigrationCreateArgs {
+    /// Human-readable migration name, for example create_posts.
+    name: String,
+
+    /// Override the configured migration directory.
+    #[arg(long)]
+    dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DbMigrateArgs {
+    /// Target environment. Production requires --confirm unless this is a dry run.
+    #[arg(long, default_value = "local")]
+    env: String,
+
+    /// Temporarily override DATABASE_URL / DB_URL.
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Override the configured migration directory.
+    #[arg(long)]
+    dir: Option<PathBuf>,
+
+    /// Print the migration plan without changing the database.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Confirm a production database change.
+    #[arg(long)]
+    confirm: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DbStatusArgs {
+    /// Target environment.
+    #[arg(long, default_value = "local")]
+    env: String,
+
+    /// Temporarily override DATABASE_URL / DB_URL.
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Override the configured migration directory.
+    #[arg(long)]
+    dir: Option<PathBuf>,
+
+    /// Output format for migration status.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+}
+
+#[derive(Debug, Parser)]
+struct DbRollbackArgs {
+    /// Target environment. Production requires --confirm unless this is a dry run.
+    #[arg(long, default_value = "local")]
+    env: String,
+
+    /// Temporarily override DATABASE_URL / DB_URL.
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Override the configured migration directory.
+    #[arg(long)]
+    dir: Option<PathBuf>,
+
+    /// Print the rollback target without changing the database.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Confirm a production database rollback.
+    #[arg(long)]
+    confirm: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1364,6 +1456,32 @@ struct DbPullReport {
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DbMigrationFile {
+    path: PathBuf,
+    migration: ax_backend_runtime::AxMigration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbMigrationStatusEntry {
+    version: String,
+    name: String,
+    status: String,
+    checksum: String,
+    applied_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbMigrationStatusReport {
+    driver: String,
+    environment: String,
+    url: Option<String>,
+    directory: String,
+    entries: Vec<DbMigrationStatusEntry>,
+    applied: usize,
+    pending: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct DbSchemaManifest {
     version: u32,
@@ -1930,7 +2048,481 @@ fn db_command(args: DbArgs) -> Result<()> {
     match args.command {
         DbCommands::Check(args) => db_check_command(args),
         DbCommands::Pull(args) => db_pull_command(args),
+        DbCommands::Migration(args) => db_migration_command(args),
+        DbCommands::Migrate(args) => db_migrate_command(args),
+        DbCommands::Status(args) => db_status_command(args),
+        DbCommands::Rollback(args) => db_rollback_command(args),
     }
+}
+
+fn db_migration_command(args: DbMigrationArgs) -> Result<()> {
+    match args.command {
+        DbMigrationCommands::Create(args) => db_migration_create_command(args),
+    }
+}
+
+fn db_migration_create_command(args: DbMigrationCreateArgs) -> Result<()> {
+    let root = app_root()?;
+    let directory = migrations_directory(&root, args.dir.as_deref())?;
+    let path = create_migration_files(&directory, &args.name, Utc::now())?;
+    println!("Created migration {}", path.display());
+    println!("  - {}", path.join("up.sql").display());
+    println!("  - {}", path.join("down.sql").display());
+    Ok(())
+}
+
+fn db_migrate_command(args: DbMigrateArgs) -> Result<()> {
+    ensure_database_change_confirmed(&args.env, args.dry_run, args.confirm)?;
+    let root = app_root()?;
+    let directory = migrations_directory(&root, args.dir.as_deref())?;
+    let files = discover_migrations(&directory)?;
+    let (config, runtime) = migration_runtime(&root, &args.env, args.url.as_deref())?;
+    let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let pending = pending_migrations(&files, &history)?;
+
+    print_migration_target(&config, &args.env, &directory);
+    if pending.is_empty() {
+        println!("Database is up to date.");
+        return Ok(());
+    }
+    println!("Pending migrations: {}", pending.len());
+    for migration in &pending {
+        println!(
+            "  - {} {}",
+            migration.migration.version, migration.migration.name
+        );
+    }
+    if args.dry_run {
+        println!("Dry run: no database changes were made.");
+        return Ok(());
+    }
+
+    for migration in pending {
+        let applied = ax_backend_runtime::AxMigrationExecutor::apply_migration(
+            &runtime,
+            &migration.migration,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        println!(
+            "Applied {} {} ({} ms)",
+            applied.version, applied.name, applied.execution_ms
+        );
+    }
+    Ok(())
+}
+
+fn db_status_command(args: DbStatusArgs) -> Result<()> {
+    let root = app_root()?;
+    let directory = migrations_directory(&root, args.dir.as_deref())?;
+    let files = discover_migrations(&directory)?;
+    let (config, runtime) = migration_runtime(&root, &args.env, args.url.as_deref())?;
+    let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let report = migration_status_report(&config, &args.env, &directory, &files, &history)?;
+
+    match args.format {
+        CheckFormat::Text => print_migration_status(&report),
+        CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+    }
+    Ok(())
+}
+
+fn db_rollback_command(args: DbRollbackArgs) -> Result<()> {
+    ensure_database_change_confirmed(&args.env, args.dry_run, args.confirm)?;
+    let root = app_root()?;
+    let directory = migrations_directory(&root, args.dir.as_deref())?;
+    let files = discover_migrations(&directory)?;
+    let (config, runtime) = migration_runtime(&root, &args.env, args.url.as_deref())?;
+    let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let _ = pending_migrations(&files, &history)?;
+    let latest = history
+        .last()
+        .context("database migration history is empty; there is nothing to roll back")?;
+    let migration = files
+        .iter()
+        .find(|file| file.migration.version == latest.version)
+        .context("latest applied migration file is missing locally")?;
+
+    print_migration_target(&config, &args.env, &directory);
+    println!(
+        "Rollback: {} {}",
+        migration.migration.version, migration.migration.name
+    );
+    if args.dry_run {
+        println!("Dry run: no database changes were made.");
+        return Ok(());
+    }
+    ax_backend_runtime::AxMigrationExecutor::rollback_migration(&runtime, &migration.migration)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    println!(
+        "Rolled back {} {}",
+        migration.migration.version, migration.migration.name
+    );
+    Ok(())
+}
+
+fn migration_runtime(
+    root: &Path,
+    environment: &str,
+    url_override: Option<&str>,
+) -> Result<(
+    ax_backend_runtime::AxDatabaseConfig,
+    ax_backend_runtime::AxDatabaseRuntime<Box<dyn ax_backend_runtime::AxDatabaseAdapter>>,
+)> {
+    let env = db_env_for_root_profile(root, url_override, environment)?;
+    let config = env
+        .database_config()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    config
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if config.transport != ax_backend_runtime::AxDataTransport::Direct {
+        bail!("database migrations require direct transport");
+    }
+    if !matches!(
+        config.driver,
+        ax_backend_runtime::AxDatabaseDriver::Sqlite
+            | ax_backend_runtime::AxDatabaseDriver::Postgres
+    ) {
+        bail!(
+            "database migrations support SQLite and Postgres; configured driver is {}",
+            config.driver.as_str()
+        );
+    }
+    let runtime = ax_backend_runtime::runtime_from_env(env)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok((config, runtime))
+}
+
+fn ensure_database_change_confirmed(
+    environment: &str,
+    dry_run: bool,
+    confirmed: bool,
+) -> Result<()> {
+    let environment = normalized_environment_profile(environment)?;
+    if is_production_environment(&environment) && !dry_run && !confirmed {
+        bail!(
+            "database changes for environment `{environment}` require --confirm; use --dry-run to inspect the plan safely"
+        );
+    }
+    Ok(())
+}
+
+fn is_production_environment(environment: &str) -> bool {
+    matches!(
+        environment.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
+}
+
+fn normalized_environment_profile(environment: &str) -> Result<String> {
+    let normalized = environment.trim().to_ascii_lowercase();
+    let normalized = if normalized.is_empty() {
+        "local".to_string()
+    } else {
+        normalized
+    };
+    if !normalized
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        bail!("invalid database environment `{environment}`; use letters, numbers, `_`, or `-`");
+    }
+    Ok(normalized)
+}
+
+fn migrations_directory(root: &Path, override_dir: Option<&Path>) -> Result<PathBuf> {
+    let configured = if let Some(path) = override_dir {
+        path.to_path_buf()
+    } else {
+        let config_path = root.join("Axonyx.toml");
+        let configured = fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|source| source.parse::<toml::Value>().ok())
+            .and_then(|value| {
+                value
+                    .get("db")
+                    .and_then(|db| db.get("migrations"))
+                    .and_then(toml::Value::as_str)
+                    .map(PathBuf::from)
+            });
+        configured.unwrap_or_else(|| PathBuf::from("db/migrations"))
+    };
+    Ok(if configured.is_absolute() {
+        configured
+    } else {
+        root.join(configured)
+    })
+}
+
+fn create_migration_files(
+    directory: &Path,
+    name: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<PathBuf> {
+    let name = migration_name_slug(name)?;
+    fs::create_dir_all(directory).with_context(|| {
+        format!(
+            "failed to create migration directory {}",
+            directory.display()
+        )
+    })?;
+    let timestamp = now.format("%Y%m%d%H%M%S").to_string();
+    let sequence = next_migration_sequence(directory, &timestamp)?;
+    let folder = directory.join(format!("{timestamp}_{sequence:03}_{name}"));
+    fs::create_dir(&folder)
+        .with_context(|| format!("failed to create migration {}", folder.display()))?;
+    fs::write(
+        folder.join("up.sql"),
+        "-- Add forward migration SQL here.\n",
+    )?;
+    fs::write(
+        folder.join("down.sql"),
+        "-- Add rollback migration SQL here.\n",
+    )?;
+    Ok(folder)
+}
+
+fn migration_name_slug(name: &str) -> Result<String> {
+    let mut slug = String::new();
+    let mut separator = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            separator = false;
+        } else if !separator && !slug.is_empty() {
+            slug.push('_');
+            separator = true;
+        }
+    }
+    while slug.ends_with('_') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        bail!("migration name must contain at least one ASCII letter or number");
+    }
+    Ok(slug)
+}
+
+fn next_migration_sequence(directory: &Path, timestamp: &str) -> Result<u16> {
+    let mut highest = 0_u16;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let mut parts = name.splitn(3, '_');
+        if parts.next() != Some(timestamp) {
+            continue;
+        }
+        let Some(sequence) = parts.next().and_then(|value| value.parse::<u16>().ok()) else {
+            continue;
+        };
+        highest = highest.max(sequence);
+    }
+    let next = highest.saturating_add(1);
+    if next > 999 {
+        bail!("migration sequence exhausted for timestamp {timestamp}");
+    }
+    Ok(next)
+}
+
+fn discover_migrations(directory: &Path) -> Result<Vec<DbMigrationFile>> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut migrations = Vec::new();
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("failed to read migrations from {}", directory.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        migrations.push(read_migration_directory(&entry.path())?);
+    }
+    migrations.sort_by(|left, right| left.migration.version.cmp(&right.migration.version));
+    for pair in migrations.windows(2) {
+        if pair[0].migration.version == pair[1].migration.version {
+            bail!(
+                "duplicate migration version `{}`",
+                pair[0].migration.version
+            );
+        }
+    }
+    Ok(migrations)
+}
+
+fn read_migration_directory(path: &Path) -> Result<DbMigrationFile> {
+    let folder = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("migration directory name is not valid UTF-8")?;
+    let mut parts = folder.splitn(3, '_');
+    let timestamp = parts.next().unwrap_or_default();
+    let sequence = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    if timestamp.len() != 14
+        || !timestamp.chars().all(|ch| ch.is_ascii_digit())
+        || sequence.len() != 3
+        || !sequence.chars().all(|ch| ch.is_ascii_digit())
+        || migration_name_slug(name).ok().as_deref() != Some(name)
+    {
+        bail!("invalid migration directory `{folder}`; expected YYYYMMDDHHMMSS_NNN_name");
+    }
+    let up_path = path.join("up.sql");
+    let down_path = path.join("down.sql");
+    let up_sql = fs::read_to_string(&up_path)
+        .with_context(|| format!("failed to read {}", up_path.display()))?;
+    let down_sql = fs::read_to_string(&down_path)
+        .with_context(|| format!("failed to read {}", down_path.display()))?;
+    if !sql_has_executable_statement(&up_sql) || !sql_has_executable_statement(&down_sql) {
+        bail!("migration `{folder}` requires executable SQL in both up.sql and down.sql");
+    }
+    let checksum = migration_checksum(&up_sql, &down_sql);
+    Ok(DbMigrationFile {
+        path: path.to_path_buf(),
+        migration: ax_backend_runtime::AxMigration {
+            version: format!("{timestamp}_{sequence}"),
+            name: name.to_string(),
+            checksum,
+            up_sql,
+            down_sql,
+        },
+    })
+}
+
+fn sql_has_executable_statement(sql: &str) -> bool {
+    sql.lines()
+        .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+        .any(|line| !line.trim().is_empty())
+}
+
+fn migration_checksum(up_sql: &str, down_sql: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"axonyx-migration-v1\0");
+    hasher.update(up_sql.replace("\r\n", "\n").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(down_sql.replace("\r\n", "\n").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn pending_migrations<'a>(
+    files: &'a [DbMigrationFile],
+    history: &[ax_backend_runtime::AxAppliedMigration],
+) -> Result<Vec<&'a DbMigrationFile>> {
+    let local = files
+        .iter()
+        .map(|file| (file.migration.version.as_str(), file))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for applied in history {
+        let file = local.get(applied.version.as_str()).with_context(|| {
+            format!(
+                "applied migration `{}` is missing from the local migration directory",
+                applied.version
+            )
+        })?;
+        if file.migration.checksum != applied.checksum {
+            bail!(
+                "migration `{}` checksum differs from the applied database history",
+                applied.version
+            );
+        }
+    }
+    let highest_applied = history.last().map(|migration| migration.version.as_str());
+    let pending = files
+        .iter()
+        .filter(|file| {
+            !history
+                .iter()
+                .any(|item| item.version == file.migration.version)
+        })
+        .collect::<Vec<_>>();
+    if let Some(highest) = highest_applied {
+        if let Some(out_of_order) = pending
+            .iter()
+            .find(|file| file.migration.version.as_str() < highest)
+        {
+            bail!(
+                "pending migration `{}` is older than applied migration `{highest}`",
+                out_of_order.migration.version
+            );
+        }
+    }
+    Ok(pending)
+}
+
+fn migration_status_report(
+    config: &ax_backend_runtime::AxDatabaseConfig,
+    environment: &str,
+    directory: &Path,
+    files: &[DbMigrationFile],
+    history: &[ax_backend_runtime::AxAppliedMigration],
+) -> Result<DbMigrationStatusReport> {
+    let pending = pending_migrations(files, history)?;
+    let entries = files
+        .iter()
+        .map(|file| {
+            let applied = history
+                .iter()
+                .find(|item| item.version == file.migration.version);
+            DbMigrationStatusEntry {
+                version: file.migration.version.clone(),
+                name: file.migration.name.clone(),
+                status: if applied.is_some() {
+                    "applied".to_string()
+                } else {
+                    "pending".to_string()
+                },
+                checksum: file.migration.checksum.clone(),
+                applied_at: applied.map(|item| item.applied_at.clone()),
+            }
+        })
+        .collect();
+    Ok(DbMigrationStatusReport {
+        driver: config.driver.as_str().to_string(),
+        environment: environment.to_string(),
+        url: config.url.as_deref().map(redact_db_url),
+        directory: directory.display().to_string(),
+        entries,
+        applied: history.len(),
+        pending: pending.len(),
+    })
+}
+
+fn print_migration_status(report: &DbMigrationStatusReport) {
+    println!("Database migration status");
+    println!("Driver: {}", report.driver);
+    println!("Environment: {}", report.environment);
+    if let Some(url) = &report.url {
+        println!("URL: {url}");
+    }
+    println!("Directory: {}", report.directory);
+    if report.entries.is_empty() {
+        println!("Migrations: none");
+        return;
+    }
+    for entry in &report.entries {
+        println!("  {:<8} {} {}", entry.status, entry.version, entry.name);
+    }
+    println!("Applied: {} | Pending: {}", report.applied, report.pending);
+}
+
+fn print_migration_target(
+    config: &ax_backend_runtime::AxDatabaseConfig,
+    environment: &str,
+    directory: &Path,
+) {
+    println!("Database migrations");
+    println!("Driver: {}", config.driver.as_str());
+    println!("Environment: {environment}");
+    if let Some(url) = config.url.as_deref() {
+        println!("URL: {}", redact_db_url(url));
+    }
+    println!("Directory: {}", directory.display());
 }
 
 fn db_check_command(args: DbCheckArgs) -> Result<()> {
@@ -2338,9 +2930,22 @@ fn postgres_tables_from_value(value: &serde_json::Value) -> Vec<String> {
 }
 
 fn db_env_for_root(root: &Path, url_override: Option<&str>) -> Result<ax_backend_runtime::AxEnv> {
+    db_env_for_root_profile(root, url_override, "local")
+}
+
+fn db_env_for_root_profile(
+    root: &Path,
+    url_override: Option<&str>,
+    environment: &str,
+) -> Result<ax_backend_runtime::AxEnv> {
     let mut env = ax_backend_runtime::AxEnv::new();
     merge_env_file_into_ax_env(&mut env, &root.join(".env"))?;
-    merge_env_file_into_ax_env(&mut env, &root.join(".env.local"))?;
+    let normalized = normalized_environment_profile(environment)?;
+    if normalized == "local" {
+        merge_env_file_into_ax_env(&mut env, &root.join(".env.local"))?;
+    } else {
+        merge_env_file_into_ax_env(&mut env, &root.join(format!(".env.{normalized}")))?;
+    }
     for (key, value) in std::env::vars() {
         set_ax_env_key(&mut env, &key, &value);
     }
@@ -21134,6 +21739,203 @@ page Home
     }
 
     #[test]
+    fn migration_create_uses_stable_timestamp_sequence_and_canonical_name() {
+        let root = make_temp_dir("migration-create");
+        let directory = root.join("db/migrations");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-01T12:34:56Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+
+        let first = create_migration_files(&directory, "Create Posts", now)
+            .expect("first migration should create");
+        let second = create_migration_files(&directory, "add-post-status", now)
+            .expect("second migration should create");
+
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("20260901123456_001_create_posts")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("20260901123456_002_add_post_status")
+        );
+        assert!(first.join("up.sql").exists());
+        assert!(first.join("down.sql").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn migration_discovery_normalizes_line_endings_for_checksums() {
+        let root = make_temp_dir("migration-checksum-line-endings");
+        let directory = root.join("db/migrations/20260901123456_001_create_posts");
+        fs::create_dir_all(&directory).expect("migration directory should create");
+        fs::write(
+            directory.join("up.sql"),
+            "create table posts (\r\n  id integer primary key\r\n);\r\n",
+        )
+        .expect("up migration should write");
+        fs::write(directory.join("down.sql"), "drop table posts;\r\n")
+            .expect("down migration should write");
+
+        let migrations = discover_migrations(&root.join("db/migrations"))
+            .expect("migration should be discovered");
+        let expected = migration_checksum(
+            "create table posts (\n  id integer primary key\n);\n",
+            "drop table posts;\n",
+        );
+
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations[0].migration.version, "20260901123456_001");
+        assert_eq!(migrations[0].migration.name, "create_posts");
+        assert_eq!(migrations[0].migration.checksum, expected);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn migration_discovery_rejects_unfinished_and_malformed_directories() {
+        let root = make_temp_dir("migration-invalid-files");
+        let unfinished = root.join("db/migrations/20260901123456_001_create_posts");
+        fs::create_dir_all(&unfinished).expect("migration directory should create");
+        fs::write(unfinished.join("up.sql"), "-- TODO\n").expect("up should write");
+        fs::write(unfinished.join("down.sql"), "-- TODO\n").expect("down should write");
+
+        let error = discover_migrations(&root.join("db/migrations"))
+            .expect_err("comment-only migration should fail");
+        assert!(error.to_string().contains("requires executable SQL"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn production_migrations_require_explicit_confirmation() {
+        assert!(ensure_database_change_confirmed("prod", false, false).is_err());
+        assert!(ensure_database_change_confirmed("production", false, false).is_err());
+        assert!(ensure_database_change_confirmed("prod", true, false).is_ok());
+        assert!(ensure_database_change_confirmed("prod", false, true).is_ok());
+        assert!(ensure_database_change_confirmed("local", false, false).is_ok());
+        assert!(ensure_database_change_confirmed("../../prod", true, false).is_err());
+    }
+
+    #[test]
+    fn database_environment_profiles_load_the_matching_env_file() {
+        let _guard = lock_test_env();
+        let root = make_temp_dir("migration-env-profile");
+        fs::write(
+            root.join(".env.local"),
+            "AX_PUBLIC_MIGRATION_PROFILE_TEST=local\n",
+        )
+        .expect("local env should write");
+        fs::write(
+            root.join(".env.prod"),
+            "AX_PUBLIC_MIGRATION_PROFILE_TEST=production\n",
+        )
+        .expect("production env should write");
+
+        let local =
+            db_env_for_root_profile(&root, None, "local").expect("local environment should load");
+        let production = db_env_for_root_profile(&root, None, "PROD")
+            .expect("production environment should load");
+
+        assert_eq!(
+            local
+                .public
+                .get("migration_profile_test")
+                .map(String::as_str),
+            Some("local")
+        );
+        assert_eq!(
+            production
+                .public
+                .get("migration_profile_test")
+                .map(String::as_str),
+            Some("production")
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn sqlite_migration_helpers_complete_create_status_apply_and_rollback_flow() {
+        let root = make_temp_dir("migration-sqlite-flow");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"migration-test\"\n\n[db]\nmigrations = \"db/migrations\"\n",
+        )
+        .expect("config should write");
+        let db_path = root.join("migration-test.db");
+        fs::write(
+            root.join(".env.local"),
+            format!(
+                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\n",
+                db_path.display()
+            ),
+        )
+        .expect("database env should write");
+        let migration_dir = root.join("db/migrations/20260901123456_001_create_posts");
+        fs::create_dir_all(&migration_dir).expect("migration directory should create");
+        fs::write(
+            migration_dir.join("up.sql"),
+            "create table posts (id integer primary key, title text not null);\n",
+        )
+        .expect("up migration should write");
+        fs::write(migration_dir.join("down.sql"), "drop table posts;\n")
+            .expect("down migration should write");
+
+        let directory = migrations_directory(&root, None).expect("directory should resolve");
+        let files = discover_migrations(&directory).expect("migration should load");
+        let (config, runtime) =
+            migration_runtime(&root, "local", None).expect("migration runtime should initialize");
+        let empty_history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+            .expect("empty history should load");
+        assert!(empty_history.is_empty());
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        let tracking_tables: i64 = connection
+            .query_row(
+                "select count(*) from sqlite_master where type = 'table' and name = '_axonyx_migrations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("tracking table count should load");
+        assert_eq!(tracking_tables, 0, "status must not mutate the database");
+        drop(connection);
+
+        let pending = pending_migrations(&files, &empty_history).expect("pending should resolve");
+        assert_eq!(pending.len(), 1);
+        ax_backend_runtime::AxMigrationExecutor::apply_migration(&runtime, &pending[0].migration)
+            .expect("migration should apply");
+        let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+            .expect("history should load");
+        let status = migration_status_report(&config, "local", &directory, &files, &history)
+            .expect("status should build");
+        assert_eq!(status.applied, 1);
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.entries[0].status, "applied");
+
+        ax_backend_runtime::AxMigrationExecutor::rollback_migration(&runtime, &files[0].migration)
+            .expect("migration should roll back");
+        assert!(
+            ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+                .expect("history should reload")
+                .is_empty()
+        );
+        let connection = rusqlite::Connection::open(db_path).expect("sqlite should reopen");
+        let post_tables: i64 = connection
+            .query_row(
+                "select count(*) from sqlite_master where type = 'table' and name = 'posts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("posts table count should load");
+        assert_eq!(post_tables, 0);
+
+        drop(connection);
+        drop(runtime);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn strips_cargo_subcommand_prefix_for_ax() {
         let args = vec![
             OsString::from("cargo-ax.exe"),
@@ -21337,6 +22139,73 @@ return ASX { <Copy>{posts}</Copy> }
         assert_eq!(args.format, CheckFormat::Json);
         assert_eq!(args.url.as_deref(), Some("sqlite://app.db"));
         assert_eq!(args.out, PathBuf::from(".axonyx/db/schema.json"));
+    }
+
+    #[test]
+    fn parses_database_migration_commands() {
+        let create = Cli::try_parse_from([
+            "cargo-ax",
+            "db",
+            "migration",
+            "create",
+            "create_posts",
+            "--dir",
+            "database/migrations",
+        ])
+        .expect("migration create command should parse");
+        let Commands::Db(args) = create.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Migration(args) = args.command else {
+            panic!("expected migration command");
+        };
+        let DbMigrationCommands::Create(args) = args.command;
+        assert_eq!(args.name, "create_posts");
+        assert_eq!(args.dir, Some(PathBuf::from("database/migrations")));
+
+        let migrate =
+            Cli::try_parse_from(["cargo-ax", "db", "migrate", "--env", "prod", "--dry-run"])
+                .expect("migrate command should parse");
+        let Commands::Db(args) = migrate.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Migrate(args) = args.command else {
+            panic!("expected migrate command");
+        };
+        assert_eq!(args.env, "prod");
+        assert!(args.dry_run);
+        assert!(!args.confirm);
+
+        let status = Cli::try_parse_from([
+            "cargo-ax", "db", "status", "--env", "staging", "--format", "json",
+        ])
+        .expect("status command should parse");
+        let Commands::Db(args) = status.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Status(args) = args.command else {
+            panic!("expected status command");
+        };
+        assert_eq!(args.env, "staging");
+        assert_eq!(args.format, CheckFormat::Json);
+
+        let rollback = Cli::try_parse_from([
+            "cargo-ax",
+            "db",
+            "rollback",
+            "--env",
+            "production",
+            "--confirm",
+        ])
+        .expect("rollback command should parse");
+        let Commands::Db(args) = rollback.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Rollback(args) = args.command else {
+            panic!("expected rollback command");
+        };
+        assert_eq!(args.env, "production");
+        assert!(args.confirm);
     }
 
     #[test]
