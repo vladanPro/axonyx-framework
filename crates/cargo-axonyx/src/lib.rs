@@ -18,12 +18,12 @@ use axonyx_core::ax_ast_prelude::{
 };
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
-    AxScopeStmt,
+    AxScopeStmt, AxTransactionOperation,
 };
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
     lower_backend_document, AxBackendPlan, AxFieldPlan, AxHandlerKind, AxReturnPlan, AxRustExpr,
-    AxStepPlan, AxValuePlan,
+    AxStepPlan, AxTransactionOperationPlan, AxValuePlan,
 };
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_lowering_prelude::AxValue;
@@ -7474,27 +7474,32 @@ fn collect_db_surface_diagnostics_from_stmts(
                 }
             },
             AxBackendStmt::Env(_) => {}
+            AxBackendStmt::Transaction(transaction) => {
+                for operation in &transaction.operations {
+                    let mutation = match operation {
+                        AxTransactionOperation::Insert(mutation)
+                        | AxTransactionOperation::Update(mutation)
+                        | AxTransactionOperation::Delete(mutation) => mutation,
+                    };
+                    collect_db_mutation_surface_diagnostics(
+                        path,
+                        source,
+                        mutation,
+                        resources,
+                        diagnostics,
+                    );
+                }
+            }
             AxBackendStmt::Insert(mutation)
             | AxBackendStmt::Update(mutation)
             | AxBackendStmt::Delete(mutation) => {
-                for field in &mutation.fields {
-                    collect_db_surface_diagnostics_from_expr(
-                        path,
-                        source,
-                        &field.value,
-                        resources,
-                        diagnostics,
-                    );
-                }
-                for filter in &mutation.filters {
-                    collect_db_surface_diagnostics_from_expr(
-                        path,
-                        source,
-                        &filter.value,
-                        resources,
-                        diagnostics,
-                    );
-                }
+                collect_db_mutation_surface_diagnostics(
+                    path,
+                    source,
+                    mutation,
+                    resources,
+                    diagnostics,
+                );
             }
             AxBackendStmt::Patch(patch) => {
                 collect_db_surface_diagnostics_from_expr(
@@ -7594,6 +7599,34 @@ fn collect_db_surface_diagnostics_from_stmts(
                 diagnostics,
             ),
         }
+    }
+}
+
+fn collect_db_mutation_surface_diagnostics(
+    path: &Path,
+    source: &str,
+    mutation: &axonyx_core::ax_backend_ast_prelude::AxMutation,
+    resources: &std::collections::BTreeSet<String>,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    collect_db_resource_diagnostic(path, source, &mutation.collection, resources, diagnostics);
+    for field in &mutation.fields {
+        collect_db_surface_diagnostics_from_expr(
+            path,
+            source,
+            &field.value,
+            resources,
+            diagnostics,
+        );
+    }
+    for filter in &mutation.filters {
+        collect_db_surface_diagnostics_from_expr(
+            path,
+            source,
+            &filter.value,
+            resources,
+            diagnostics,
+        );
     }
 }
 
@@ -8225,6 +8258,9 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
             value: AxValuePlan::Query(query),
             ..
         } => query_uses_input_scope(query),
+        AxStepPlan::Transaction { operations } => operations
+            .iter()
+            .any(transaction_operation_uses_input_scope),
         AxStepPlan::Require { value, .. } => expr_uses_input_scope(value),
         AxStepPlan::Return(AxReturnPlan::Expr(expr) | AxReturnPlan::Json(expr)) => {
             expr_uses_input_scope(expr)
@@ -8270,6 +8306,27 @@ fn query_uses_input_scope(query: &axonyx_core::ax_backend_lowering_prelude::AxQu
         .any(|filter| expr_uses_input_scope(&filter.value))
 }
 
+fn transaction_operation_uses_input_scope(operation: &AxTransactionOperationPlan) -> bool {
+    match operation {
+        AxTransactionOperationPlan::Insert { fields, .. } => fields
+            .iter()
+            .any(|field| expr_uses_input_scope(&field.value)),
+        AxTransactionOperationPlan::Update {
+            fields, filters, ..
+        } => {
+            fields
+                .iter()
+                .any(|field| expr_uses_input_scope(&field.value))
+                || filters
+                    .iter()
+                    .any(|filter| expr_uses_input_scope(&filter.value))
+        }
+        AxTransactionOperationPlan::Delete { filters, .. } => filters
+            .iter()
+            .any(|filter| expr_uses_input_scope(&filter.value)),
+    }
+}
+
 fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
     plan.handlers.iter().any(|handler| {
         handler.steps.iter().any(|step| match step {
@@ -8293,10 +8350,34 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => fields
                 .iter()
                 .any(|field| field.value.code.contains("Auth.signedSession")),
+            AxStepPlan::Transaction { operations } => operations
+                .iter()
+                .any(transaction_operation_uses_signed_session),
             AxStepPlan::Send { payload, .. } => payload.code.contains("Auth.signedSession"),
             AxStepPlan::Let { .. } | AxStepPlan::Delete { .. } | AxStepPlan::Return(_) => false,
         })
     })
+}
+
+fn transaction_operation_uses_signed_session(operation: &AxTransactionOperationPlan) -> bool {
+    match operation {
+        AxTransactionOperationPlan::Insert { fields, .. } => fields
+            .iter()
+            .any(|field| field.value.code.contains("Auth.signedSession")),
+        AxTransactionOperationPlan::Update {
+            fields, filters, ..
+        } => {
+            fields
+                .iter()
+                .any(|field| field.value.code.contains("Auth.signedSession"))
+                || filters
+                    .iter()
+                    .any(|filter| filter.value.code.contains("Auth.signedSession"))
+        }
+        AxTransactionOperationPlan::Delete { filters, .. } => filters
+            .iter()
+            .any(|filter| filter.value.code.contains("Auth.signedSession")),
+    }
 }
 
 fn backend_plan_uses_database(plan: &AxBackendPlan) -> bool {
@@ -8320,7 +8401,10 @@ fn step_uses_database(step: &AxStepPlan) -> bool {
             axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::Stream { .. }
                 | axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::RawSql { .. }
         ),
-        AxStepPlan::Insert { .. } | AxStepPlan::Update { .. } | AxStepPlan::Delete { .. } => true,
+        AxStepPlan::Transaction { .. }
+        | AxStepPlan::Insert { .. }
+        | AxStepPlan::Update { .. }
+        | AxStepPlan::Delete { .. } => true,
         _ => false,
     }
 }
@@ -8409,6 +8493,11 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
         AxStepPlan::Hook { value, .. } => collect_env_refs_from_expr(value, refs),
         AxStepPlan::ClearCookie { name } => collect_env_refs_from_expr(name, refs),
         AxStepPlan::Revalidate { target, .. } => collect_env_refs_from_expr(target, refs),
+        AxStepPlan::Transaction { operations } => {
+            for operation in operations {
+                collect_env_refs_from_transaction_operation(operation, refs);
+            }
+        }
         AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => {
             for field in fields {
                 collect_env_refs_from_expr(&field.value, refs);
@@ -8420,6 +8509,34 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
             }
         }
         AxStepPlan::Send { payload, .. } => collect_env_refs_from_expr(payload, refs),
+    }
+}
+
+fn collect_env_refs_from_transaction_operation(
+    operation: &AxTransactionOperationPlan,
+    refs: &mut std::collections::BTreeSet<String>,
+) {
+    match operation {
+        AxTransactionOperationPlan::Insert { fields, .. } => {
+            for field in fields {
+                collect_env_refs_from_expr(&field.value, refs);
+            }
+        }
+        AxTransactionOperationPlan::Update {
+            fields, filters, ..
+        } => {
+            for field in fields {
+                collect_env_refs_from_expr(&field.value, refs);
+            }
+            for filter in filters {
+                collect_env_refs_from_expr(&filter.value, refs);
+            }
+        }
+        AxTransactionOperationPlan::Delete { filters, .. } => {
+            for filter in filters {
+                collect_env_refs_from_expr(&filter.value, refs);
+            }
+        }
     }
 }
 
@@ -9444,6 +9561,7 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidInputSection { line }
         | AxBackendParseError::InvalidField { line }
         | AxBackendParseError::InvalidTypeDeclaration { line }
+        | AxBackendParseError::InvalidTransaction { line }
         | AxBackendParseError::InvalidMutation { line }
         | AxBackendParseError::InvalidAssignment { line }
         | AxBackendParseError::InvalidHeader { line }
@@ -23602,6 +23720,63 @@ action CreatePost
     }
 
     #[test]
+    fn production_action_transaction_rolls_back_all_database_writes() {
+        let root = make_temp_dir("production-action-transaction-rollback");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.asx"),
+            "page Home() { return ASX { <Copy>Home</Copy> } }\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action createPost(title: String) {
+  transaction {
+    db.posts.insert({ title: input.title, excerpt: "Must roll back", slug: "transaction-rollback", status: "draft", created_at: "2026-09-01" })
+    db.audit.insert({ event: "existing" })
+  }
+  return ok()
+}
+"#,
+        )
+        .expect("actions should write");
+        seed_test_sqlite_posts(&root);
+        let db_path = root.join("posts.sqlite");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute_batch(
+                "create table audit (id integer primary key, event text not null unique);\
+                 insert into audit (id, event) values (1, 'existing');",
+            )
+            .expect("audit table should seed");
+        drop(connection);
+
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=createPost")
+            .with_header("Content-Type", "application/x-www-form-urlencoded")
+            .with_body(b"title=Atomic+post".to_vec());
+
+        handle_http_request(&state, AxServerMode::Start, request)
+            .expect_err("duplicate audit event should fail the action transaction");
+
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should reopen");
+        let count: i64 = connection
+            .query_row(
+                "select count(*) from posts where slug = 'transaction-rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rolled-back post count should be readable");
+        assert_eq!(count, 0);
+
+        drop(connection);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn production_server_errors_hide_internal_details() {
         let error = anyhow::anyhow!("database at C:\\secret\\posts.sqlite failed");
         let production = internal_server_error_response(AxServerMode::Start, "request", &error);
@@ -26888,6 +27063,54 @@ type Post {
 action BadDb
   data value = db.trables.all()
   return value
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-db-resource");
+        assert_eq!(diagnostics[0].message, "unknown db resource `trables`");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_unknown_database_resource_inside_transaction() {
+        let root = make_temp_dir("unknown-transaction-database-resource");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            r#"
+backend
+  env DATABASE_URL: Secret<String>
+"#,
+        )
+        .expect("backend root should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Schema
+
+type Post {
+  title: String
+}
+
+<Copy>Schema</Copy>
+"#,
+        )
+        .expect("schema page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action createPost(title: string) {
+  transaction {
+    db.posts.insert({ title: input.title })
+    db.trables.insert({ title: input.title })
+  }
+  return ok()
+}
 "#,
         )
         .expect("actions should write");

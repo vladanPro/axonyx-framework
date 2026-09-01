@@ -70,6 +70,7 @@ Current v0 rules:
 - `insert`
 - `update`
 - `delete`
+- `transaction`
 - `patch`
 - `revalidate`
 - `return`
@@ -84,6 +85,7 @@ Generated backend handlers lower into runtime request types such as:
 - `AxInsertRequest`
 - `AxUpdateRequest`
 - `AxDeleteRequest`
+- `AxTransactionRequest`
 - `AxSendRequest`
 
 That separation is important:
@@ -91,6 +93,43 @@ That separation is important:
 - `.ax` authoring owns developer ergonomics
 - lowering owns execution shape
 - runtime owns environment and transport behavior
+
+## Atomic Transactions
+
+Use `transaction {}` when several database writes must either all succeed or
+all roll back:
+
+```ax
+action publishPost(id: String, title: String) {
+  transaction {
+    db.posts.where({ id: input.id }).update({
+      title: input.title,
+      status: "published"
+    })
+    db.audit.insert({
+      post_id: input.id,
+      event: "post.published"
+    })
+    db.drafts.where({ post_id: input.id }).delete()
+  }
+
+  return ok()
+}
+```
+
+Transaction V1 rules:
+
+- the block must contain at least one operation
+- only `insert`, `update`, and `delete` are allowed inside the block
+- expressions are evaluated before preview data is changed
+- SQLite uses one immediate transaction and Postgres uses one pooled client transaction
+- every touched resource participates in normal action invalidation
+- direct SQLite and Postgres transports are supported
+- API transport, MySQL, and the memory adapter fail explicitly instead of pretending to be atomic
+
+Do not place redirects, state patches, messages, or external side effects inside
+the transaction. Perform those after the block succeeds. Nested transactions
+and raw SQL transaction steps are intentionally outside the V1 contract.
 
 ## Action Patch Protocol
 
