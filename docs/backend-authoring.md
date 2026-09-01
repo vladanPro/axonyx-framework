@@ -170,6 +170,8 @@ DB_POOL_TIMEOUT_MS=5000
 Current Postgres behavior:
 
 - Direct runtime queries use a lazy, process-shared connection pool.
+- Compiled Axum requests execute synchronous rendering and database work on
+  Tokio's blocking pool instead of occupying async network workers.
 - `DB_POOL_MAX_SIZE` controls the maximum open connections; the default is `10`.
 - `DB_POOL_TIMEOUT_MS` controls how long checkout waits; the default is `5000`.
 - `cargo ax db check` validates the connection and lists visible tables.
