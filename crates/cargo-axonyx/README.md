@@ -121,8 +121,10 @@ exists, it also fails on schema drift and tells you to pull again.
 `cargo ax db pull` writes a versioned schema snapshot to
 `.axonyx/db/schema.json` and generated Axonyx row contracts to
 `app/generated/db.ax`. `cargo ax check` then validates database resource names,
-query/order fields, mutation fields, and read-only views against that manifest.
-Rerun the pull after changing the database.
+query/order fields, mutation fields and values, required insert fields, and
+read-only views against that manifest. Generated table contracts include
+`*Row`, `*CreateInput`, and `*UpdateInput` types. Rerun the pull after changing
+the database.
 
 `cargo ax routes` prints page/API routes and the current server
 `stream_pages` setting. JSON output is a report object with `stream_pages` and

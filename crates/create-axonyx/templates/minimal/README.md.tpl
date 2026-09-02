@@ -53,7 +53,9 @@ cargo ax db pull
 
 The pull writes `.axonyx/db/schema.json` plus `app/generated/db.ax`. From that
 point, `cargo ax check` validates `db.*` resource and field names against the
-real schema, while `cargo ax db check` reports live schema drift.
+real schema, validates typed mutations and required insert fields, while
+`cargo ax db check` reports live schema drift. Generated contracts include
+`*Row`, `*CreateInput`, and `*UpdateInput` types.
 
 Rollback always targets the latest applied migration:
 
