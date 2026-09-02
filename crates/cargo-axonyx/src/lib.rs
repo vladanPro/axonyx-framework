@@ -57,7 +57,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -429,6 +429,10 @@ struct DbPullArgs {
     /// Schema output path.
     #[arg(long, default_value = ".axonyx/db/schema.json")]
     out: PathBuf,
+
+    /// Generated Axonyx database type contract path.
+    #[arg(long, default_value = "app/generated/db.ax")]
+    types_out: PathBuf,
 }
 
 #[derive(Debug, Parser)]
@@ -1445,6 +1449,9 @@ struct DbCheckReport {
     transport: String,
     url: Option<String>,
     tables: Vec<String>,
+    schema_hash: Option<String>,
+    manifest_hash: Option<String>,
+    schema_drift: bool,
     message: String,
 }
 
@@ -1452,6 +1459,7 @@ struct DbCheckReport {
 struct DbPullReport {
     ok: bool,
     path: String,
+    types_path: String,
     schema: DbSchemaManifest,
     message: String,
 }
@@ -1482,28 +1490,46 @@ struct DbMigrationStatusReport {
     pending: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DbSchemaManifest {
     version: u32,
     driver: String,
     transport: String,
     url: Option<String>,
+    #[serde(default)]
+    schema_hash: String,
+    #[serde(default = "default_db_types_path")]
+    types_path: String,
     tables: Vec<DbSchemaTable>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+fn default_db_types_path() -> String {
+    "app/generated/db.ax".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DbSchemaTable {
     name: String,
+    #[serde(default = "default_db_resource_kind")]
+    kind: String,
+    #[serde(default)]
+    record: String,
     columns: Vec<DbSchemaColumn>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DbSchemaColumn {
     name: String,
     ty: String,
+    #[serde(default)]
+    ax_type: String,
     nullable: bool,
     primary_key: bool,
     default: Option<String>,
+}
+
+fn default_db_resource_kind() -> String {
+    "table".to_string()
 }
 
 pub fn main_entry() {
@@ -2551,7 +2577,7 @@ fn db_check_command(args: DbCheckArgs) -> Result<()> {
 
 fn db_pull_command(args: DbPullArgs) -> Result<()> {
     let root = app_root()?;
-    let report = collect_db_pull_report(&root, args.url.as_deref(), &args.out)?;
+    let report = collect_db_pull_report(&root, args.url.as_deref(), &args.out, &args.types_out)?;
 
     match args.format {
         CheckFormat::Text => print_db_pull_text(&report),
@@ -2585,55 +2611,58 @@ fn collect_db_check_report(root: &Path, url_override: Option<&str>) -> Result<Db
                 display_database_driver(config.driver.as_str())
             ),
             tables: Vec::new(),
+            schema_hash: None,
+            manifest_hash: None,
+            schema_drift: false,
         });
     }
 
     let driver = config.driver.clone();
-    let runtime = ax_backend_runtime::runtime_from_env(env)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let tables = match driver {
+    let live_schema = match driver {
         ax_backend_runtime::AxDatabaseDriver::Sqlite => {
-            let value = ax_backend_runtime::AxQueryExecutor::load(
-                &runtime,
-                &ax_backend_runtime::AxQueryRequest {
-                    collection: "sqlite_master".to_string(),
-                    filters: vec![ax_backend_runtime::AxQueryFilterRequest {
-                        field: "type".to_string(),
-                        op: ax_backend_runtime::AxQueryFilterOp::Eq,
-                        value: serde_json::json!("table"),
-                    }],
-                    orders: vec![ax_backend_runtime::AxQueryOrderRequest {
-                        field: "name".to_string(),
-                        direction: ax_backend_runtime::AxQueryOrderDirection::Asc,
-                    }],
-                    limit: None,
-                    offset: None,
-                    mode: ax_backend_runtime::AxQueryMode::Many,
-                },
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            sqlite_master_tables_from_value(&value)
+            let url = config
+                .url
+                .as_deref()
+                .context("missing AX_SECRET_DB_URL for SQLite schema check")?;
+            Some(pull_sqlite_schema(&config, url)?)
         }
-        ax_backend_runtime::AxDatabaseDriver::Postgres => {
-            let value = ax_backend_runtime::AxQueryExecutor::query(
-                &runtime,
-                &ax_backend_runtime::AxRawSqlRequest {
-                    sql: "select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name".to_string(),
-                    params: Vec::new(),
-                },
-            )
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            postgres_tables_from_value(&value)
-        }
+        ax_backend_runtime::AxDatabaseDriver::Postgres => Some(pull_postgres_schema(&config, env)?),
         ax_backend_runtime::AxDatabaseDriver::MySql
-        | ax_backend_runtime::AxDatabaseDriver::Memory => Vec::new(),
+        | ax_backend_runtime::AxDatabaseDriver::Memory => None,
+    };
+    let tables = live_schema
+        .as_ref()
+        .map(|schema| {
+            schema
+                .tables
+                .iter()
+                .map(|table| table.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let local_schema = read_db_schema_manifest(root)?;
+    let schema_hash = live_schema
+        .as_ref()
+        .map(|schema| schema.schema_hash.clone());
+    let manifest_hash = local_schema
+        .as_ref()
+        .map(|schema| schema.schema_hash.clone());
+    let schema_drift = match (&live_schema, &local_schema) {
+        (Some(live), Some(local)) => {
+            live.driver != local.driver || live.schema_hash != local.schema_hash
+        }
+        _ => false,
     };
     let message = match driver {
+        _ if schema_drift => {
+            "Database schema differs from .axonyx/db/schema.json. Run `cargo ax db pull`."
+                .to_string()
+        }
         ax_backend_runtime::AxDatabaseDriver::Sqlite => {
-            format!("SQLite database is reachable ({} table(s)).", tables.len())
+            format!("SQLite database is reachable ({} resource(s)).", tables.len())
         }
         ax_backend_runtime::AxDatabaseDriver::Postgres => format!(
-            "Postgres database is reachable ({} public table(s)).",
+            "Postgres database is reachable ({} public resource(s)).",
             tables.len()
         ),
         _ => format!(
@@ -2642,12 +2671,15 @@ fn collect_db_check_report(root: &Path, url_override: Option<&str>) -> Result<Db
         ),
     };
     Ok(DbCheckReport {
-        ok: true,
+        ok: !schema_drift,
         driver: config.driver.as_str().to_string(),
         transport: config.transport.as_str().to_string(),
         url: config.url.map(|url| redact_db_url(&url)),
         message,
         tables,
+        schema_hash,
+        manifest_hash,
+        schema_drift,
     })
 }
 
@@ -2659,6 +2691,12 @@ fn print_db_check_text(report: &DbCheckReport) {
         println!("URL: {url}");
     }
     println!("{}", report.message);
+    if let Some(hash) = &report.schema_hash {
+        println!("Live schema: {hash}");
+    }
+    if let Some(hash) = &report.manifest_hash {
+        println!("Pulled schema: {hash}");
+    }
     if report.tables.is_empty() {
         println!("Tables: none");
     } else {
@@ -2673,6 +2711,7 @@ fn collect_db_pull_report(
     root: &Path,
     url_override: Option<&str>,
     out: &Path,
+    types_out: &Path,
 ) -> Result<DbPullReport> {
     let env = db_env_for_root(root, url_override)?;
     let config = env
@@ -2701,7 +2740,7 @@ fn collect_db_pull_report(
         bail!("missing AX_SECRET_DB_URL for database schema pull");
     };
 
-    let schema = match config.driver {
+    let mut schema = match config.driver {
         ax_backend_runtime::AxDatabaseDriver::Sqlite => pull_sqlite_schema(&config, &url)?,
         ax_backend_runtime::AxDatabaseDriver::Postgres => pull_postgres_schema(&config, env)?,
         _ => unreachable!("unsupported drivers were rejected above"),
@@ -2721,14 +2760,37 @@ fn collect_db_pull_report(
         })?;
     }
 
+    schema.types_path = types_out.to_string_lossy().replace('\\', "/");
+    validate_db_schema_types(&schema)?;
     fs::write(&out_path, serde_json::to_string_pretty(&schema)?)
         .with_context(|| format!("failed to write database schema to {}", out_path.display()))?;
+
+    let types_path = if types_out.is_absolute() {
+        types_out.to_path_buf()
+    } else {
+        root.join(types_out)
+    };
+    if let Some(parent) = types_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create generated database type directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&types_path, render_db_schema_types(&schema)).with_context(|| {
+        format!(
+            "failed to write generated database types to {}",
+            types_path.display()
+        )
+    })?;
 
     Ok(DbPullReport {
         ok: true,
         path: out_path.display().to_string(),
+        types_path: types_path.display().to_string(),
         message: format!(
-            "Pulled {} schema with {} table(s).",
+            "Pulled {} schema with {} resource(s).",
             display_database_driver(schema.driver.as_str()),
             schema.tables.len()
         ),
@@ -2744,13 +2806,20 @@ fn print_db_pull_text(report: &DbPullReport) {
         println!("URL: {url}");
     }
     println!("Schema: {}", report.path);
+    println!("Types: {}", report.types_path);
     println!("{}", report.message);
     if report.schema.tables.is_empty() {
-        println!("Tables: none");
+        println!("Resources: none");
     } else {
-        println!("Tables:");
+        println!("Resources:");
         for table in &report.schema.tables {
-            println!("  - {} ({} column(s))", table.name, table.columns.len());
+            println!(
+                "  - {} ({}, {}, {} column(s))",
+                table.name,
+                table.kind,
+                table.record,
+                table.columns.len()
+            );
         }
     }
 }
@@ -2763,13 +2832,15 @@ fn pull_sqlite_schema(
         .with_context(|| "failed to open SQLite database for schema pull")?;
     let tables = sqlite_schema_tables(&connection)?;
 
-    Ok(DbSchemaManifest {
-        version: 1,
+    Ok(finalize_db_schema_manifest(DbSchemaManifest {
+        version: 2,
         driver: config.driver.as_str().to_string(),
         transport: config.transport.as_str().to_string(),
         url: config.url.clone().map(|url| redact_db_url(&url)),
+        schema_hash: String::new(),
+        types_path: default_db_types_path(),
         tables,
-    })
+    }))
 }
 
 fn pull_postgres_schema(
@@ -2787,18 +2858,21 @@ fn pull_postgres_schema(
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    Ok(DbSchemaManifest {
-        version: 1,
+    Ok(finalize_db_schema_manifest(DbSchemaManifest {
+        version: 2,
         driver: config.driver.as_str().to_string(),
         transport: config.transport.as_str().to_string(),
         url: config.url.clone().map(|url| redact_db_url(&url)),
+        schema_hash: String::new(),
+        types_path: default_db_types_path(),
         tables: postgres_schema_tables_from_value(&value)?,
-    })
+    }))
 }
 
 const POSTGRES_SCHEMA_QUERY: &str = r#"
 select
   c.table_name,
+  case when t.table_type = 'VIEW' then 'view' else 'table' end as resource_kind,
   c.column_name,
   case when c.data_type = 'USER-DEFINED' then c.udt_name else c.data_type end as data_type,
   (c.is_nullable = 'YES') as nullable,
@@ -2816,7 +2890,12 @@ select
       and kcu.column_name = c.column_name
   ) as primary_key
 from information_schema.columns c
+join information_schema.tables t
+  on t.table_schema = c.table_schema
+  and t.table_name = c.table_name
 where c.table_schema = 'public'
+  and t.table_type in ('BASE TABLE', 'VIEW')
+  and c.table_name <> '_axonyx_migrations'
 order by c.table_name, c.ordinal_position
 "#;
 
@@ -2824,13 +2903,20 @@ fn postgres_schema_tables_from_value(value: &serde_json::Value) -> Result<Vec<Db
     let rows = value
         .as_array()
         .context("Postgres schema introspection did not return a row array")?;
-    let mut tables = std::collections::BTreeMap::<String, Vec<DbSchemaColumn>>::new();
+    let mut tables = std::collections::BTreeMap::<String, (String, Vec<DbSchemaColumn>)>::new();
 
     for row in rows {
         let table = postgres_schema_string(row, "table_name")?;
+        let kind = row
+            .get("resource_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("table")
+            .to_string();
+        let sql_type = postgres_schema_string(row, "data_type")?;
         let column = DbSchemaColumn {
             name: postgres_schema_string(row, "column_name")?,
-            ty: postgres_schema_string(row, "data_type")?,
+            ax_type: database_ax_type("postgres", &sql_type),
+            ty: sql_type,
             nullable: row
                 .get("nullable")
                 .and_then(serde_json::Value::as_bool)
@@ -2844,12 +2930,20 @@ fn postgres_schema_tables_from_value(value: &serde_json::Value) -> Result<Vec<Db
                 .and_then(serde_json::Value::as_str)
                 .map(ToOwned::to_owned),
         };
-        tables.entry(table).or_default().push(column);
+        let entry = tables
+            .entry(table)
+            .or_insert_with(|| (kind.clone(), Vec::new()));
+        entry.1.push(column);
     }
 
     Ok(tables
         .into_iter()
-        .map(|(name, columns)| DbSchemaTable { name, columns })
+        .map(|(name, (kind, columns))| DbSchemaTable {
+            record: db_resource_record_name(&name),
+            name,
+            kind,
+            columns,
+        })
         .collect())
 }
 
@@ -2862,17 +2956,24 @@ fn postgres_schema_string(row: &serde_json::Value, field: &str) -> Result<String
 
 fn sqlite_schema_tables(connection: &rusqlite::Connection) -> Result<Vec<DbSchemaTable>> {
     let mut statement = connection.prepare(
-        "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name",
+        "select name, type from sqlite_master where type in ('table', 'view') and name not like 'sqlite_%' and name <> '_axonyx_migrations' order by name",
     )?;
     let table_names = statement
-        .query_map([], |row| row.get::<_, String>(0))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     table_names
         .into_iter()
-        .map(|name| {
+        .map(|(name, kind)| {
             let columns = sqlite_schema_columns(connection, &name)?;
-            Ok(DbSchemaTable { name, columns })
+            Ok(DbSchemaTable {
+                record: db_resource_record_name(&name),
+                name,
+                kind,
+                columns,
+            })
         })
         .collect()
 }
@@ -2887,9 +2988,11 @@ fn sqlite_schema_columns(
         .query_map([], |row| {
             let not_null = row.get::<_, i64>(3)? != 0;
             let primary_key = row.get::<_, i64>(5)? != 0;
+            let sql_type = row.get::<_, String>(2)?;
             Ok(DbSchemaColumn {
                 name: row.get(1)?,
-                ty: row.get::<_, String>(2)?,
+                ax_type: database_ax_type("sqlite", &sql_type),
+                ty: sql_type,
                 nullable: !not_null && !primary_key,
                 default: row.get(4)?,
                 primary_key,
@@ -2897,6 +3000,151 @@ fn sqlite_schema_columns(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(columns)
+}
+
+fn finalize_db_schema_manifest(mut schema: DbSchemaManifest) -> DbSchemaManifest {
+    for table in &mut schema.tables {
+        if table.kind.is_empty() {
+            table.kind = default_db_resource_kind();
+        }
+        if table.record.is_empty() {
+            table.record = db_resource_record_name(&table.name);
+        }
+        for column in &mut table.columns {
+            if column.ax_type.is_empty() {
+                column.ax_type = database_ax_type(&schema.driver, &column.ty);
+            }
+        }
+    }
+    schema.schema_hash = db_schema_hash(&schema.tables);
+    schema
+}
+
+fn read_db_schema_manifest(root: &Path) -> Result<Option<DbSchemaManifest>> {
+    let path = root.join(".axonyx/db/schema.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read database schema manifest {}", path.display()))?;
+    let schema = serde_json::from_str::<DbSchemaManifest>(&source).with_context(|| {
+        format!(
+            "database schema manifest {} is invalid; run `cargo ax db pull`",
+            path.display()
+        )
+    })?;
+    Ok(Some(finalize_db_schema_manifest(schema)))
+}
+
+fn db_schema_hash(tables: &[DbSchemaTable]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"axonyx-db-schema-v2\0");
+    hasher.update(serde_json::to_vec(tables).expect("database schema tables should serialize"));
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn db_resource_record_name(resource: &str) -> String {
+    format!("{}Row", sanitize_type_name(resource))
+}
+
+fn database_ax_type(driver: &str, sql_type: &str) -> String {
+    let normalized = sql_type.trim().to_ascii_lowercase();
+    if driver == "postgres" && normalized.ends_with("[]") {
+        return format!(
+            "List<{}>",
+            database_ax_type(driver, normalized.trim_end_matches("[]"))
+        );
+    }
+
+    let base = match normalized.as_str() {
+        "bool" | "boolean" => "Bool",
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "int2" | "int4"
+        | "int8" | "serial" | "bigserial" | "smallserial" => "Int",
+        "real" | "float" | "float4" | "float8" | "double" | "double precision" | "numeric"
+        | "decimal" => "Float",
+        "date" => "Date",
+        "time" | "time without time zone" | "time with time zone" => "Time",
+        "datetime"
+        | "timestamp"
+        | "timestamp without time zone"
+        | "timestamp with time zone"
+        | "timestamptz" => "DateTime",
+        "uuid" => "Uuid",
+        "blob" | "bytea" | "binary" | "varbinary" => "Bytes",
+        "json" | "jsonb" => "Json",
+        _ if normalized.contains("int") => "Int",
+        _ if normalized.contains("char")
+            || normalized.contains("text")
+            || normalized.contains("clob") =>
+        {
+            "String"
+        }
+        _ if normalized.contains("real")
+            || normalized.contains("floa")
+            || normalized.contains("doub") =>
+        {
+            "Float"
+        }
+        _ if normalized.contains("blob") => "Bytes",
+        _ => "String",
+    };
+    base.to_string()
+}
+
+fn render_db_schema_types(schema: &DbSchemaManifest) -> String {
+    let mut output = String::new();
+    for table in &schema.tables {
+        output.push_str(&format!("export type {} {{\n", table.record));
+        for column in &table.columns {
+            let ty = if column.nullable {
+                format!("Optional<{}>", column.ax_type)
+            } else {
+                column.ax_type.clone()
+            };
+            output.push_str(&format!("  {}: {}\n", column.name, ty));
+        }
+        output.push_str("}\n\n");
+    }
+    output
+}
+
+fn validate_db_schema_types(schema: &DbSchemaManifest) -> Result<()> {
+    let mut records = std::collections::BTreeSet::new();
+    for table in &schema.tables {
+        if !is_backend_identifier_like(&table.name) {
+            bail!(
+                "database resource `{}` cannot be represented as an Axonyx db accessor; use an ASCII identifier, a compatible view alias, or db.query()",
+                table.name
+            );
+        }
+        if !records.insert(table.record.as_str()) {
+            bail!(
+                "database resources produce duplicate Axonyx row type `{}`; rename one resource",
+                table.record
+            );
+        }
+        for column in &table.columns {
+            if !is_backend_identifier_like(&column.name) {
+                bail!(
+                    "database column `{}.{}` cannot be represented as an Axonyx type field; use an ASCII identifier or db.query()",
+                    table.name,
+                    column.name
+                );
+            }
+            AxType::parse_annotation(&column.ax_type).with_context(|| {
+                format!(
+                    "database column `{}.{}` mapped to invalid Axonyx type `{}`",
+                    table.name, column.name, column.ax_type
+                )
+            })?;
+        }
+    }
+    let generated = render_db_schema_types(schema);
+    if !generated.trim().is_empty() {
+        parse_backend_ax(&generated)
+            .context("generated database row contracts are not valid Axonyx source")?;
+    }
+    Ok(())
 }
 
 fn sqlite_database_path(url: &str) -> String {
@@ -2910,31 +3158,6 @@ fn sqlite_database_path(url: &str) -> String {
 
 fn sqlite_quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
-}
-
-fn sqlite_master_tables_from_value(value: &serde_json::Value) -> Vec<String> {
-    let Some(items) = value.as_array() else {
-        return Vec::new();
-    };
-
-    items
-        .iter()
-        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
-        .filter(|name| !name.starts_with("sqlite_"))
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-fn postgres_tables_from_value(value: &serde_json::Value) -> Vec<String> {
-    let Some(items) = value.as_array() else {
-        return Vec::new();
-    };
-
-    items
-        .iter()
-        .filter_map(|item| item.get("table_name").and_then(serde_json::Value::as_str))
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 fn db_env_for_root(root: &Path, url_override: Option<&str>) -> Result<ax_backend_runtime::AxEnv> {
@@ -7040,8 +7263,36 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     diagnostics.extend(check_route_manifest(root)?);
     diagnostics.extend(check_action_patch_contracts(root)?);
     diagnostics.extend(check_query_function_call_contracts(root)?);
+    diagnostics.extend(check_generated_database_contract(root)?);
 
     Ok(diagnostics)
+}
+
+fn check_generated_database_contract(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let Some(schema) = read_db_schema_manifest(root)? else {
+        return Ok(Vec::new());
+    };
+    let configured_path = Path::new(&schema.types_path);
+    let path = if configured_path.is_absolute() {
+        configured_path.to_path_buf()
+    } else {
+        root.join(configured_path)
+    };
+    let expected = render_db_schema_types(&schema);
+    let actual = fs::read_to_string(&path).ok();
+    if actual.as_deref() == Some(expected.as_str()) {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![CheckDiagnostic {
+        file: display_path(&path),
+        line: 1,
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-generated-types",
+        message: "generated database types are missing or stale; run `cargo ax db pull`"
+            .to_string(),
+    }])
 }
 
 fn check_query_function_call_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
@@ -7993,9 +8244,21 @@ fn check_backend_database_surface(
     document: &AxBackendDocument,
 ) -> Vec<CheckDiagnostic> {
     let mut diagnostics = Vec::new();
-    let resources = root
-        .and_then(|root| collect_project_database_resources(root).ok())
-        .unwrap_or_default();
+    let resources = match root.map(collect_project_database_resources) {
+        Some(Ok(resources)) => resources,
+        Some(Err(error)) => {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: 1,
+                column: 1,
+                severity: "error",
+                code: "axonyx-db-schema",
+                message: error.to_string(),
+            });
+            DbResourceCatalog::default()
+        }
+        None => DbResourceCatalog::default(),
+    };
 
     for block in &document.blocks {
         match block {
@@ -8052,7 +8315,7 @@ fn collect_db_surface_diagnostics_from_stmts(
     path: &Path,
     source: &str,
     body: &[AxBackendStmt],
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     for stmt in body {
@@ -8067,13 +8330,35 @@ fn collect_db_surface_diagnostics_from_stmts(
                 ),
                 AxBackendValue::Query(query) => {
                     if let Some(collection) = query_source_collection(&query.source) {
-                        collect_db_resource_diagnostic(
+                        let unknown = collect_db_resource_diagnostic(
                             path,
                             source,
                             collection,
                             resources,
                             diagnostics,
                         );
+                        if !unknown {
+                            for filter in &query.filters {
+                                collect_db_field_diagnostic(
+                                    path,
+                                    source,
+                                    collection,
+                                    &filter.field,
+                                    resources,
+                                    diagnostics,
+                                );
+                            }
+                            for order in &query.orders {
+                                collect_db_field_diagnostic(
+                                    path,
+                                    source,
+                                    collection,
+                                    &order.field,
+                                    resources,
+                                    diagnostics,
+                                );
+                            }
+                        }
                     }
                     for filter in &query.filters {
                         collect_db_surface_diagnostics_from_expr(
@@ -8219,10 +8504,34 @@ fn collect_db_mutation_surface_diagnostics(
     path: &Path,
     source: &str,
     mutation: &axonyx_core::ax_backend_ast_prelude::AxMutation,
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
-    collect_db_resource_diagnostic(path, source, &mutation.collection, resources, diagnostics);
+    let unknown =
+        collect_db_resource_diagnostic(path, source, &mutation.collection, resources, diagnostics);
+    if !unknown {
+        collect_db_writable_diagnostic(path, source, &mutation.collection, resources, diagnostics);
+        for field in &mutation.fields {
+            collect_db_field_diagnostic(
+                path,
+                source,
+                &mutation.collection,
+                &field.name,
+                resources,
+                diagnostics,
+            );
+        }
+        for filter in &mutation.filters {
+            collect_db_field_diagnostic(
+                path,
+                source,
+                &mutation.collection,
+                &filter.field,
+                resources,
+                diagnostics,
+            );
+        }
+    }
     for field in &mutation.fields {
         collect_db_surface_diagnostics_from_expr(
             path,
@@ -8254,7 +8563,7 @@ fn collect_db_surface_diagnostics_from_return(
     path: &Path,
     source: &str,
     value: &AxReturn,
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     if let AxReturn::Expr(expr) = value {
@@ -8266,7 +8575,7 @@ fn collect_db_surface_diagnostics_from_expr(
     path: &Path,
     source: &str,
     expr: &AxExpr,
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     match expr {
@@ -8331,7 +8640,7 @@ fn collect_db_call_diagnostic(
     source: &str,
     call_path: &[String],
     args: &[AxExpr],
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     if call_path == ["db", "query"] {
@@ -8392,7 +8701,7 @@ fn collect_db_resource_diagnostic(
     path: &Path,
     source: &str,
     resource: &str,
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) -> bool {
     if resources.is_empty() || resources.contains(resource) {
@@ -8410,6 +8719,61 @@ fn collect_db_resource_diagnostic(
     true
 }
 
+fn collect_db_field_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    field: &str,
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(contract) = resources.get(resource) else {
+        return;
+    };
+    let Some(columns) = &contract.columns else {
+        return;
+    };
+    if columns.contains(field) {
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, field),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-field",
+        message: format!(
+            "unknown field `{field}` on db resource `{resource}` (row type `{}`)",
+            contract.record
+        ),
+    });
+}
+
+fn collect_db_writable_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(contract) = resources.get(resource) else {
+        return;
+    };
+    if contract.kind != "view" {
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, &format!("db.{resource}.")),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-read-only",
+        message: format!("db resource `{resource}` is a read-only view"),
+    });
+}
+
 fn line_for_db_call(source: &str, call_path: &[String]) -> usize {
     if call_path.len() >= 2 {
         let line = line_for_source_pattern(source, &format!("db.{}.", call_path[1]));
@@ -8421,15 +8785,77 @@ fn line_for_db_call(source: &str, call_path: &[String]) -> usize {
     line_for_source_pattern(source, "db.")
 }
 
-fn collect_project_database_resources(root: &Path) -> Result<std::collections::BTreeSet<String>> {
-    Ok(collect_project_type_schemas(root)?
+#[derive(Debug, Clone, Default)]
+struct DbResourceCatalog {
+    resources: std::collections::BTreeMap<String, DbResourceContract>,
+}
+
+#[derive(Debug, Clone)]
+struct DbResourceContract {
+    kind: String,
+    record: String,
+    columns: Option<std::collections::BTreeSet<String>>,
+}
+
+impl DbResourceCatalog {
+    fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+    }
+
+    fn contains(&self, resource: &str) -> bool {
+        self.resources.contains_key(resource)
+    }
+
+    fn get(&self, resource: &str) -> Option<&DbResourceContract> {
+        self.resources.get(resource)
+    }
+}
+
+fn collect_project_database_resources(root: &Path) -> Result<DbResourceCatalog> {
+    if let Some(schema) = read_db_schema_manifest(root)? {
+        return Ok(DbResourceCatalog {
+            resources: schema
+                .tables
+                .into_iter()
+                .map(|table| {
+                    let columns = table
+                        .columns
+                        .into_iter()
+                        .map(|column| column.name)
+                        .collect();
+                    (
+                        table.name,
+                        DbResourceContract {
+                            kind: table.kind,
+                            record: table.record,
+                            columns: Some(columns),
+                        },
+                    )
+                })
+                .collect(),
+        });
+    }
+
+    let mut resources = std::collections::BTreeMap::new();
+    for schema in collect_project_type_schemas(root)?
         .into_iter()
         .filter(|schema| schema.literals.is_empty())
-        .flat_map(|schema| database_resource_names_for_type(&schema.name))
-        .collect())
+    {
+        for name in database_resource_names_for_type(&schema.name) {
+            resources.entry(name).or_insert_with(|| DbResourceContract {
+                kind: "inferred".to_string(),
+                record: schema.name.clone(),
+                columns: None,
+            });
+        }
+    }
+    Ok(DbResourceCatalog { resources })
 }
 
 fn database_resource_names_for_type(type_name: &str) -> Vec<String> {
+    if let Some(resource_type) = type_name.strip_suffix("Row") {
+        return vec![pascal_to_snake(resource_type)];
+    }
     let snake = pascal_to_snake(type_name);
     let plural = pluralize_resource_name(&snake);
     if plural == snake {
@@ -21693,6 +22119,7 @@ page Home
             &root,
             Some(&url),
             Path::new(".axonyx/db/postgres-schema.json"),
+            Path::new("app/generated/postgres-db.ax"),
         )
         .expect("live postgres pull should succeed");
         assert_eq!(pull.schema.driver, "postgres");
@@ -21725,15 +22152,19 @@ page Home
             &root,
             Some(&db_path.to_string_lossy()),
             Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
         )
         .expect("db pull should write schema");
 
         let schema_path = root.join(".axonyx/db/schema.json");
         assert!(report.ok);
-        assert_eq!(report.schema.version, 1);
+        assert_eq!(report.schema.version, 2);
         assert_eq!(report.schema.driver, "sqlite");
+        assert!(report.schema.schema_hash.starts_with("sha256:"));
         assert_eq!(report.schema.tables.len(), 1);
         assert_eq!(report.schema.tables[0].name, "posts");
+        assert_eq!(report.schema.tables[0].kind, "table");
+        assert_eq!(report.schema.tables[0].record, "PostsRow");
         assert!(report.schema.tables[0]
             .columns
             .iter()
@@ -21742,6 +22173,201 @@ page Home
         let written = fs::read_to_string(schema_path).expect("schema should read");
         assert!(written.contains("\"posts\""));
         assert!(written.contains("\"published\""));
+        let types = fs::read_to_string(root.join("app/generated/db.ax"))
+            .expect("generated database types should read");
+        assert!(types.contains("export type PostsRow"));
+        assert!(types.contains("id: Int"));
+        assert!(types.contains("title: String"));
+        let generated = parse_backend_ax(&types).expect("generated database types should parse");
+        assert_eq!(generated.types.len(), 1);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn db_pull_tracks_custom_generated_type_path_in_manifest() {
+        let root = make_temp_dir("db-pull-custom-types-path");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute("create table posts (id integer primary key)", [])
+            .expect("table should create");
+        drop(connection);
+
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/types/database.ax"),
+        )
+        .expect("db pull should succeed");
+
+        let schema = read_db_schema_manifest(&root)
+            .expect("manifest should read")
+            .expect("manifest should exist");
+        assert_eq!(schema.types_path, "app/types/database.ax");
+        assert!(root.join("app/types/database.ax").exists());
+        assert!(check_generated_database_contract(&root)
+            .expect("generated contract should check")
+            .is_empty());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn pulled_database_schema_drives_resource_and_field_diagnostics() {
+        let root = make_temp_dir("db-pull-typed-resources");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env DATABASE_URL: Secret<String>\n",
+        )
+        .expect("backend contract should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute_batch(
+                "create table posts (id integer primary key, title text not null, status text);\n\
+                 create view published_posts as select id, title from posts where status = 'published';",
+            )
+            .expect("schema should create");
+        drop(connection);
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
+        )
+        .expect("db pull should succeed");
+        fs::write(
+            root.join("app/loader.ax"),
+            r#"
+loader Posts -> List<PostsRow>
+  data posts = db.posts.where({ statuz: "published" }).order({ created: "desc" }).all()
+  return posts
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action CreatePost
+  input:
+    title: string
+  db.posts.insert({ titel: input.title })
+  return ok()
+
+action WriteView
+  db.published_posts.insert({ title: "No" })
+  return ok()
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code, diagnostic.message.as_str()))
+            .collect::<Vec<_>>();
+        assert!(messages
+            .iter()
+            .any(|(code, message)| { *code == "axonyx-db-field" && message.contains("statuz") }));
+        assert!(messages
+            .iter()
+            .any(|(code, message)| { *code == "axonyx-db-field" && message.contains("created") }));
+        assert!(messages
+            .iter()
+            .any(|(code, message)| { *code == "axonyx-db-field" && message.contains("titel") }));
+        assert!(messages
+            .iter()
+            .any(|(code, _)| *code == "axonyx-db-read-only"));
+        assert!(messages
+            .iter()
+            .all(|(code, _)| *code != "axonyx-return-contract-unknown-type"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn database_sql_types_map_to_existing_axonyx_types() {
+        assert_eq!(database_ax_type("sqlite", "INTEGER"), "Int");
+        assert_eq!(database_ax_type("sqlite", "VARCHAR(255)"), "String");
+        assert_eq!(database_ax_type("sqlite", "BLOB"), "Bytes");
+        assert_eq!(database_ax_type("postgres", "boolean"), "Bool");
+        assert_eq!(database_ax_type("postgres", "uuid"), "Uuid");
+        assert_eq!(database_ax_type("postgres", "jsonb"), "Json");
+        assert_eq!(database_ax_type("postgres", "text[]"), "List<String>");
+    }
+
+    #[test]
+    fn database_check_reports_schema_drift_after_database_change() {
+        let root = make_temp_dir("db-schema-drift");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute("create table posts (id integer primary key)", [])
+            .expect("table should create");
+        drop(connection);
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
+        )
+        .expect("db pull should succeed");
+
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should reopen");
+        connection
+            .execute("alter table posts add column title text", [])
+            .expect("schema should change");
+        drop(connection);
+
+        let report = collect_db_check_report(&root, Some(&db_path.to_string_lossy()))
+            .expect("db check should run");
+        assert!(!report.ok);
+        assert!(report.schema_drift);
+        assert_ne!(report.schema_hash, report.manifest_hash);
+        assert!(report.message.contains("cargo ax db pull"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn database_check_reports_driver_drift() {
+        let root = make_temp_dir("db-driver-drift");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let db_path = root.join("app.db");
+        rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
+        )
+        .expect("db pull should succeed");
+
+        let manifest_path = root.join(".axonyx/db/schema.json");
+        let mut manifest = read_db_schema_manifest(&root)
+            .expect("manifest should read")
+            .expect("manifest should exist");
+        manifest.driver = "postgres".to_string();
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).expect("manifest should serialize"),
+        )
+        .expect("manifest should write");
+
+        let report = collect_db_check_report(&root, Some(&db_path.to_string_lossy()))
+            .expect("db check should run");
+        assert!(!report.ok);
+        assert!(report.schema_drift);
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -22150,6 +22776,7 @@ return ASX { <Copy>{posts}</Copy> }
         assert_eq!(args.format, CheckFormat::Json);
         assert_eq!(args.url.as_deref(), Some("sqlite://app.db"));
         assert_eq!(args.out, PathBuf::from(".axonyx/db/schema.json"));
+        assert_eq!(args.types_out, PathBuf::from("app/generated/db.ax"));
     }
 
     #[test]
