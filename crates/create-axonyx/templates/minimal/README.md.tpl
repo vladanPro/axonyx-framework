@@ -48,7 +48,12 @@ Inspect and apply it locally:
 cargo ax db status
 cargo ax db migrate --dry-run
 cargo ax db migrate
+cargo ax db pull
 ```
+
+The pull writes `.axonyx/db/schema.json` plus `app/generated/db.ax`. From that
+point, `cargo ax check` validates `db.*` resource and field names against the
+real schema, while `cargo ax db check` reports live schema drift.
 
 Rollback always targets the latest applied migration:
 

@@ -227,8 +227,14 @@ Use `cargo ax db pull` to write the current database schema snapshot to:
 
 Current behavior:
 
-- SQLite table/column introspection is supported.
-- Postgres/Supabase table and column introspection is supported.
+- SQLite and Postgres/Supabase table, view, and column introspection is supported.
+- The JSON manifest includes a deterministic schema hash, raw SQL types, mapped
+  Axonyx types, and generated row contract names.
+- `app/generated/db.ax` is generated beside the manifest by default.
+- `cargo ax check` rejects unknown `db.*` resources, unknown fields in
+  `where`/`order`/`insert`/`update`, and writes through read-only views.
+- `cargo ax db check` compares the live schema hash with the pulled manifest and
+  fails when they differ.
 - Existing schema output is overwritten, so rerun the command after changing the database.
 
 Example:
@@ -238,8 +244,32 @@ cargo ax db pull
 cargo ax db pull --out .axonyx/db/schema.json
 ```
 
-The schema file is intended to power future checks such as unknown tables,
-unknown columns, generated Axonyx types, and LSP autocomplete.
+Example generated contract:
+
+```ax
+export type PostsRow {
+  id: Int
+  title: String
+  summary: Optional<String>
+  published_at: Optional<DateTime>
+}
+```
+
+Use the generated row type in loader/action return contracts rather than
+duplicating the database shape by hand:
+
+```ax
+export query loadPosts() -> List<PostsRow> {
+  return db.posts.where({ status: "published" }).all()
+}
+```
+
+The JSON manifest is the authoritative resource catalog. The generated `.ax`
+file makes those rows available to the existing Axonyx type and API contract
+pipeline. Commit both generated artifacts so CI and production builds stay
+deterministic without live database credentials. Raw `db.query()` remains the
+explicit escape hatch for database names that cannot be represented by the
+Axonyx DSL.
 
 ## Database Migrations
 
