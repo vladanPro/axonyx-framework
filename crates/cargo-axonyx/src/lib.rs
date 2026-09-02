@@ -2098,15 +2098,23 @@ fn db_migrate_command(args: DbMigrateArgs) -> Result<()> {
         return Ok(());
     }
 
-    for migration in pending {
-        let applied = ax_backend_runtime::AxMigrationExecutor::apply_migration(
-            &runtime,
-            &migration.migration,
-        )
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let migration_plan = pending
+        .iter()
+        .map(|migration| migration.migration.clone())
+        .collect::<Vec<_>>();
+    let applied =
+        ax_backend_runtime::AxMigrationExecutor::apply_migrations(&runtime, &migration_plan)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let skipped = migration_plan.len().saturating_sub(applied.len());
+    if skipped > 0 {
+        println!(
+            "Skipped {skipped} migration(s) already applied while waiting for the migration lock."
+        );
+    }
+    for migration in applied {
         println!(
             "Applied {} {} ({} ms)",
-            applied.version, applied.name, applied.execution_ms
+            migration.version, migration.name, migration.execution_ms
         );
     }
     Ok(())
@@ -21903,8 +21911,11 @@ page Home
 
         let pending = pending_migrations(&files, &empty_history).expect("pending should resolve");
         assert_eq!(pending.len(), 1);
-        ax_backend_runtime::AxMigrationExecutor::apply_migration(&runtime, &pending[0].migration)
-            .expect("migration should apply");
+        ax_backend_runtime::AxMigrationExecutor::apply_migrations(
+            &runtime,
+            &[pending[0].migration.clone()],
+        )
+        .expect("migration should apply");
         let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
             .expect("history should load");
         let status = migration_status_report(&config, "local", &directory, &files, &history)
