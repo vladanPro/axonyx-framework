@@ -253,6 +253,20 @@ export type PostsRow {
   summary: Optional<String>
   published_at: Optional<DateTime>
 }
+
+export type PostsCreateInput {
+  id: Optional<Int>
+  title: String
+  summary: Optional<String>
+  published_at: Optional<DateTime>
+}
+
+export type PostsUpdateInput {
+  id: Optional<Int>
+  title: Optional<String>
+  summary: Optional<String>
+  published_at: Optional<DateTime>
+}
 ```
 
 Use the generated row type in loader/action return contracts rather than
@@ -270,6 +284,13 @@ pipeline. Commit both generated artifacts so CI and production builds stay
 deterministic without live database credentials. Raw `db.query()` remains the
 explicit escape hatch for database names that cannot be represented by the
 Axonyx DSL.
+
+For mutations, `cargo ax check` also verifies literal and direct `input.*`
+values against pulled column types. Inserts must provide every non-null column
+without a database default. Nullable/defaulted columns and SQLite integer
+primary keys remain optional, while every generated update field is optional.
+Complex runtime expressions stay allowed until their type can be proven by the
+compiler; Axonyx does not guess and emit false-positive errors.
 
 ## Database Migrations
 

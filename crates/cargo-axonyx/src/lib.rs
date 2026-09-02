@@ -3104,8 +3104,42 @@ fn render_db_schema_types(schema: &DbSchemaManifest) -> String {
             output.push_str(&format!("  {}: {}\n", column.name, ty));
         }
         output.push_str("}\n\n");
+
+        if table.kind == "view" {
+            continue;
+        }
+
+        let resource_type = sanitize_type_name(&table.name);
+        output.push_str(&format!("export type {resource_type}CreateInput {{\n"));
+        for column in &table.columns {
+            let optional = db_column_is_optional_on_insert(schema, column);
+            let ty = if optional {
+                format!("Optional<{}>", column.ax_type)
+            } else {
+                column.ax_type.clone()
+            };
+            output.push_str(&format!("  {}: {}\n", column.name, ty));
+        }
+        output.push_str("}\n\n");
+
+        output.push_str(&format!("export type {resource_type}UpdateInput {{\n"));
+        for column in &table.columns {
+            output.push_str(&format!(
+                "  {}: Optional<{}>\n",
+                column.name, column.ax_type
+            ));
+        }
+        output.push_str("}\n\n");
     }
     output
+}
+
+fn db_column_is_optional_on_insert(schema: &DbSchemaManifest, column: &DbSchemaColumn) -> bool {
+    column.nullable
+        || column.default.is_some()
+        || (schema.driver == "sqlite"
+            && column.primary_key
+            && database_ax_type(&schema.driver, &column.ty) == "Int")
 }
 
 fn validate_db_schema_types(schema: &DbSchemaManifest) -> Result<()> {
@@ -8266,6 +8300,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &root.body,
+                &[],
                 &resources,
                 &mut diagnostics,
             ),
@@ -8273,6 +8308,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &route.body,
+                &route.input,
                 &resources,
                 &mut diagnostics,
             ),
@@ -8280,6 +8316,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &loader.body,
+                &loader.input,
                 &resources,
                 &mut diagnostics,
             ),
@@ -8287,6 +8324,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &action.body,
+                &action.input,
                 &resources,
                 &mut diagnostics,
             ),
@@ -8294,6 +8332,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &function.body,
+                &function.input,
                 &resources,
                 &mut diagnostics,
             ),
@@ -8301,6 +8340,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &job.body,
+                &[],
                 &resources,
                 &mut diagnostics,
             ),
@@ -8315,6 +8355,7 @@ fn collect_db_surface_diagnostics_from_stmts(
     path: &Path,
     source: &str,
     body: &[AxBackendStmt],
+    input: &[axonyx_core::ax_backend_ast_prelude::AxField],
     resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
@@ -8374,27 +8415,57 @@ fn collect_db_surface_diagnostics_from_stmts(
             AxBackendStmt::Env(_) => {}
             AxBackendStmt::Transaction(transaction) => {
                 for operation in &transaction.operations {
-                    let mutation = match operation {
-                        AxTransactionOperation::Insert(mutation)
-                        | AxTransactionOperation::Update(mutation)
-                        | AxTransactionOperation::Delete(mutation) => mutation,
+                    let (kind, mutation) = match operation {
+                        AxTransactionOperation::Insert(mutation) => {
+                            (DbMutationKind::Insert, mutation)
+                        }
+                        AxTransactionOperation::Update(mutation) => {
+                            (DbMutationKind::Update, mutation)
+                        }
+                        AxTransactionOperation::Delete(mutation) => {
+                            (DbMutationKind::Delete, mutation)
+                        }
                     };
                     collect_db_mutation_surface_diagnostics(
                         path,
                         source,
+                        kind,
                         mutation,
+                        input,
                         resources,
                         diagnostics,
                     );
                 }
             }
-            AxBackendStmt::Insert(mutation)
-            | AxBackendStmt::Update(mutation)
-            | AxBackendStmt::Delete(mutation) => {
+            AxBackendStmt::Insert(mutation) => {
                 collect_db_mutation_surface_diagnostics(
                     path,
                     source,
+                    DbMutationKind::Insert,
                     mutation,
+                    input,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::Update(mutation) => {
+                collect_db_mutation_surface_diagnostics(
+                    path,
+                    source,
+                    DbMutationKind::Update,
+                    mutation,
+                    input,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::Delete(mutation) => {
+                collect_db_mutation_surface_diagnostics(
+                    path,
+                    source,
+                    DbMutationKind::Delete,
+                    mutation,
+                    input,
                     resources,
                     diagnostics,
                 );
@@ -8500,10 +8571,19 @@ fn collect_db_surface_diagnostics_from_stmts(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DbMutationKind {
+    Insert,
+    Update,
+    Delete,
+}
+
 fn collect_db_mutation_surface_diagnostics(
     path: &Path,
     source: &str,
+    kind: DbMutationKind,
     mutation: &axonyx_core::ax_backend_ast_prelude::AxMutation,
+    input: &[axonyx_core::ax_backend_ast_prelude::AxField],
     resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
@@ -8520,6 +8600,16 @@ fn collect_db_mutation_surface_diagnostics(
                 resources,
                 diagnostics,
             );
+            collect_db_value_type_diagnostic(
+                path,
+                source,
+                &mutation.collection,
+                &field.name,
+                &field.value,
+                input,
+                resources,
+                diagnostics,
+            );
         }
         for filter in &mutation.filters {
             collect_db_field_diagnostic(
@@ -8530,6 +8620,19 @@ fn collect_db_mutation_surface_diagnostics(
                 resources,
                 diagnostics,
             );
+            collect_db_value_type_diagnostic(
+                path,
+                source,
+                &mutation.collection,
+                &filter.field,
+                &filter.value,
+                input,
+                resources,
+                diagnostics,
+            );
+        }
+        if kind == DbMutationKind::Insert {
+            collect_db_required_insert_diagnostics(path, source, mutation, resources, diagnostics);
         }
     }
     for field in &mutation.fields {
@@ -8733,7 +8836,7 @@ fn collect_db_field_diagnostic(
     let Some(columns) = &contract.columns else {
         return;
     };
-    if columns.contains(field) {
+    if columns.contains_key(field) {
         return;
     }
 
@@ -8748,6 +8851,129 @@ fn collect_db_field_diagnostic(
             contract.record
         ),
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_db_value_type_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    field: &str,
+    value: &AxExpr,
+    input: &[axonyx_core::ax_backend_ast_prelude::AxField],
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(column) = resources
+        .get(resource)
+        .and_then(|contract| contract.columns.as_ref())
+        .and_then(|columns| columns.get(field))
+    else {
+        return;
+    };
+    let Ok(expected) = AxType::parse_annotation(&column.ty) else {
+        return;
+    };
+
+    let mismatch = if is_static_db_value(value) {
+        !db_static_value_matches(value, &expected)
+    } else if let Some(actual) = direct_input_expr_type(value, input) {
+        !db_types_are_assignable(&actual, &expected)
+    } else {
+        false
+    };
+    if !mismatch {
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, field),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-value-type",
+        message: format!(
+            "value `{}` is not assignable to `{}` for db field `{}.{field}`",
+            format_ax_expr(value),
+            expected.display_name(),
+            resource
+        ),
+    });
+}
+
+fn db_static_value_matches(value: &AxExpr, expected: &AxType) -> bool {
+    if expected.accepts_state_initializer(value) {
+        return true;
+    }
+    if matches!(value, AxExpr::Unary { .. }) {
+        return AxDataContext::new()
+            .resolve_expr_type(value)
+            .is_ok_and(|actual| db_types_are_assignable(&actual, expected));
+    }
+    false
+}
+
+fn is_static_db_value(value: &AxExpr) -> bool {
+    match value {
+        AxExpr::String(_) | AxExpr::Number(_) | AxExpr::Float(_) | AxExpr::Bool(_) => true,
+        AxExpr::Identifier(name) => name == "null",
+        AxExpr::List(items) => items.iter().all(is_static_db_value),
+        AxExpr::Object(fields) => fields.values().all(is_static_db_value),
+        AxExpr::Unary { expr, .. } => is_static_db_value(expr),
+        AxExpr::Binary { .. }
+        | AxExpr::Index { .. }
+        | AxExpr::Member { .. }
+        | AxExpr::OptionalMember { .. }
+        | AxExpr::Call { .. } => false,
+    }
+}
+
+fn direct_input_expr_type(
+    value: &AxExpr,
+    input: &[axonyx_core::ax_backend_ast_prelude::AxField],
+) -> Option<AxType> {
+    let (object, property) = match value {
+        AxExpr::Member { object, property } | AxExpr::OptionalMember { object, property } => {
+            (object.as_ref(), property)
+        }
+        _ => return None,
+    };
+    if !matches!(object, AxExpr::Identifier(name) if name == "input") {
+        return None;
+    }
+
+    let field = input.iter().find(|field| field.name == *property)?;
+    let mut ty = backend_input_ax_type(&field.ty)?;
+    if field.optional || matches!(value, AxExpr::OptionalMember { .. }) {
+        ty = AxType::optional(ty);
+    }
+    Some(ty)
+}
+
+fn backend_input_ax_type(annotation: &str) -> Option<AxType> {
+    let ty = match annotation.trim() {
+        "string" => AxType::String,
+        "bool" | "boolean" => AxType::Bool,
+        "i64" | "u64" | "int" | "integer" => AxType::Int,
+        "f64" | "float" => AxType::Float,
+        "number" => AxType::Number,
+        other => AxType::parse_annotation(other).ok()?,
+    };
+    Some(ty)
+}
+
+fn db_types_are_assignable(actual: &AxType, expected: &AxType) -> bool {
+    match (actual, expected) {
+        (AxType::Unknown, _) | (_, AxType::Unknown | AxType::Json) => true,
+        (AxType::Optional(actual), AxType::Optional(expected)) => {
+            db_types_are_assignable(actual, expected)
+        }
+        (actual, AxType::Optional(expected)) => db_types_are_assignable(actual, expected),
+        (AxType::Optional(_), _) => false,
+        (AxType::Int | AxType::Number, AxType::Number | AxType::Int) => true,
+        (AxType::Int | AxType::Number | AxType::Float, AxType::Float) => true,
+        _ => actual == expected,
+    }
 }
 
 fn collect_db_writable_diagnostic(
@@ -8794,7 +9020,49 @@ struct DbResourceCatalog {
 struct DbResourceContract {
     kind: String,
     record: String,
-    columns: Option<std::collections::BTreeSet<String>>,
+    columns: Option<std::collections::BTreeMap<String, DbColumnContract>>,
+}
+
+fn collect_db_required_insert_diagnostics(
+    path: &Path,
+    source: &str,
+    mutation: &axonyx_core::ax_backend_ast_prelude::AxMutation,
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(contract) = resources.get(&mutation.collection) else {
+        return;
+    };
+    let Some(columns) = &contract.columns else {
+        return;
+    };
+    let provided = mutation
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for (name, column) in columns {
+        if column.required_on_insert && !provided.contains(name.as_str()) {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_source_pattern(source, &format!("db.{}.", mutation.collection)),
+                column: 1,
+                severity: "error",
+                code: "axonyx-db-required-field",
+                message: format!(
+                    "insert into db resource `{}` is missing required field `{name}`",
+                    mutation.collection
+                ),
+            });
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DbColumnContract {
+    ty: String,
+    required_on_insert: bool,
 }
 
 impl DbResourceCatalog {
@@ -8813,6 +9081,7 @@ impl DbResourceCatalog {
 
 fn collect_project_database_resources(root: &Path) -> Result<DbResourceCatalog> {
     if let Some(schema) = read_db_schema_manifest(root)? {
+        let driver = schema.driver.clone();
         return Ok(DbResourceCatalog {
             resources: schema
                 .tables
@@ -8821,7 +9090,24 @@ fn collect_project_database_resources(root: &Path) -> Result<DbResourceCatalog> 
                     let columns = table
                         .columns
                         .into_iter()
-                        .map(|column| column.name)
+                        .map(|column| {
+                            let required_on_insert = !column.nullable
+                                && column.default.is_none()
+                                && !(driver == "sqlite"
+                                    && column.primary_key
+                                    && database_ax_type(&driver, &column.ty) == "Int");
+                            (
+                                column.name,
+                                DbColumnContract {
+                                    ty: if column.nullable {
+                                        format!("Optional<{}>", column.ax_type)
+                                    } else {
+                                        column.ax_type
+                                    },
+                                    required_on_insert,
+                                },
+                            )
+                        })
                         .collect();
                     (
                         table.name,
@@ -22176,10 +22462,14 @@ page Home
         let types = fs::read_to_string(root.join("app/generated/db.ax"))
             .expect("generated database types should read");
         assert!(types.contains("export type PostsRow"));
+        assert!(types.contains("export type PostsCreateInput"));
+        assert!(types.contains("export type PostsUpdateInput"));
         assert!(types.contains("id: Int"));
         assert!(types.contains("title: String"));
+        assert!(types.contains("summary: Optional<String>"));
+        assert!(types.contains("published: Optional<Int>"));
         let generated = parse_backend_ax(&types).expect("generated database types should parse");
-        assert_eq!(generated.types.len(), 1);
+        assert_eq!(generated.types.len(), 3);
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -22288,6 +22578,98 @@ action WriteView
         assert!(messages
             .iter()
             .all(|(code, _)| *code != "axonyx-return-contract-unknown-type"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn pulled_database_schema_checks_mutation_value_types_and_required_fields() {
+        let root = make_temp_dir("db-pull-typed-mutations");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env DATABASE_URL: Secret<String>\n",
+        )
+        .expect("backend contract should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute(
+                "create table posts (
+                    id integer primary key,
+                    title text not null,
+                    views integer not null default 0,
+                    rating real
+                )",
+                [],
+            )
+            .expect("schema should create");
+        drop(connection);
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
+        )
+        .expect("db pull should succeed");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action CreatePost
+  input:
+    title: string
+    views: string
+  db.posts.insert({ views: input.views, rating: "high" })
+  return ok()
+
+action UpdatePost
+  input:
+    title: string
+  db.posts.where({ id: "first" }).update({ title: 42 })
+  return ok()
+
+action ValidPost
+  input:
+    title: string
+    views: int
+  db.posts.insert({ title: input.title, views: input.views, rating: null })
+  return ok()
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-required-field" && diagnostic.message.contains("`title`")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-value-type" && diagnostic.message.contains("input.views")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-value-type" && diagnostic.message.contains("rating")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-value-type" && diagnostic.message.contains("id")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-value-type" && diagnostic.message.contains("title")
+        }));
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "axonyx-db-value-type")
+                .count(),
+            4
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "axonyx-db-required-field")
+                .count(),
+            1
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
