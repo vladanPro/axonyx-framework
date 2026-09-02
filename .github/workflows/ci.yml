@@ -7,6 +7,21 @@ on:
   pull_request:
 
 jobs:
+  msrv:
+    name: Rust 1.82 MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust 1.82
+        uses: dtolnay/rust-toolchain@1.82.0
+
+      - name: Check workspace on declared MSRV
+        run: cargo check --workspace --all-targets --all-features
+
   framework:
     name: Framework Tests
     runs-on: ubuntu-latest
