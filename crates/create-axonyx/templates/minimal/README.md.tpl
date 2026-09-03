@@ -155,6 +155,9 @@ Recommended data config:
 - `AX_SECRET_DB_TRANSPORT=direct|api`
 - transport defaults to `direct` when omitted
 - dialect defaults to `postgres` when omitted
+- `[db]` in `Axonyx.toml` defines pool, query timeout, read retry, and SQLite lock-wait defaults
+- matching `AX_SECRET_DB_*` values override `Axonyx.toml` for each deployment
+- Axonyx retries only transient reads; mutations and transactions are never retried automatically
 
 Database adapter convention:
 
