@@ -3214,6 +3214,7 @@ fn db_env_for_root_profile(
     for (key, value) in std::env::vars() {
         set_ax_env_key(&mut env, &key, &value);
     }
+    merge_db_config_defaults_into_ax_env(&mut env, root)?;
     infer_database_driver_from_env_url(&mut env);
     if let Some(url) = url_override {
         env.secret
@@ -3224,6 +3225,38 @@ fn db_env_for_root_profile(
         }
     }
     Ok(env)
+}
+
+const DB_RUNTIME_CONFIG_KEYS: [(&str, &str); 6] = [
+    ("pool_max_size", "db_pool_max_size"),
+    ("pool_timeout_ms", "db_pool_timeout_ms"),
+    ("query_timeout_ms", "db_query_timeout_ms"),
+    ("read_retry_attempts", "db_read_retry_attempts"),
+    ("read_retry_backoff_ms", "db_read_retry_backoff_ms"),
+    ("sqlite_busy_timeout_ms", "db_sqlite_busy_timeout_ms"),
+];
+
+fn merge_db_config_defaults_into_ax_env(
+    env: &mut ax_backend_runtime::AxEnv,
+    root: &Path,
+) -> Result<()> {
+    let Some(table) = axonyx_config_table(root, "db") else {
+        return Ok(());
+    };
+
+    for (config_key, env_key) in DB_RUNTIME_CONFIG_KEYS {
+        let Some(value) = table.get(config_key) else {
+            continue;
+        };
+        let value = parse_db_runtime_config_value(config_key, value)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let long_env_key = format!("database_{}", env_key.trim_start_matches("db_"));
+        if !env.secret.contains_key(env_key) && !env.secret.contains_key(&long_env_key) {
+            env.secret.insert(env_key.to_string(), value.to_string());
+        }
+    }
+
+    Ok(())
 }
 
 fn infer_database_driver_from_env_url(env: &mut ax_backend_runtime::AxEnv) {
@@ -3545,6 +3578,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_compression_check(root));
     checks.push(doctor_server_security_headers_check(root));
     checks.push(doctor_server_request_logging_check(root));
+    checks.push(doctor_database_runtime_policy_check(root));
     checks.push(doctor_error_boundaries_check(root));
     checks.push(doctor_aegis_config_check(root));
     checks.push(doctor_api_contracts_check(root));
@@ -3566,6 +3600,38 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     }
 
     checks
+}
+
+fn doctor_database_runtime_policy_check(root: &Path) -> DoctorCheck {
+    let config = db_env_for_root(root, None).and_then(|env| {
+        env.database_config()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    });
+    match config {
+        Ok(config) => DoctorCheck {
+            code: "database-runtime-policy",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "Database policy: pool {} connections / {} ms checkout, {} ms query timeout, {} read retr{}, {} ms backoff, {} ms SQLite lock wait.",
+                config.pool_max_size,
+                config.pool_timeout_ms,
+                config.policy.query_timeout_ms,
+                config.policy.read_retry_attempts,
+                if config.policy.read_retry_attempts == 1 { "y" } else { "ies" },
+                config.policy.read_retry_backoff_ms,
+                config.policy.sqlite_busy_timeout_ms,
+            ),
+            hint: Some(
+                "Tune [db] defaults in Axonyx.toml; AX_SECRET_DB_* values override them per deployment.",
+            ),
+        },
+        Err(error) => DoctorCheck {
+            code: "database-runtime-policy",
+            severity: DoctorSeverity::Error,
+            message: error.to_string(),
+            hint: Some("Run `cargo ax check` and fix invalid [db] runtime policy values."),
+        },
+    }
 }
 
 fn doctor_server_body_limit_check(root: &Path) -> DoctorCheck {
@@ -7654,6 +7720,23 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     };
     let mut diagnostics = Vec::new();
+    if let Some(db) = value.get("db").and_then(toml::Value::as_table) {
+        for (key, _) in DB_RUNTIME_CONFIG_KEYS {
+            let Some(value) = db.get(key) else {
+                continue;
+            };
+            if let Err(message) = parse_db_runtime_config_value(key, value) {
+                diagnostics.push(CheckDiagnostic {
+                    file: display_path(&path),
+                    line: line_for_config_key(&source, key),
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-config-db-runtime",
+                    message,
+                });
+            }
+        }
+    }
     if let Some(stream_pages) = value
         .get("server")
         .and_then(toml::Value::as_table)
@@ -11568,11 +11651,13 @@ fn build_compiled_production_binary(
     let signal_aliases = compiled_action_signal_aliases(root)?;
     let data_bindings = compiled_data_bindings(root)?;
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
+    let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let source = compiled_production_source(
         &dist_literal,
         &signal_aliases,
         &data_bindings,
         &page_renderers,
+        &database_runtime_defaults,
     );
     fs::write(&source_path, source).with_context(|| {
         format!(
@@ -11744,11 +11829,31 @@ fn compiled_loader_arg_source(expr: &AxExpr) -> Option<String> {
     }
 }
 
+fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
+    let Some(table) = axonyx_config_table(root, "db") else {
+        return Ok(String::new());
+    };
+    let mut steps = String::new();
+    for (config_key, env_key) in DB_RUNTIME_CONFIG_KEYS {
+        let Some(value) = table.get(config_key) else {
+            continue;
+        };
+        let value = parse_db_runtime_config_value(config_key, value)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let long_env_key = format!("database_{}", env_key.trim_start_matches("db_"));
+        steps.push_str(&format!(
+            "    if !env.secret.contains_key({env_key:?}) && !env.secret.contains_key({long_env_key:?}) {{ env.secret.insert({env_key:?}.to_string(), {value:?}.to_string()); }}\n"
+        ));
+    }
+    Ok(steps)
+}
+
 fn compiled_production_source(
     dist_literal: &str,
     signal_aliases: &[(String, String, String)],
     data_bindings: &[CompiledDataBinding],
     page_renderers: &[CompiledPageRenderer],
+    database_runtime_defaults: &str,
 ) -> String {
     let signal_match_arms = signal_aliases
         .iter()
@@ -11851,7 +11956,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let port = std::env::var("AXONYX_PORT").unwrap_or_else(|_| "3000".to_string());
     let bind = format!("{{host}}:{{port}}");
     let dist = PathBuf::from({dist_literal});
-    let runtime = Arc::new(lazy_runtime_from_env(AxEnv::from_env())?);
+    let mut env = AxEnv::from_env();
+{database_runtime_defaults}    let runtime = Arc::new(lazy_runtime_from_env(env)?);
     let handler: AxCompiledHandler =
         Arc::new(move |request| handle_request(&dist, runtime.as_ref(), request));
     println!("Axonyx compiled production server listening at http://{{bind}}");
@@ -16577,6 +16683,35 @@ fn parse_bool_config_value(value: &toml::Value) -> std::result::Result<bool, Str
         }
         _ => Err("expected a boolean".to_string()),
     }
+}
+
+fn parse_db_runtime_config_value(
+    key: &str,
+    value: &toml::Value,
+) -> std::result::Result<u64, String> {
+    let toml::Value::Integer(number) = value else {
+        return Err(format!("[db].{key} must be an integer."));
+    };
+    if *number < 0 || (*number == 0 && key != "read_retry_attempts") {
+        let requirement = if key == "read_retry_attempts" {
+            "non-negative"
+        } else {
+            "positive"
+        };
+        return Err(format!("[db].{key} must be {requirement}."));
+    }
+    if key == "read_retry_attempts"
+        && *number > i64::from(ax_backend_runtime::MAX_DB_READ_RETRY_ATTEMPTS)
+    {
+        return Err(format!(
+            "[db].read_retry_attempts must be between 0 and {}.",
+            ax_backend_runtime::MAX_DB_READ_RETRY_ATTEMPTS
+        ));
+    }
+    if key == "pool_max_size" && *number > i64::from(u32::MAX) {
+        return Err("[db].pool_max_size exceeds the supported u32 range.".to_string());
+    }
+    Ok(*number as u64)
 }
 
 fn parse_server_log_format_value(
@@ -22352,6 +22487,68 @@ page Home
     }
 
     #[test]
+    fn db_runtime_config_supplies_defaults_without_overriding_environment() {
+        let root = make_temp_dir("db-runtime-policy-config");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"[app]
+name = "demo"
+
+[db]
+pool_max_size = 12
+pool_timeout_ms = 900
+query_timeout_ms = 2400
+read_retry_attempts = 2
+read_retry_backoff_ms = 25
+sqlite_busy_timeout_ms = 700
+"#,
+        )
+        .expect("config should write");
+        fs::write(root.join(".env"), "AX_SECRET_DB_QUERY_TIMEOUT_MS=3600\n")
+            .expect("env should write");
+
+        let env = db_env_for_root(&root, None).expect("database env should load");
+        let config = env
+            .database_config()
+            .expect("database config should resolve");
+        assert_eq!(config.pool_max_size, 12);
+        assert_eq!(config.pool_timeout_ms, 900);
+        assert_eq!(config.policy.query_timeout_ms, 3_600);
+        assert_eq!(config.policy.read_retry_attempts, 2);
+        assert_eq!(config.policy.read_retry_backoff_ms, 25);
+        assert_eq!(config.policy.sqlite_busy_timeout_ms, 700);
+
+        let compiled =
+            compiled_database_runtime_defaults(&root).expect("compiled defaults should render");
+        assert!(compiled.contains("db_query_timeout_ms"));
+        assert!(compiled.contains("database_query_timeout_ms"));
+        assert!(compiled.contains("2400"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn config_check_rejects_unsafe_database_runtime_policy() {
+        let root = make_temp_dir("db-runtime-policy-invalid");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[db]\npool_max_size = 4294967296\nquery_timeout_ms = 0\nread_retry_attempts = 99\n",
+        )
+        .expect("config should write");
+
+        let diagnostics = check_axonyx_config(&root).expect("config check should run");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "axonyx-config-db-runtime")
+                .count(),
+            3
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn postgres_schema_rows_build_stable_manifest_tables() {
         let tables = postgres_schema_tables_from_value(&serde_json::json!([
             {
@@ -23031,6 +23228,7 @@ action ValidPost
                 document_json: "{\"page\":\"posts\"}".to_string(),
                 import_sources: Vec::new(),
             }],
+            "",
         );
 
         assert!(source.contains("backend::dispatch_api_route"));
@@ -23044,13 +23242,9 @@ action ValidPost
         assert!(source.contains("compiled_binding_args"));
         assert!(source.contains("compiled_loader_call_key"));
         assert!(source.contains("render_compiled_page_fragment"));
+        assert!(source.contains("let mut env = AxEnv::from_env()"));
         assert!(source.contains("let runtime = Arc::new(lazy_runtime_from_env"));
-        assert_eq!(
-            source
-                .matches("lazy_runtime_from_env(AxEnv::from_env())")
-                .count(),
-            1
-        );
+        assert_eq!(source.matches("lazy_runtime_from_env(env)").count(), 1);
         assert!(source.contains("handle_request(&dist, runtime.as_ref(), request)"));
         assert!(source.contains("cross_site_action_request"));
         assert!(source.contains("safe_action_route"));
@@ -24231,6 +24425,32 @@ axonyx-runtime = "0.1.14"
 
         assert_eq!(limit.severity, DoctorSeverity::Error);
         assert!(limit.message.contains("max_connections"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn doctor_reports_effective_database_runtime_policy() {
+        let root = make_temp_dir("doctor-database-runtime-policy");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[db]\nquery_timeout_ms = 2400\nread_retry_attempts = 2\n",
+        )
+        .expect("config should write");
+
+        let check = doctor_database_runtime_policy_check(&root);
+        assert_eq!(check.severity, DoctorSeverity::Ok);
+        assert!(check.message.contains("2400 ms query timeout"));
+        assert!(check.message.contains("2 read retries"));
+
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[db]\nread_retry_attempts = 12\n",
+        )
+        .expect("config should write");
+        let check = doctor_database_runtime_policy_check(&root);
+        assert_eq!(check.severity, DoctorSeverity::Error);
+        assert!(check.message.contains("read_retry_attempts"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
