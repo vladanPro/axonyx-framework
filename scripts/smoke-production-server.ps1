@@ -24,6 +24,9 @@ $originalLocation = Get-Location
 $serverProcess = $null
 $stdout = Join-Path $WorkDir "server.out.log"
 $stderr = Join-Path $WorkDir "server.err.log"
+$originalDbDriver = $env:AX_SECRET_DB_DRIVER
+$originalDbDialect = $env:AX_SECRET_DB_DIALECT
+$originalDbUrl = $env:AX_SECRET_DB_URL
 
 function Invoke-SmokeRequest {
   param(
@@ -350,6 +353,21 @@ try {
     "$Port"
   )
 
+  if ($Template -eq "minimal") {
+    $dbPath = Join-Path $appRoot "production-smoke.db"
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
+    $schema = "CREATE TABLE posts (id TEXT PRIMARY KEY, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL)"
+    $seed = "INSERT INTO posts (id,title,excerpt,status) VALUES (?,?,?,?)"
+    & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.commit();db.close()' $dbPath $schema $seed "smoke-1" "Smoke post" "Production smoke data" "published"
+    if ($LASTEXITCODE -ne 0) { throw "failed to seed production smoke SQLite database" }
+    $env:AX_SECRET_DB_DRIVER = "sqlite"
+    $env:AX_SECRET_DB_DIALECT = "sqlite"
+    $env:AX_SECRET_DB_URL = $dbPath
+  } else {
+    $env:AX_SECRET_DB_DRIVER = "memory"
+    $env:AX_SECRET_DB_DIALECT = "memory"
+  }
   $serverProcess = Start-Process -FilePath "cargo" -ArgumentList $args -WorkingDirectory $appRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
 
   $baseUrl = "http://127.0.0.1:$Port"
@@ -376,6 +394,9 @@ try {
   Invoke-SmokeRequest -Url "$baseUrl/" -ExpectedStatus 200 -ExpectHeader "X-Content-Type-Options" -ExpectHeaderValue "nosniff" | Out-Null
   Invoke-SmokeCurlRequest -Url "$baseUrl/" -Headers @("Accept-Encoding: gzip") -ExpectedStatus 200 -Expect "Content-Encoding: gzip" | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/__axonyx/health" -ExpectedStatus 200 -Expect '"ok":true|"ok": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
+  if ($Template -eq "minimal") {
+    Invoke-SmokeRequest -Url "$baseUrl/__axonyx/ready" -ExpectedStatus 200 -Expect '"required":true|"required": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
+  }
   Invoke-OversizedHeaderSmoke -HostName "127.0.0.1" -Port $Port
   if ($Template -eq "minimal") {
     Invoke-ChunkedPostSmoke -HostName "127.0.0.1" -Port $Port
@@ -436,6 +457,22 @@ try {
   }
 
   Set-Location $originalLocation
+
+  if ($null -eq $originalDbDriver) {
+    Remove-Item Env:AX_SECRET_DB_DRIVER -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_DB_DRIVER = $originalDbDriver
+  }
+  if ($null -eq $originalDbDialect) {
+    Remove-Item Env:AX_SECRET_DB_DIALECT -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_DB_DIALECT = $originalDbDialect
+  }
+  if ($null -eq $originalDbUrl) {
+    Remove-Item Env:AX_SECRET_DB_URL -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_DB_URL = $originalDbUrl
+  }
 
   if ($ownsWorkDir -and (Test-Path -LiteralPath $WorkDir)) {
     $resolved = Resolve-Path $WorkDir

@@ -88,7 +88,7 @@ cargo ax doctor --deploy render
 
 The Render check recommends the same Tokio-backed start command so local smoke
 and hosted deploys exercise the same server path. It also reports the
-recommended health-check path: `/__axonyx/health`.
+recommended health-check path: `/__axonyx/ready`.
 
 Production preview exposes a stable health probe for hosted platforms and load
 balancers:
@@ -96,6 +96,19 @@ balancers:
 ```text
 GET /__axonyx/health
 ```
+
+That endpoint is a cheap process liveness probe. Deployments should use the
+separate readiness endpoint when traffic must wait for required database
+connectivity:
+
+```text
+GET /__axonyx/ready
+```
+
+The Melt marks database-free applications as ready without requiring database
+configuration. Database-backed applications run one non-retried SQLite or
+Postgres probe and return `503` with a redacted error when the dependency is
+unavailable.
 
 Request reads default to a short production-safe timeout and can be tuned per
 app:

@@ -111,8 +111,17 @@ GET /__axonyx/health
 ```
 
 It returns a small no-store JSON response with `ok`, `service`, `mode`, and
-`version`, which gives hosted platforms and load balancers a stable readiness
-probe without touching app routes.
+`version`. This is the cheap liveness probe and never touches the database.
+
+```text
+GET /__axonyx/ready
+```
+
+This is the traffic-readiness probe recommended by `cargo ax doctor --deploy
+render`. The Melt records whether compiled backend code uses `db.*`. Static
+applications therefore need no database configuration, while database-backed
+applications run one direct SQLite/Postgres query probe without retrying or
+exposing connection details. A failed required dependency returns `503`.
 
 and the app should still be authored through:
 
