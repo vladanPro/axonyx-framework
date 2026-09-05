@@ -674,6 +674,7 @@ struct DevServerState {
     root: PathBuf,
     preview_store: Mutex<AxPreviewStore>,
     runtime_config: AxServerRuntimeConfig,
+    database_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4039,8 +4040,9 @@ fn doctor_render_deploy_checks(root: &Path) -> Vec<DoctorCheck> {
     checks.push(DoctorCheck {
         code: "deploy-render-health",
         severity: DoctorSeverity::Ok,
-        message: "Render health checks can use the built-in Axonyx health probe.".to_string(),
-        hint: Some("Health check path: /__axonyx/health"),
+        message: "Render health checks can use Axonyx readiness without coupling liveness to database access."
+            .to_string(),
+        hint: Some("Health check path: /__axonyx/ready"),
     });
 
     checks.push(match configured_max_request_body_bytes(root) {
@@ -11472,10 +11474,12 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let server_config = AxServerConfig::new(args.host, port, mode);
     let bind = server_config.bind_addr();
     let preview_store = preview_store_from_content(&root)?;
+    let database_required = project_uses_database_runtime(&root)?;
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(preview_store),
         runtime_config,
+        database_required,
     });
 
     print_backend_build_status(&backend_status);
@@ -11652,12 +11656,14 @@ fn build_compiled_production_binary(
     let data_bindings = compiled_data_bindings(root)?;
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
+    let database_required = project_uses_database_runtime(root)?;
     let source = compiled_production_source(
         &dist_literal,
         &signal_aliases,
         &data_bindings,
         &page_renderers,
         &database_runtime_defaults,
+        database_required,
     );
     fs::write(&source_path, source).with_context(|| {
         format!(
@@ -11854,6 +11860,7 @@ fn compiled_production_source(
     data_bindings: &[CompiledDataBinding],
     page_renderers: &[CompiledPageRenderer],
     database_runtime_defaults: &str,
+    database_required: bool,
 ) -> String {
     let signal_match_arms = signal_aliases
         .iter()
@@ -11934,7 +11941,7 @@ fn compiled_production_source(
 use std::path::{{Component, Path, PathBuf}};
 use std::sync::Arc;
 
-use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv}};
+use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
 use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
 use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
@@ -11950,6 +11957,8 @@ struct CompiledBinding {{
     source: &'static str,
     query_key: &'static [&'static str],
 }}
+
+const DATABASE_REQUIRED: bool = {database_required};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let host = std::env::var("AXONYX_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -11971,6 +11980,10 @@ fn handle_request(
 ) -> AxHttpResponse {{
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/health") {{
         return secure(AxHttpResponse::text(200, "ok"));
+    }}
+
+    if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/ready") {{
+        return secure(readiness_response(runtime));
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/action") {{
@@ -12002,6 +12015,47 @@ fn handle_request(
         response.body = AxBody::fixed(Vec::new());
     }}
     secure(response)
+}}
+
+fn readiness_response(runtime: &impl AxBackendRuntime) -> AxHttpResponse {{
+    let database = if DATABASE_REQUIRED {{
+        match AxQueryExecutor::database_health(runtime) {{
+            Ok(report) => json!({{
+                "required": true,
+                "ok": true,
+                "driver": report.driver,
+                "transport": report.transport,
+                "probe": report.probe,
+                "latencyMs": report.latency_ms,
+            }}),
+            Err(_) => {{
+                return AxHttpResponse::json(503, &json!({{
+                    "ok": false,
+                    "service": "axonyx",
+                    "database": {{
+                        "required": true,
+                        "ok": false,
+                        "error": {{
+                            "code": "db.unavailable",
+                            "message": "Database readiness check failed.",
+                        }},
+                    }},
+                }}))
+                .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error"))
+                .with_no_store();
+            }}
+        }}
+    }} else {{
+        json!({{ "required": false, "ok": true }})
+    }};
+
+    AxHttpResponse::json(200, &json!({{
+        "ok": true,
+        "service": "axonyx",
+        "database": database,
+    }}))
+    .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error"))
+    .with_no_store()
 }}
 
 fn handle_compiled_action(
@@ -12412,6 +12466,7 @@ fn build_static_site_from_app_root(
         root: root.to_path_buf(),
         preview_store: Mutex::new(preview_store_from_content(root)?),
         runtime_config: AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?,
+        database_required: project_uses_database_runtime(root)?,
     };
 
     for route in &static_routes {
@@ -15727,7 +15782,11 @@ fn handle_http_request(
     }
 
     if request.method == "GET" && is_health_target(&request.target) {
-        return Ok(health_response(mode)?);
+        return health_response(mode);
+    }
+
+    if request.method == "GET" && is_readiness_target(&request.target) {
+        return readiness_response(state, mode);
     }
 
     if mode == AxServerMode::Dev && request.method == "GET" && request.target == "/__axonyx/stream"
@@ -15841,6 +15900,10 @@ fn is_health_target(target: &str) -> bool {
     target.split_once('?').map_or(target, |(path, _)| path) == "/__axonyx/health"
 }
 
+fn is_readiness_target(target: &str) -> bool {
+    target.split_once('?').map_or(target, |(path, _)| path) == "/__axonyx/ready"
+}
+
 fn health_response(mode: AxServerMode) -> Result<AxHttpResponse> {
     Ok(AxHttpResponse::json(
         200,
@@ -15849,6 +15912,105 @@ fn health_response(mode: AxServerMode) -> Result<AxHttpResponse> {
             "service": "axonyx",
             "mode": mode.label(),
             "version": env!("CARGO_PKG_VERSION"),
+        }),
+    )?
+    .with_no_store())
+}
+
+fn readiness_response(state: &DevServerState, mode: AxServerMode) -> Result<AxHttpResponse> {
+    if !state.database_required {
+        return Ok(AxHttpResponse::json(
+            200,
+            &serde_json::json!({
+                "ok": true,
+                "service": "axonyx",
+                "mode": mode.label(),
+                "database": { "required": false, "ok": true },
+            }),
+        )?
+        .with_no_store());
+    }
+
+    let env = match db_env_for_root(&state.root, None) {
+        Ok(env) => env,
+        Err(_) => {
+            return database_readiness_failure(
+                mode,
+                "runtime.error",
+                "Database configuration is invalid.",
+            )
+        }
+    };
+    let runtime = match ax_backend_runtime::lazy_runtime_from_env(env) {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return database_readiness_failure(
+                mode,
+                "db.unavailable",
+                "Database readiness check failed.",
+            )
+        }
+    };
+    let report = match ax_backend_runtime::AxQueryExecutor::database_health(&runtime) {
+        Ok(report) => report,
+        Err(_) => {
+            return database_readiness_failure(
+                mode,
+                "db.unavailable",
+                "Database readiness check failed.",
+            )
+        }
+    };
+
+    Ok(AxHttpResponse::json(
+        200,
+        &serde_json::json!({
+            "ok": true,
+            "service": "axonyx",
+            "mode": mode.label(),
+            "database": {
+                "required": true,
+                "ok": true,
+                "driver": report.driver,
+                "transport": report.transport,
+                "probe": report.probe,
+                "latencyMs": report.latency_ms,
+            },
+        }),
+    )?
+    .with_no_store())
+}
+
+fn database_readiness_failure(
+    mode: AxServerMode,
+    code: &str,
+    message: &str,
+) -> Result<AxHttpResponse> {
+    database_readiness_error_response(
+        mode,
+        serde_json::json!({
+            "ok": false,
+            "code": code,
+            "message": message,
+        }),
+    )
+}
+
+fn database_readiness_error_response(
+    mode: AxServerMode,
+    error: serde_json::Value,
+) -> Result<AxHttpResponse> {
+    Ok(AxHttpResponse::json(
+        503,
+        &serde_json::json!({
+            "ok": false,
+            "service": "axonyx",
+            "mode": mode.label(),
+            "database": {
+                "required": true,
+                "ok": false,
+                "error": error,
+            },
         }),
     )?
     .with_no_store())
@@ -16903,6 +17065,16 @@ fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn project_uses_database_runtime(root: &Path) -> Result<bool> {
+    let mut sources = Vec::new();
+    collect_backend_sources(root, &mut sources)?;
+    let source_refs = sources
+        .iter()
+        .map(|(_, source)| source.as_str())
+        .collect::<Vec<_>>();
+    backend_source_refs_use_database(&source_refs)
 }
 
 fn reject_cross_site_action_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
@@ -19170,6 +19342,7 @@ mod tests {
             root: root.to_path_buf(),
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::default(),
+            database_required: project_uses_database_runtime(root).unwrap_or(false),
         }
     }
 
@@ -21337,6 +21510,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "GET".to_string(),
@@ -21398,6 +21572,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "GET".to_string(),
@@ -21424,6 +21599,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "GET".to_string(),
@@ -23229,6 +23405,7 @@ action ValidPost
                 import_sources: Vec::new(),
             }],
             "",
+            true,
         );
 
         assert!(source.contains("backend::dispatch_api_route"));
@@ -23246,6 +23423,9 @@ action ValidPost
         assert!(source.contains("let runtime = Arc::new(lazy_runtime_from_env"));
         assert_eq!(source.matches("lazy_runtime_from_env(env)").count(), 1);
         assert!(source.contains("handle_request(&dist, runtime.as_ref(), request)"));
+        assert!(source.contains("const DATABASE_REQUIRED: bool = true"));
+        assert!(source.contains("/__axonyx/ready"));
+        assert!(source.contains("AxQueryExecutor::database_health(runtime)"));
         assert!(source.contains("cross_site_action_request"));
         assert!(source.contains("safe_action_route"));
         assert!(source.contains("path.starts_with(\"//\")"));
@@ -24936,7 +25116,7 @@ axonyx-runtime = "0.1.14"
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-health"
                 && check.severity == DoctorSeverity::Ok
-                && check.hint == Some("Health check path: /__axonyx/health")
+                && check.hint == Some("Health check path: /__axonyx/ready")
         }));
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-melt" && check.message.contains("1 page route")
@@ -25277,6 +25457,7 @@ axonyx-runtime = "0.1.0"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "PUT".to_string(),
@@ -25320,6 +25501,116 @@ axonyx-runtime = "0.1.0"
         assert_eq!(body["ok"], true);
         assert_eq!(body["service"], "axonyx");
         assert_eq!(body["mode"], "start");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn readiness_endpoint_skips_database_for_static_apps() {
+        let root = make_temp_dir("readiness-static");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/__axonyx/ready?probe=1".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+        let status = response.status;
+        let cache_control = response.header_value("Cache-Control").map(str::to_string);
+        let body = serde_json::from_slice::<serde_json::Value>(&response.body.into_bytes())
+            .expect("readiness response should be json");
+
+        assert_eq!(status, 200);
+        assert_eq!(cache_control.as_deref(), Some("no-store"));
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["database"]["required"], false);
+        assert_eq!(body["database"]["ok"], true);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn readiness_endpoint_probes_required_sqlite_without_exposing_url() {
+        let root = make_temp_dir("readiness-sqlite");
+        fs::create_dir_all(root.join("routes").join("api")).expect("api directory should create");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("routes").join("api").join("posts.ax"),
+            "route GET \"/api/posts\"\n  data posts = db.posts.all()\n  return posts\n",
+        )
+        .expect("database route should write");
+        let db_path = root.join("ready.sqlite");
+        fs::write(
+            root.join(".env"),
+            format!(
+                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\n",
+                db_path.display()
+            ),
+        )
+        .expect("database env should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/__axonyx/ready".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+        let status = response.status;
+        let body_bytes = response.body.into_bytes();
+        let body = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+            .expect("readiness response should be json");
+
+        assert_eq!(status, 200);
+        assert_eq!(body["database"]["required"], true);
+        assert_eq!(body["database"]["ok"], true);
+        assert_eq!(body["database"]["driver"], "sqlite");
+        assert_eq!(body["database"]["probe"], "query");
+        assert!(!String::from_utf8_lossy(&body_bytes).contains(&db_path.display().to_string()));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn readiness_endpoint_returns_safe_503_when_required_database_is_unavailable() {
+        let root = make_temp_dir("readiness-unavailable");
+        fs::create_dir_all(root.join("routes").join("api")).expect("api directory should create");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("routes").join("api").join("posts.ax"),
+            "route GET \"/api/posts\"\n  data posts = db.posts.all()\n  return posts\n",
+        )
+        .expect("database route should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/__axonyx/ready".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+        let status = response.status;
+        let body_bytes = response.body.into_bytes();
+        let body = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+            .expect("readiness response should be json");
+
+        assert_eq!(status, 503);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["database"]["required"], true);
+        assert_eq!(body["database"]["ok"], false);
+        assert_eq!(body["database"]["error"]["code"], "db.unavailable");
+        assert!(!String::from_utf8_lossy(&body_bytes).contains("AX_SECRET_DB_URL"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -25391,6 +25682,7 @@ axonyx-runtime = "0.1.0"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "GET".to_string(),

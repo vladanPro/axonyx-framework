@@ -158,7 +158,8 @@ Expected result:
 - UI imports resolve through the package model
 - package CSS is available through `/_ax/pkg/axonyx-ui/index.css`
 - health probe returns JSON from `GET /__axonyx/health`
-- Render deploy doctor reports `/__axonyx/health` as the health-check path
+- readiness probe returns JSON from `GET /__axonyx/ready`
+- Render deploy doctor reports `/__axonyx/ready` as the health-check path
 - server request timeout resolves through `[server].request_timeout_seconds`
 - server shutdown grace resolves through `[server].shutdown_grace_seconds`
 - server max connections resolves through `[server].max_connections`
