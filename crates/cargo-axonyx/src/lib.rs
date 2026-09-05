@@ -1524,6 +1524,12 @@ struct DbSchemaColumn {
     ty: String,
     #[serde(default)]
     ax_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_type_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_type_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    enum_values: Vec<String>,
     nullable: bool,
     primary_key: bool,
     default: Option<String>,
@@ -2834,7 +2840,7 @@ fn pull_sqlite_schema(
     let tables = sqlite_schema_tables(&connection)?;
 
     Ok(finalize_db_schema_manifest(DbSchemaManifest {
-        version: 2,
+        version: 3,
         driver: config.driver.as_str().to_string(),
         transport: config.transport.as_str().to_string(),
         url: config.url.clone().map(|url| redact_db_url(&url)),
@@ -2860,7 +2866,7 @@ fn pull_postgres_schema(
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
     Ok(finalize_db_schema_manifest(DbSchemaManifest {
-        version: 2,
+        version: 3,
         driver: config.driver.as_str().to_string(),
         transport: config.transport.as_str().to_string(),
         url: config.url.clone().map(|url| redact_db_url(&url)),
@@ -2875,7 +2881,32 @@ select
   c.table_name,
   case when t.table_type = 'VIEW' then 'view' else 'table' end as resource_kind,
   c.column_name,
-  case when c.data_type = 'USER-DEFINED' then c.udt_name else c.data_type end as data_type,
+  case
+    when c.data_type = 'ARRAY' then element_type.typname || '[]'
+    when c.data_type = 'USER-DEFINED' then c.udt_name
+    else c.data_type
+  end as data_type,
+  case
+    when c.domain_name is not null then 'domain'
+    when c.data_type = 'ARRAY' and element_type.typtype = 'e' then 'enum_array'
+    when c.data_type = 'ARRAY' then 'array'
+    when column_type.typtype = 'e' then 'enum'
+    else 'scalar'
+  end as db_type_kind,
+  case
+    when c.domain_name is not null then c.domain_name
+    when c.data_type = 'ARRAY' and element_type.typtype = 'e' then element_type.typname
+    when column_type.typtype = 'e' then column_type.typname
+    else null
+  end as db_type_name,
+  coalesce((
+    select json_agg(enum_label.enumlabel order by enum_label.enumsortorder)
+    from pg_catalog.pg_enum enum_label
+    where enum_label.enumtypid = case
+      when c.data_type = 'ARRAY' then element_type.oid
+      else column_type.oid
+    end
+  ), '[]'::json) as enum_values,
   (c.is_nullable = 'YES') as nullable,
   c.column_default,
   exists (
@@ -2894,6 +2925,13 @@ from information_schema.columns c
 join information_schema.tables t
   on t.table_schema = c.table_schema
   and t.table_name = c.table_name
+left join pg_catalog.pg_namespace column_namespace
+  on column_namespace.nspname = c.udt_schema
+left join pg_catalog.pg_type column_type
+  on column_type.typname = c.udt_name
+  and column_type.typnamespace = column_namespace.oid
+left join pg_catalog.pg_type element_type
+  on element_type.oid = column_type.typelem
 where c.table_schema = 'public'
   and t.table_type in ('BASE TABLE', 'VIEW')
   and c.table_name <> '_axonyx_migrations'
@@ -2914,10 +2952,38 @@ fn postgres_schema_tables_from_value(value: &serde_json::Value) -> Result<Vec<Db
             .unwrap_or("table")
             .to_string();
         let sql_type = postgres_schema_string(row, "data_type")?;
+        let db_type_kind = row
+            .get("db_type_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("scalar")
+            .to_string();
+        let db_type_name = row
+            .get("db_type_name")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let enum_values = row
+            .get("enum_values")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let column = DbSchemaColumn {
             name: postgres_schema_string(row, "column_name")?,
-            ax_type: database_ax_type("postgres", &sql_type),
+            ax_type: database_column_ax_type(
+                "postgres",
+                &sql_type,
+                &db_type_kind,
+                db_type_name.as_deref(),
+            ),
             ty: sql_type,
+            db_type_kind: Some(db_type_kind),
+            db_type_name,
+            enum_values,
             nullable: row
                 .get("nullable")
                 .and_then(serde_json::Value::as_bool)
@@ -2994,6 +3060,9 @@ fn sqlite_schema_columns(
                 name: row.get(1)?,
                 ax_type: database_ax_type("sqlite", &sql_type),
                 ty: sql_type,
+                db_type_kind: None,
+                db_type_name: None,
+                enum_values: Vec::new(),
                 nullable: !not_null && !primary_key,
                 default: row.get(4)?,
                 primary_key,
@@ -3013,7 +3082,12 @@ fn finalize_db_schema_manifest(mut schema: DbSchemaManifest) -> DbSchemaManifest
         }
         for column in &mut table.columns {
             if column.ax_type.is_empty() {
-                column.ax_type = database_ax_type(&schema.driver, &column.ty);
+                column.ax_type = database_column_ax_type(
+                    &schema.driver,
+                    &column.ty,
+                    column.db_type_kind.as_deref().unwrap_or("scalar"),
+                    column.db_type_name.as_deref(),
+                );
             }
         }
     }
@@ -3039,7 +3113,7 @@ fn read_db_schema_manifest(root: &Path) -> Result<Option<DbSchemaManifest>> {
 
 fn db_schema_hash(tables: &[DbSchemaTable]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"axonyx-db-schema-v2\0");
+    hasher.update(b"axonyx-db-schema-v3\0");
     hasher.update(serde_json::to_vec(tables).expect("database schema tables should serialize"));
     format!("sha256:{:x}", hasher.finalize())
 }
@@ -3061,6 +3135,7 @@ fn database_ax_type(driver: &str, sql_type: &str) -> String {
         "bool" | "boolean" => "Bool",
         "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "int2" | "int4"
         | "int8" | "serial" | "bigserial" | "smallserial" => "Int",
+        "numeric" | "decimal" if driver == "postgres" => "Decimal",
         "real" | "float" | "float4" | "float8" | "double" | "double precision" | "numeric"
         | "decimal" => "Float",
         "date" => "Date",
@@ -3092,8 +3167,51 @@ fn database_ax_type(driver: &str, sql_type: &str) -> String {
     base.to_string()
 }
 
+fn database_column_ax_type(
+    driver: &str,
+    sql_type: &str,
+    db_type_kind: &str,
+    db_type_name: Option<&str>,
+) -> String {
+    match db_type_kind {
+        "enum" => db_type_name
+            .map(sanitize_type_name)
+            .unwrap_or_else(|| database_ax_type(driver, sql_type)),
+        "enum_array" => db_type_name
+            .map(|name| format!("List<{}>", sanitize_type_name(name)))
+            .unwrap_or_else(|| database_ax_type(driver, sql_type)),
+        _ => database_ax_type(driver, sql_type),
+    }
+}
+
+fn db_schema_enum_types(
+    schema: &DbSchemaManifest,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut enums = std::collections::BTreeMap::new();
+    for column in schema.tables.iter().flat_map(|table| &table.columns) {
+        if !matches!(column.db_type_kind.as_deref(), Some("enum" | "enum_array")) {
+            continue;
+        }
+        let Some(name) = column.db_type_name.as_deref() else {
+            continue;
+        };
+        enums
+            .entry(sanitize_type_name(name))
+            .or_insert_with(|| column.enum_values.clone());
+    }
+    enums
+}
+
 fn render_db_schema_types(schema: &DbSchemaManifest) -> String {
     let mut output = String::new();
+    for (name, values) in db_schema_enum_types(schema) {
+        let values = values
+            .iter()
+            .map(|value| serde_json::to_string(value).expect("enum labels should serialize"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        output.push_str(&format!("export type {name} = {values}\n\n"));
+    }
     for table in &schema.tables {
         output.push_str(&format!("export type {} {{\n", table.record));
         for column in &table.columns {
@@ -3144,6 +3262,28 @@ fn db_column_is_optional_on_insert(schema: &DbSchemaManifest, column: &DbSchemaC
 }
 
 fn validate_db_schema_types(schema: &DbSchemaManifest) -> Result<()> {
+    let mut enum_contracts = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for column in schema.tables.iter().flat_map(|table| &table.columns) {
+        if !matches!(column.db_type_kind.as_deref(), Some("enum" | "enum_array")) {
+            continue;
+        }
+        let name = column.db_type_name.as_deref().with_context(|| {
+            format!(
+                "Postgres enum column `{}` is missing its database type name",
+                column.name
+            )
+        })?;
+        if column.enum_values.is_empty() {
+            bail!("Postgres enum type `{name}` does not expose any labels");
+        }
+        let contract_name = sanitize_type_name(name);
+        if let Some(existing) = enum_contracts.insert(contract_name, column.enum_values.clone()) {
+            if existing != column.enum_values {
+                bail!("Postgres enum type `{name}` has inconsistent labels across columns");
+            }
+        }
+    }
+
     let mut records = std::collections::BTreeSet::new();
     for table in &schema.tables {
         if !is_backend_identifier_like(&table.name) {
@@ -22742,6 +22882,39 @@ sqlite_busy_timeout_ms = 700
                 "nullable": true,
                 "column_default": null,
                 "primary_key": false
+            },
+            {
+                "table_name": "posts",
+                "column_name": "amount",
+                "data_type": "numeric",
+                "db_type_kind": "domain",
+                "db_type_name": "money_amount",
+                "enum_values": [],
+                "nullable": false,
+                "column_default": null,
+                "primary_key": false
+            },
+            {
+                "table_name": "posts",
+                "column_name": "status",
+                "data_type": "post_status",
+                "db_type_kind": "enum",
+                "db_type_name": "post_status",
+                "enum_values": ["draft", "published"],
+                "nullable": false,
+                "column_default": "'draft'::post_status",
+                "primary_key": false
+            },
+            {
+                "table_name": "posts",
+                "column_name": "history",
+                "data_type": "post_status[]",
+                "db_type_kind": "enum_array",
+                "db_type_name": "post_status",
+                "enum_values": ["draft", "published"],
+                "nullable": false,
+                "column_default": null,
+                "primary_key": false
             }
         ]))
         .expect("postgres rows should map");
@@ -22752,6 +22925,28 @@ sqlite_busy_timeout_ms = 700
         assert_eq!(tables[0].columns[0].ty, "uuid");
         assert!(tables[0].columns[0].primary_key);
         assert!(tables[0].columns[1].nullable);
+        assert_eq!(tables[0].columns[2].ax_type, "Decimal");
+        assert_eq!(
+            tables[0].columns[2].db_type_name.as_deref(),
+            Some("money_amount")
+        );
+        assert_eq!(tables[0].columns[3].ax_type, "PostStatus");
+        assert_eq!(tables[0].columns[4].ax_type, "List<PostStatus>");
+
+        let schema = finalize_db_schema_manifest(DbSchemaManifest {
+            version: 3,
+            driver: "postgres".to_string(),
+            transport: "direct".to_string(),
+            url: None,
+            schema_hash: String::new(),
+            types_path: default_db_types_path(),
+            tables,
+        });
+        validate_db_schema_types(&schema).expect("Postgres scalar contracts should validate");
+        let generated = render_db_schema_types(&schema);
+        assert!(generated.contains("export type PostStatus = \"draft\" | \"published\""));
+        assert!(generated.contains("  amount: Decimal"));
+        assert!(generated.contains("  history: List<PostStatus>"));
     }
 
     #[test]
@@ -22760,6 +22955,34 @@ sqlite_busy_timeout_ms = 700
             return;
         };
         let root = make_temp_dir("db-postgres-live");
+        let suffix = std::process::id();
+        let table_name = format!("axonyx_schema_test_{suffix}");
+        let status_type = format!("axonyx_schema_status_{suffix}");
+        let price_domain = format!("axonyx_schema_price_{suffix}");
+        let migration = ax_backend_runtime::AxMigration {
+            version: format!("99999997_{suffix}"),
+            name: "postgres_scalar_schema".to_string(),
+            checksum: "e".repeat(64),
+            up_sql: format!(
+                "create type \"{status_type}\" as enum ('draft', 'published');
+                 create domain \"{price_domain}\" as numeric(38, 12) check (value >= 0);
+                 create table \"{table_name}\" (
+                   id uuid primary key,
+                   amount numeric(38, 12) not null,
+                   price \"{price_domain}\" not null,
+                   status \"{status_type}\" not null,
+                   history \"{status_type}\"[] not null,
+                   tags text[] not null,
+                   published_at timestamptz,
+                   metadata jsonb
+                 );"
+            ),
+            down_sql: format!(
+                "drop table \"{table_name}\";
+                 drop domain \"{price_domain}\";
+                 drop type \"{status_type}\";"
+            ),
+        };
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
 
@@ -22774,15 +22997,65 @@ sqlite_busy_timeout_ms = 700
             assert!(reported_url.contains("<redacted>"));
         }
 
-        let pull = collect_db_pull_report(
-            &root,
-            Some(&url),
-            Path::new(".axonyx/db/postgres-schema.json"),
-            Path::new("app/generated/postgres-db.ax"),
+        let runtime = ax_backend_runtime::runtime_from_env(
+            ax_backend_runtime::AxEnv::new()
+                .with_secret("db_dialect", "postgres")
+                .with_secret("db_url", &url),
         )
-        .expect("live postgres pull should succeed");
-        assert_eq!(pull.schema.driver, "postgres");
-        assert!(root.join(".axonyx/db/postgres-schema.json").exists());
+        .expect("Postgres schema test runtime should initialize");
+        ax_backend_runtime::AxMigrationExecutor::apply_migration(&runtime, &migration)
+            .expect("Postgres scalar fixture should apply");
+
+        let result = (|| -> Result<()> {
+            let pull = collect_db_pull_report(
+                &root,
+                Some(&url),
+                Path::new(".axonyx/db/postgres-schema.json"),
+                Path::new("app/generated/postgres-db.ax"),
+            )?;
+            assert_eq!(pull.schema.driver, "postgres");
+            assert_eq!(pull.schema.version, 3);
+            assert!(root.join(".axonyx/db/postgres-schema.json").exists());
+
+            let table = pull
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_name)
+                .context("pulled schema should contain the scalar fixture")?;
+            let column = |name: &str| {
+                table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == name)
+                    .unwrap_or_else(|| panic!("fixture should expose column `{name}`"))
+            };
+            assert_eq!(column("amount").ax_type, "Decimal");
+            assert_eq!(column("price").ax_type, "Decimal");
+            assert_eq!(column("price").db_type_kind.as_deref(), Some("domain"));
+            assert_eq!(
+                column("price").db_type_name.as_deref(),
+                Some(price_domain.as_str())
+            );
+            let enum_contract = sanitize_type_name(&status_type);
+            assert_eq!(column("status").ax_type, enum_contract);
+            assert_eq!(column("status").enum_values, ["draft", "published"]);
+            assert_eq!(column("history").ax_type, format!("List<{enum_contract}>"));
+            assert_eq!(column("tags").ax_type, "List<String>");
+            assert_eq!(column("published_at").ax_type, "DateTime");
+            assert_eq!(column("metadata").ax_type, "Json");
+
+            let generated = fs::read_to_string(root.join("app/generated/postgres-db.ax"))?;
+            assert!(generated.contains(&format!(
+                "export type {enum_contract} = \"draft\" | \"published\""
+            )));
+            assert!(generated.contains("amount: Decimal"));
+            Ok(())
+        })();
+
+        ax_backend_runtime::AxMigrationExecutor::rollback_migration(&runtime, &migration)
+            .expect("Postgres scalar fixture should roll back");
+        result.expect("live postgres pull should succeed");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -22817,7 +23090,7 @@ sqlite_busy_timeout_ms = 700
 
         let schema_path = root.join(".axonyx/db/schema.json");
         assert!(report.ok);
-        assert_eq!(report.schema.version, 2);
+        assert_eq!(report.schema.version, 3);
         assert_eq!(report.schema.driver, "sqlite");
         assert!(report.schema.schema_hash.starts_with("sha256:"));
         assert_eq!(report.schema.tables.len(), 1);
@@ -23055,6 +23328,8 @@ action ValidPost
         assert_eq!(database_ax_type("postgres", "boolean"), "Bool");
         assert_eq!(database_ax_type("postgres", "uuid"), "Uuid");
         assert_eq!(database_ax_type("postgres", "jsonb"), "Json");
+        assert_eq!(database_ax_type("postgres", "numeric"), "Decimal");
+        assert_eq!(database_ax_type("postgres", "numeric[]"), "List<Decimal>");
         assert_eq!(database_ax_type("postgres", "text[]"), "List<String>");
     }
 
