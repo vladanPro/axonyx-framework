@@ -958,6 +958,8 @@ struct RegistryItemReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ApiReport {
+    version: u32,
+    contract_hash: String,
     routes: Vec<ApiRouteReport>,
     schemas: Vec<ApiSchemaReport>,
 }
@@ -966,6 +968,8 @@ struct ApiReport {
 struct ApiRouteReport {
     method: String,
     route: String,
+    request_hash: String,
+    response_hash: String,
     returns: Option<String>,
     responses: Vec<ApiResponseReport>,
     auth: Vec<ApiAuthReport>,
@@ -4178,12 +4182,14 @@ fn doctor_api_contracts_check(root: &Path) -> DoctorCheck {
                 code: "api-contracts",
                 severity: DoctorSeverity::Ok,
                 message: format!(
-                    "{} API route{}, {} typed, {} auth-guarded, {} with response metadata; OpenAPI export ready.",
+                    "{} API route{}, {} typed, {} auth-guarded, {} with response metadata; contract v{} {}, OpenAPI export ready.",
                     routes,
                     if routes == 1 { "" } else { "s" },
                     typed,
                     auth_guarded,
-                    with_response_metadata
+                    with_response_metadata,
+                    report.version,
+                    report.contract_hash
                 ),
                 hint: None,
             }
@@ -6362,6 +6368,8 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
         .map(|route| ApiRouteReport {
             method: route.method.unwrap_or_else(|| "*".to_string()),
             route: route.route,
+            request_hash: String::new(),
+            response_hash: String::new(),
             returns: route.returns,
             responses: route.responses,
             auth: route.auth,
@@ -6372,10 +6380,139 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
         })
         .collect();
 
+    finalize_api_report(routes, collect_project_type_schemas(root)?)
+}
+
+fn finalize_api_report(
+    mut routes: Vec<ApiRouteReport>,
+    schemas: Vec<ApiSchemaReport>,
+) -> Result<ApiReport> {
+    for route in &mut routes {
+        route.request_hash = api_route_request_hash(route, &schemas)?;
+        route.response_hash = api_route_response_hash(route, &schemas)?;
+    }
+
+    let mut canonical_routes = routes.iter().collect::<Vec<_>>();
+    canonical_routes
+        .sort_by(|left, right| (&left.method, &left.route).cmp(&(&right.method, &right.route)));
+    let route_contracts = canonical_routes
+        .iter()
+        .map(|route| {
+            serde_json::json!({
+                "method": route.method,
+                "route": route.route,
+                "requestHash": route.request_hash,
+                "responseHash": route.response_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    let canonical_schemas = canonical_api_schemas(schemas.clone());
+    let contract_hash = api_contract_hash(
+        b"axonyx-api-v1\0",
+        &serde_json::json!({
+            "routes": route_contracts,
+            "schemas": canonical_schemas,
+        }),
+    )?;
+
     Ok(ApiReport {
+        version: 1,
+        contract_hash,
         routes,
-        schemas: collect_project_type_schemas(root)?,
+        schemas,
     })
+}
+
+fn api_route_request_hash(route: &ApiRouteReport, schemas: &[ApiSchemaReport]) -> Result<String> {
+    let mut inputs = route.inputs.clone();
+    inputs.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut auth = route.auth.clone();
+    auth.sort_by(|left, right| left.scheme.cmp(right.scheme));
+    let referenced = referenced_api_schemas(inputs.iter().map(|input| input.ty.as_str()), schemas);
+
+    api_contract_hash(
+        b"axonyx-api-request-v1\0",
+        &serde_json::json!({
+            "method": route.method,
+            "route": route.route,
+            "params": route.params,
+            "auth": auth,
+            "inputs": inputs,
+            "schemas": referenced,
+        }),
+    )
+}
+
+fn api_route_response_hash(route: &ApiRouteReport, schemas: &[ApiSchemaReport]) -> Result<String> {
+    let mut responses = route.responses.clone();
+    responses.sort_by_key(|response| response.status);
+    let referenced = referenced_api_schemas(route.returns.iter().map(String::as_str), schemas);
+
+    api_contract_hash(
+        b"axonyx-api-response-v1\0",
+        &serde_json::json!({
+            "returns": route.returns,
+            "responses": responses,
+            "schemas": referenced,
+        }),
+    )
+}
+
+fn referenced_api_schemas<'a>(
+    types: impl IntoIterator<Item = &'a str>,
+    schemas: &[ApiSchemaReport],
+) -> Vec<ApiSchemaReport> {
+    let by_name = schemas
+        .iter()
+        .map(|schema| (schema.name.as_str(), schema))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut pending = types
+        .into_iter()
+        .flat_map(backend_return_contract_named_types)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut names = std::collections::BTreeSet::new();
+
+    while let Some(name) = pending.pop() {
+        if !names.insert(name.clone()) {
+            continue;
+        }
+        let Some(schema) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        pending.extend(
+            schema
+                .fields
+                .iter()
+                .flat_map(|field| backend_return_contract_named_types(&field.ty))
+                .map(str::to_string),
+        );
+    }
+
+    canonical_api_schemas(
+        names
+            .into_iter()
+            .filter_map(|name| by_name.get(name.as_str()).map(|schema| (*schema).clone()))
+            .collect(),
+    )
+}
+
+fn canonical_api_schemas(mut schemas: Vec<ApiSchemaReport>) -> Vec<ApiSchemaReport> {
+    for schema in &mut schemas {
+        schema
+            .fields
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        schema.literals.sort();
+    }
+    schemas.sort_by(|left, right| left.name.cmp(&right.name));
+    schemas
+}
+
+fn api_contract_hash(domain: &[u8], value: &impl Serialize) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(serde_json::to_vec(value)?);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn collect_action_report(root: &Path) -> Result<ActionReport> {
@@ -14463,12 +14600,14 @@ fn print_api_text(report: &ApiReport) {
         return;
     }
 
-    println!("API:");
+    println!("API contract v{} {}:", report.version, report.contract_hash);
     for route in &report.routes {
         let mut details = vec![format!("file={}", route.file)];
         if let Some(returns) = &route.returns {
             details.push(format!("returns={returns}"));
         }
+        details.push(format!("requestHash={}", route.request_hash));
+        details.push(format!("responseHash={}", route.response_hash));
         if !route.responses.is_empty() {
             details.push(format!(
                 "responses={}",
@@ -14523,6 +14662,8 @@ fn print_api_schema_text(report: &ApiReport) {
 
     for route in &report.routes {
         println!("// {} {}", route.method, route.route);
+        println!("// request-hash: {}", route.request_hash);
+        println!("// response-hash: {}", route.response_hash);
         if let Some(returns) = &route.returns {
             println!("// response: {}", ax_return_schema_type(returns));
         }
@@ -14574,6 +14715,8 @@ fn api_report_openapi_value(report: &ApiReport) -> serde_json::Value {
 
     let mut document = serde_json::json!({
         "openapi": "3.1.0",
+        "x-axonyx-contract-version": report.version,
+        "x-axonyx-contract-hash": report.contract_hash,
         "info": {
             "title": "Axonyx API",
             "version": "0.1.0"
@@ -14606,6 +14749,14 @@ fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
     operation.insert(
         "operationId".to_string(),
         serde_json::Value::String(api_route_type_name(route)),
+    );
+    operation.insert(
+        "x-axonyx-request-hash".to_string(),
+        serde_json::Value::String(route.request_hash.clone()),
+    );
+    operation.insert(
+        "x-axonyx-response-hash".to_string(),
+        serde_json::Value::String(route.response_hash.clone()),
     );
 
     let parameters = openapi_parameters_for_route(route);
@@ -20450,10 +20601,12 @@ route DELETE "/api/posts/:slug"
 
     #[test]
     fn api_report_can_render_openapi_document() {
-        let report = ApiReport {
-            routes: vec![ApiRouteReport {
+        let report = finalize_api_report(
+            vec![ApiRouteReport {
                 method: "POST".to_string(),
                 route: "/api/posts/:slug".to_string(),
+                request_hash: String::new(),
+                response_hash: String::new(),
                 returns: Some("Post[]".to_string()),
                 responses: vec![ApiResponseReport {
                     status: 404,
@@ -20478,7 +20631,7 @@ route DELETE "/api/posts/:slug"
                 ],
                 hooks: Vec::new(),
             }],
-            schemas: vec![ApiSchemaReport {
+            vec![ApiSchemaReport {
                 name: "Post".to_string(),
                 literals: Vec::new(),
                 fields: vec![
@@ -20494,13 +20647,24 @@ route DELETE "/api/posts/:slug"
                     },
                 ],
             }],
-        };
+        )
+        .expect("API hashes should build");
 
         let value = api_report_openapi_value(&report);
 
         assert_eq!(value["openapi"], "3.1.0");
+        assert_eq!(value["x-axonyx-contract-version"], 1);
+        assert_eq!(value["x-axonyx-contract-hash"], report.contract_hash);
         let operation = &value["paths"]["/api/posts/{slug}"]["post"];
         assert_eq!(operation["operationId"], "PostApiPostsSlug");
+        assert_eq!(
+            operation["x-axonyx-request-hash"],
+            report.routes[0].request_hash
+        );
+        assert_eq!(
+            operation["x-axonyx-response-hash"],
+            report.routes[0].response_hash
+        );
         assert_eq!(operation["parameters"][0]["name"], "slug");
         assert_eq!(
             operation["requestBody"]["content"]["application/json"]["schema"]["required"][0],
@@ -20528,6 +20692,117 @@ route DELETE "/api/posts/:slug"
             .expect("required should be array")
             .iter()
             .all(|field| field != "summary"));
+    }
+
+    #[test]
+    fn api_contract_hashes_are_stable_and_schema_sensitive() {
+        let route = ApiRouteReport {
+            method: "GET".to_string(),
+            route: "/api/posts".to_string(),
+            request_hash: String::new(),
+            response_hash: String::new(),
+            returns: Some("Post[]".to_string()),
+            responses: vec![ApiResponseReport {
+                status: 404,
+                description: "Not Found",
+            }],
+            auth: vec![ApiAuthReport {
+                scheme: "signedSession",
+            }],
+            file: "routes/api/posts.ax".to_string(),
+            params: Vec::new(),
+            inputs: vec![ActionInputReport {
+                name: "status".to_string(),
+                ty: "string".to_string(),
+                optional: true,
+                default: Some("published".to_string()),
+            }],
+            hooks: Vec::new(),
+        };
+        let schemas = vec![
+            ApiSchemaReport {
+                name: "Post".to_string(),
+                fields: vec![
+                    ApiSchemaFieldReport {
+                        name: "title".to_string(),
+                        ty: "String".to_string(),
+                        optional: false,
+                    },
+                    ApiSchemaFieldReport {
+                        name: "author".to_string(),
+                        ty: "Author".to_string(),
+                        optional: false,
+                    },
+                ],
+                literals: Vec::new(),
+            },
+            ApiSchemaReport {
+                name: "Author".to_string(),
+                fields: vec![ApiSchemaFieldReport {
+                    name: "name".to_string(),
+                    ty: "String".to_string(),
+                    optional: false,
+                }],
+                literals: Vec::new(),
+            },
+        ];
+        let first = finalize_api_report(vec![route.clone()], schemas.clone())
+            .expect("initial API hashes should build");
+
+        let mut moved_route = route.clone();
+        moved_route.file = "routes/v2/posts.ax".to_string();
+        let mut reordered_schemas = schemas.clone();
+        reordered_schemas.reverse();
+        reordered_schemas
+            .iter_mut()
+            .find(|schema| schema.name == "Post")
+            .expect("Post schema should exist")
+            .fields
+            .reverse();
+        let reordered = finalize_api_report(vec![moved_route], reordered_schemas)
+            .expect("reordered API hashes should build");
+
+        assert_eq!(first.contract_hash, reordered.contract_hash);
+        assert_eq!(
+            first.routes[0].request_hash,
+            reordered.routes[0].request_hash
+        );
+        assert_eq!(
+            first.routes[0].response_hash,
+            reordered.routes[0].response_hash
+        );
+        assert!(first.contract_hash.starts_with("sha256:"));
+
+        let mut changed_schemas = schemas.clone();
+        changed_schemas
+            .iter_mut()
+            .find(|schema| schema.name == "Author")
+            .expect("Author schema should exist")
+            .fields[0]
+            .optional = true;
+        let changed = finalize_api_report(vec![route.clone()], changed_schemas)
+            .expect("changed API hashes should build");
+
+        assert_eq!(first.routes[0].request_hash, changed.routes[0].request_hash);
+        assert_ne!(
+            first.routes[0].response_hash,
+            changed.routes[0].response_hash
+        );
+        assert_ne!(first.contract_hash, changed.contract_hash);
+
+        let mut changed_route = route;
+        changed_route.inputs[0].default = Some("draft".to_string());
+        let changed_request = finalize_api_report(vec![changed_route], schemas)
+            .expect("changed request hashes should build");
+
+        assert_ne!(
+            first.routes[0].request_hash,
+            changed_request.routes[0].request_hash
+        );
+        assert_eq!(
+            first.routes[0].response_hash,
+            changed_request.routes[0].response_hash
+        );
     }
 
     #[test]
