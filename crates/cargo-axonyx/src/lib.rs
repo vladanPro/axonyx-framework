@@ -8786,22 +8786,63 @@ fn collect_db_surface_diagnostics_from_stmts(
                             diagnostics,
                         );
                         if !unknown {
+                            for join in &query.joins {
+                                let target_unknown = collect_db_resource_diagnostic(
+                                    path,
+                                    source,
+                                    &join.collection,
+                                    resources,
+                                    diagnostics,
+                                );
+                                for column in &join.columns {
+                                    collect_db_field_diagnostic(
+                                        path,
+                                        source,
+                                        collection,
+                                        &column.source,
+                                        resources,
+                                        diagnostics,
+                                    );
+                                    if !target_unknown {
+                                        collect_db_field_diagnostic(
+                                            path,
+                                            source,
+                                            &join.collection,
+                                            &column.target,
+                                            resources,
+                                            diagnostics,
+                                        );
+                                    }
+                                }
+                                if !target_unknown {
+                                    collect_db_join_contract_diagnostic(
+                                        path,
+                                        source,
+                                        collection,
+                                        join,
+                                        resources,
+                                        diagnostics,
+                                    );
+                                }
+                            }
                             for filter in &query.filters {
-                                collect_db_field_diagnostic(
+                                collect_db_query_field_diagnostic(
                                     path,
                                     source,
                                     collection,
                                     &filter.field,
+                                    &query.joins,
                                     resources,
                                     diagnostics,
                                 );
                             }
                             for order in &query.orders {
-                                collect_db_field_diagnostic(
+                                collect_db_query_field_diagnostic(
                                     path,
                                     source,
                                     collection,
                                     &order.field,
+                                    &query.joins,
                                     resources,
                                     diagnostics,
                                 );
@@ -9260,6 +9301,99 @@ fn collect_db_field_diagnostic(
     });
 }
 
+fn collect_db_query_field_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    field: &str,
+    joins: &[axonyx_core::ax_query_ast_prelude::AxQueryJoin],
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some((qualifier, field_name)) = field.split_once('.') else {
+        collect_db_field_diagnostic(path, source, resource, field, resources, diagnostics);
+        return;
+    };
+    if qualifier == resource
+        || joins
+            .iter()
+            .any(|join| join.collection.as_str() == qualifier)
+    {
+        collect_db_field_diagnostic(path, source, qualifier, field_name, resources, diagnostics);
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, field),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-query-qualifier",
+        message: format!(
+            "query field `{field}` references `{qualifier}`, but that resource is not the query source or an explicit join"
+        ),
+    });
+}
+
+fn collect_db_join_contract_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    join: &axonyx_core::ax_query_ast_prelude::AxQueryJoin,
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(contract) = resources.get(resource) else {
+        return;
+    };
+    let Some(relations) = &contract.relations else {
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_source_pattern(source, &format!("join(db.{}", join.collection)),
+            column: 1,
+            severity: "error",
+            code: "axonyx-db-relation",
+            message: format!(
+                "typed join `db.{resource}` -> `db.{}` requires a pulled database schema; run `cargo ax db pull`",
+                join.collection
+            ),
+        });
+        return;
+    };
+    let mut requested_pairs = join
+        .columns
+        .iter()
+        .map(|column| (column.source.as_str(), column.target.as_str()))
+        .collect::<Vec<_>>();
+    requested_pairs.sort_unstable();
+    if relations.iter().any(|relation| {
+        let mut relation_pairs = relation
+            .columns
+            .iter()
+            .zip(&relation.target_columns)
+            .map(|(source, target)| (source.as_str(), target.as_str()))
+            .collect::<Vec<_>>();
+        relation_pairs.sort_unstable();
+        relation.target_schema == "public"
+            && relation.target_table == join.collection
+            && relation_pairs == requested_pairs
+    }) {
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, &format!("join(db.{}", join.collection)),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-relation",
+        message: format!(
+            "typed join `db.{resource}` -> `db.{}` does not match a pulled foreign-key contract",
+            join.collection
+        ),
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_db_value_type_diagnostic(
     path: &Path,
@@ -9428,6 +9562,15 @@ struct DbResourceContract {
     kind: String,
     record: String,
     columns: Option<std::collections::BTreeMap<String, DbColumnContract>>,
+    relations: Option<Vec<DbRelationContract>>,
+}
+
+#[derive(Debug, Clone)]
+struct DbRelationContract {
+    columns: Vec<String>,
+    target_schema: String,
+    target_table: String,
+    target_columns: Vec<String>,
 }
 
 fn collect_db_required_insert_diagnostics(
@@ -9494,6 +9637,16 @@ fn collect_project_database_resources(root: &Path) -> Result<DbResourceCatalog> 
                 .tables
                 .into_iter()
                 .map(|table| {
+                    let relations = table
+                        .relations
+                        .into_iter()
+                        .map(|relation| DbRelationContract {
+                            columns: relation.columns,
+                            target_schema: relation.target_schema,
+                            target_table: relation.target_table,
+                            target_columns: relation.target_columns,
+                        })
+                        .collect();
                     let columns = table
                         .columns
                         .into_iter()
@@ -9522,6 +9675,7 @@ fn collect_project_database_resources(root: &Path) -> Result<DbResourceCatalog> 
                             kind: table.kind,
                             record: table.record,
                             columns: Some(columns),
+                            relations: Some(relations),
                         },
                     )
                 })
@@ -9539,6 +9693,7 @@ fn collect_project_database_resources(root: &Path) -> Result<DbResourceCatalog> 
                 kind: "inferred".to_string(),
                 record: schema.name.clone(),
                 columns: None,
+                relations: None,
             });
         }
     }
@@ -23210,6 +23365,132 @@ sqlite_busy_timeout_ms = 700
             tables,
         });
         validate_db_schema_types(&schema).expect("foreign-key contracts should validate");
+    }
+
+    #[test]
+    fn pulled_foreign_key_contract_validates_typed_joins() {
+        let root = make_temp_dir("db-typed-joins");
+        fs::create_dir_all(root.join("app/posts")).expect("app directory should exist");
+        fs::create_dir_all(root.join(".axonyx/db")).expect("schema directory should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env DATABASE_URL: Secret<String>\n",
+        )
+        .expect("backend contract should write");
+        let columns = serde_json::json!([
+            { "table_name": "authors", "column_name": "tenant_id", "data_type": "uuid", "nullable": false, "column_default": null, "primary_key": true },
+            { "table_name": "authors", "column_name": "id", "data_type": "uuid", "nullable": false, "column_default": null, "primary_key": true },
+            { "table_name": "authors", "column_name": "name", "data_type": "text", "nullable": false, "column_default": null, "primary_key": false },
+            { "table_name": "posts", "column_name": "tenant_id", "data_type": "uuid", "nullable": false, "column_default": null, "primary_key": false },
+            { "table_name": "posts", "column_name": "author_id", "data_type": "uuid", "nullable": false, "column_default": null, "primary_key": false },
+            { "table_name": "posts", "column_name": "status", "data_type": "text", "nullable": false, "column_default": null, "primary_key": false }
+        ]);
+        let relations = serde_json::json!([{
+            "relation_name": "posts_author_fk",
+            "table_name": "posts",
+            "target_schema": "public",
+            "target_table": "authors",
+            "columns": ["tenant_id", "author_id"],
+            "target_columns": ["tenant_id", "id"],
+            "on_update": "no_action",
+            "on_delete": "restrict"
+        }]);
+        let schema = finalize_db_schema_manifest(DbSchemaManifest {
+            version: 3,
+            driver: "postgres".to_string(),
+            transport: "direct".to_string(),
+            url: None,
+            schema_hash: String::new(),
+            types_path: default_db_types_path(),
+            tables: postgres_schema_tables_from_value(&columns, &relations)
+                .expect("relation fixture should map"),
+        });
+        fs::write(
+            root.join(".axonyx/db/schema.json"),
+            serde_json::to_string_pretty(&schema).expect("schema should serialize"),
+        )
+        .expect("schema should write");
+        let path = root.join("app/posts/loader.ax");
+
+        let valid = r#"
+query loadPosts()
+  data posts = db.posts.join(db.authors, { author_id: id, tenant_id }).where({ "authors.name": "Ada" }).all()
+  return posts
+"#;
+        let diagnostics = check_ax_source_with_root(&path, valid, Some(&root));
+        assert!(!diagnostics
+            .iter()
+            .any(|item| item.code.starts_with("axonyx-db")));
+
+        let invalid = r#"
+query loadPosts()
+  data posts = db.posts.join(db.authors, { tenant_id: id, author_id: tenant_id }).all()
+  return posts
+"#;
+        let diagnostics = check_ax_source_with_root(&path, invalid, Some(&root));
+        assert!(diagnostics.iter().any(|item| {
+            item.code == "axonyx-db-relation"
+                && item
+                    .message
+                    .contains("does not match a pulled foreign-key contract")
+        }));
+
+        let invalid_qualifier = r#"
+query loadPosts()
+  data posts = db.posts.join(db.authors, { tenant_id, author_id: id }).where({ "teams.name": "Ada" }).all()
+  return posts
+"#;
+        let diagnostics = check_ax_source_with_root(&path, invalid_qualifier, Some(&root));
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.code == "axonyx-db-query-qualifier"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn inferred_database_resources_require_schema_before_typed_join() {
+        let root = make_temp_dir("db-typed-join-without-schema");
+        fs::create_dir_all(root.join("app/posts")).expect("app directory should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env DATABASE_URL: Secret<String>\n",
+        )
+        .expect("backend contract should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+type Post {
+  author_id: String
+}
+
+type Author {
+  id: String
+}
+
+page Home() {
+  return ASX { <Copy>Home</Copy> }
+}
+"#,
+        )
+        .expect("type contracts should write");
+        let path = root.join("app/posts/loader.ax");
+        let source = r#"
+query loadPosts()
+  data posts = db.posts.join(db.authors, { author_id: id }).all()
+  return posts
+"#;
+
+        let diagnostics = check_ax_source_with_root(&path, source, Some(&root));
+
+        assert!(
+            diagnostics.iter().any(|item| {
+                item.code == "axonyx-db-relation" && item.message.contains("run `cargo ax db pull`")
+            }),
+            "{diagnostics:#?}"
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
