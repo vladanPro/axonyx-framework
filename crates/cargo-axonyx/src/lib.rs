@@ -1516,6 +1516,19 @@ struct DbSchemaTable {
     #[serde(default)]
     record: String,
     columns: Vec<DbSchemaColumn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relations: Vec<DbSchemaRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DbSchemaRelation {
+    name: String,
+    columns: Vec<String>,
+    target_schema: String,
+    target_table: String,
+    target_columns: Vec<String>,
+    on_update: String,
+    on_delete: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2856,10 +2869,18 @@ fn pull_postgres_schema(
 ) -> Result<DbSchemaManifest> {
     let runtime = ax_backend_runtime::runtime_from_env(env)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let value = ax_backend_runtime::AxQueryExecutor::query(
+    let columns = ax_backend_runtime::AxQueryExecutor::query(
         &runtime,
         &ax_backend_runtime::AxRawSqlRequest {
             sql: POSTGRES_SCHEMA_QUERY.to_string(),
+            params: Vec::new(),
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let relations = ax_backend_runtime::AxQueryExecutor::query(
+        &runtime,
+        &ax_backend_runtime::AxRawSqlRequest {
+            sql: POSTGRES_RELATIONS_QUERY.to_string(),
             params: Vec::new(),
         },
     )
@@ -2872,7 +2893,7 @@ fn pull_postgres_schema(
         url: config.url.clone().map(|url| redact_db_url(&url)),
         schema_hash: String::new(),
         types_path: default_db_types_path(),
-        tables: postgres_schema_tables_from_value(&value)?,
+        tables: postgres_schema_tables_from_value(&columns, &relations)?,
     }))
 }
 
@@ -2938,8 +2959,59 @@ where c.table_schema = 'public'
 order by c.table_name, c.ordinal_position
 "#;
 
-fn postgres_schema_tables_from_value(value: &serde_json::Value) -> Result<Vec<DbSchemaTable>> {
-    let rows = value
+const POSTGRES_RELATIONS_QUERY: &str = r#"
+select
+  constraint_row.conname as relation_name,
+  source_table.relname as table_name,
+  target_schema.nspname as target_schema,
+  target_table.relname as target_table,
+  (
+    select json_agg(source_attribute.attname order by source_key.ordinality)
+    from unnest(constraint_row.conkey) with ordinality as source_key(attnum, ordinality)
+    join pg_catalog.pg_attribute source_attribute
+      on source_attribute.attrelid = constraint_row.conrelid
+      and source_attribute.attnum = source_key.attnum
+  ) as columns,
+  (
+    select json_agg(target_attribute.attname order by target_key.ordinality)
+    from unnest(constraint_row.confkey) with ordinality as target_key(attnum, ordinality)
+    join pg_catalog.pg_attribute target_attribute
+      on target_attribute.attrelid = constraint_row.confrelid
+      and target_attribute.attnum = target_key.attnum
+  ) as target_columns,
+  case constraint_row.confupdtype
+    when 'c' then 'cascade'
+    when 'n' then 'set_null'
+    when 'd' then 'set_default'
+    when 'r' then 'restrict'
+    else 'no_action'
+  end as on_update,
+  case constraint_row.confdeltype
+    when 'c' then 'cascade'
+    when 'n' then 'set_null'
+    when 'd' then 'set_default'
+    when 'r' then 'restrict'
+    else 'no_action'
+  end as on_delete
+from pg_catalog.pg_constraint constraint_row
+join pg_catalog.pg_class source_table
+  on source_table.oid = constraint_row.conrelid
+join pg_catalog.pg_namespace source_schema
+  on source_schema.oid = source_table.relnamespace
+join pg_catalog.pg_class target_table
+  on target_table.oid = constraint_row.confrelid
+join pg_catalog.pg_namespace target_schema
+  on target_schema.oid = target_table.relnamespace
+where constraint_row.contype = 'f'
+  and source_schema.nspname = 'public'
+order by source_table.relname, constraint_row.conname
+"#;
+
+fn postgres_schema_tables_from_value(
+    columns: &serde_json::Value,
+    relations: &serde_json::Value,
+) -> Result<Vec<DbSchemaTable>> {
+    let rows = columns
         .as_array()
         .context("Postgres schema introspection did not return a row array")?;
     let mut tables = std::collections::BTreeMap::<String, (String, Vec<DbSchemaColumn>)>::new();
@@ -3003,10 +3075,12 @@ fn postgres_schema_tables_from_value(value: &serde_json::Value) -> Result<Vec<Db
         entry.1.push(column);
     }
 
+    let mut relations = postgres_schema_relations_from_value(relations)?;
     Ok(tables
         .into_iter()
         .map(|(name, (kind, columns))| DbSchemaTable {
             record: db_resource_record_name(&name),
+            relations: relations.remove(&name).unwrap_or_default(),
             name,
             kind,
             columns,
@@ -3014,11 +3088,48 @@ fn postgres_schema_tables_from_value(value: &serde_json::Value) -> Result<Vec<Db
         .collect())
 }
 
+fn postgres_schema_relations_from_value(
+    value: &serde_json::Value,
+) -> Result<std::collections::BTreeMap<String, Vec<DbSchemaRelation>>> {
+    let rows = value
+        .as_array()
+        .context("Postgres relation introspection did not return a row array")?;
+    let mut relations = std::collections::BTreeMap::<String, Vec<DbSchemaRelation>>::new();
+    for row in rows {
+        let table = postgres_schema_string(row, "table_name")?;
+        let relation = DbSchemaRelation {
+            name: postgres_schema_string(row, "relation_name")?,
+            columns: postgres_schema_string_array(row, "columns")?,
+            target_schema: postgres_schema_string(row, "target_schema")?,
+            target_table: postgres_schema_string(row, "target_table")?,
+            target_columns: postgres_schema_string_array(row, "target_columns")?,
+            on_update: postgres_schema_string(row, "on_update")?,
+            on_delete: postgres_schema_string(row, "on_delete")?,
+        };
+        relations.entry(table).or_default().push(relation);
+    }
+    Ok(relations)
+}
+
 fn postgres_schema_string(row: &serde_json::Value, field: &str) -> Result<String> {
     row.get(field)
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
         .with_context(|| format!("Postgres schema row is missing string `{field}`"))
+}
+
+fn postgres_schema_string_array(row: &serde_json::Value, field: &str) -> Result<Vec<String>> {
+    row.get(field)
+        .and_then(serde_json::Value::as_array)
+        .with_context(|| format!("Postgres schema row is missing array `{field}`"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .with_context(|| format!("Postgres schema array `{field}` contains a non-string"))
+        })
+        .collect()
 }
 
 fn sqlite_schema_tables(connection: &rusqlite::Connection) -> Result<Vec<DbSchemaTable>> {
@@ -3040,6 +3151,7 @@ fn sqlite_schema_tables(connection: &rusqlite::Connection) -> Result<Vec<DbSchem
                 name,
                 kind,
                 columns,
+                relations: Vec::new(),
             })
         })
         .collect()
@@ -3284,6 +3396,11 @@ fn validate_db_schema_types(schema: &DbSchemaManifest) -> Result<()> {
         }
     }
 
+    let resources = schema
+        .tables
+        .iter()
+        .map(|table| (table.name.as_str(), table))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut records = std::collections::BTreeSet::new();
     for table in &schema.tables {
         if !is_backend_identifier_like(&table.name) {
@@ -3312,6 +3429,71 @@ fn validate_db_schema_types(schema: &DbSchemaManifest) -> Result<()> {
                     table.name, column.name, column.ax_type
                 )
             })?;
+        }
+        let mut relation_names = std::collections::BTreeSet::new();
+        for relation in &table.relations {
+            if !relation_names.insert(relation.name.as_str()) {
+                bail!(
+                    "database resource `{}` contains duplicate relation `{}`",
+                    table.name,
+                    relation.name
+                );
+            }
+            if relation.columns.is_empty()
+                || relation.columns.len() != relation.target_columns.len()
+            {
+                bail!(
+                    "database relation `{}` must map the same non-zero number of source and target columns",
+                    relation.name
+                );
+            }
+            for column in &relation.columns {
+                if !table
+                    .columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+                {
+                    bail!(
+                        "database relation `{}` references missing source column `{}.{column}`",
+                        relation.name,
+                        table.name
+                    );
+                }
+            }
+            if relation.target_schema == "public" {
+                let target = resources
+                    .get(relation.target_table.as_str())
+                    .with_context(|| {
+                        format!(
+                            "database relation `{}` references missing target resource `{}`",
+                            relation.name, relation.target_table
+                        )
+                    })?;
+                for column in &relation.target_columns {
+                    if !target
+                        .columns
+                        .iter()
+                        .any(|candidate| candidate.name == *column)
+                    {
+                        bail!(
+                            "database relation `{}` references missing target column `{}.{column}`",
+                            relation.name,
+                            relation.target_table
+                        );
+                    }
+                }
+            }
+            for action in [&relation.on_update, &relation.on_delete] {
+                if !matches!(
+                    action.as_str(),
+                    "no_action" | "restrict" | "cascade" | "set_null" | "set_default"
+                ) {
+                    bail!(
+                        "database relation `{}` has unsupported referential action `{action}`",
+                        relation.name
+                    );
+                }
+            }
         }
     }
     let generated = render_db_schema_types(schema);
@@ -22866,57 +23048,60 @@ sqlite_busy_timeout_ms = 700
 
     #[test]
     fn postgres_schema_rows_build_stable_manifest_tables() {
-        let tables = postgres_schema_tables_from_value(&serde_json::json!([
-            {
-                "table_name": "posts",
-                "column_name": "id",
-                "data_type": "uuid",
-                "nullable": false,
-                "column_default": "gen_random_uuid()",
-                "primary_key": true
-            },
-            {
-                "table_name": "posts",
-                "column_name": "summary",
-                "data_type": "text",
-                "nullable": true,
-                "column_default": null,
-                "primary_key": false
-            },
-            {
-                "table_name": "posts",
-                "column_name": "amount",
-                "data_type": "numeric",
-                "db_type_kind": "domain",
-                "db_type_name": "money_amount",
-                "enum_values": [],
-                "nullable": false,
-                "column_default": null,
-                "primary_key": false
-            },
-            {
-                "table_name": "posts",
-                "column_name": "status",
-                "data_type": "post_status",
-                "db_type_kind": "enum",
-                "db_type_name": "post_status",
-                "enum_values": ["draft", "published"],
-                "nullable": false,
-                "column_default": "'draft'::post_status",
-                "primary_key": false
-            },
-            {
-                "table_name": "posts",
-                "column_name": "history",
-                "data_type": "post_status[]",
-                "db_type_kind": "enum_array",
-                "db_type_name": "post_status",
-                "enum_values": ["draft", "published"],
-                "nullable": false,
-                "column_default": null,
-                "primary_key": false
-            }
-        ]))
+        let tables = postgres_schema_tables_from_value(
+            &serde_json::json!([
+                {
+                    "table_name": "posts",
+                    "column_name": "id",
+                    "data_type": "uuid",
+                    "nullable": false,
+                    "column_default": "gen_random_uuid()",
+                    "primary_key": true
+                },
+                {
+                    "table_name": "posts",
+                    "column_name": "summary",
+                    "data_type": "text",
+                    "nullable": true,
+                    "column_default": null,
+                    "primary_key": false
+                },
+                {
+                    "table_name": "posts",
+                    "column_name": "amount",
+                    "data_type": "numeric",
+                    "db_type_kind": "domain",
+                    "db_type_name": "money_amount",
+                    "enum_values": [],
+                    "nullable": false,
+                    "column_default": null,
+                    "primary_key": false
+                },
+                {
+                    "table_name": "posts",
+                    "column_name": "status",
+                    "data_type": "post_status",
+                    "db_type_kind": "enum",
+                    "db_type_name": "post_status",
+                    "enum_values": ["draft", "published"],
+                    "nullable": false,
+                    "column_default": "'draft'::post_status",
+                    "primary_key": false
+                },
+                {
+                    "table_name": "posts",
+                    "column_name": "history",
+                    "data_type": "post_status[]",
+                    "db_type_kind": "enum_array",
+                    "db_type_name": "post_status",
+                    "enum_values": ["draft", "published"],
+                    "nullable": false,
+                    "column_default": null,
+                    "primary_key": false
+                }
+            ]),
+            &serde_json::json!([]),
+        )
         .expect("postgres rows should map");
 
         assert_eq!(tables.len(), 1);
@@ -22950,6 +23135,84 @@ sqlite_busy_timeout_ms = 700
     }
 
     #[test]
+    fn postgres_foreign_keys_build_typed_relation_contracts() {
+        let columns = serde_json::json!([
+            {
+                "table_name": "authors",
+                "column_name": "tenant_id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": null,
+                "primary_key": true
+            },
+            {
+                "table_name": "authors",
+                "column_name": "id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": null,
+                "primary_key": true
+            },
+            {
+                "table_name": "posts",
+                "column_name": "tenant_id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": null,
+                "primary_key": false
+            },
+            {
+                "table_name": "posts",
+                "column_name": "author_id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": null,
+                "primary_key": false
+            }
+        ]);
+        let relations = serde_json::json!([{
+            "relation_name": "posts_author_fk",
+            "table_name": "posts",
+            "target_schema": "public",
+            "target_table": "authors",
+            "columns": ["tenant_id", "author_id"],
+            "target_columns": ["tenant_id", "id"],
+            "on_update": "cascade",
+            "on_delete": "restrict"
+        }]);
+
+        let tables = postgres_schema_tables_from_value(&columns, &relations)
+            .expect("Postgres relation rows should map");
+        let posts = tables
+            .iter()
+            .find(|table| table.name == "posts")
+            .expect("posts table should exist");
+        assert_eq!(
+            posts.relations,
+            vec![DbSchemaRelation {
+                name: "posts_author_fk".to_string(),
+                columns: vec!["tenant_id".to_string(), "author_id".to_string()],
+                target_schema: "public".to_string(),
+                target_table: "authors".to_string(),
+                target_columns: vec!["tenant_id".to_string(), "id".to_string()],
+                on_update: "cascade".to_string(),
+                on_delete: "restrict".to_string(),
+            }]
+        );
+
+        let schema = finalize_db_schema_manifest(DbSchemaManifest {
+            version: 3,
+            driver: "postgres".to_string(),
+            transport: "direct".to_string(),
+            url: None,
+            schema_hash: String::new(),
+            types_path: default_db_types_path(),
+            tables,
+        });
+        validate_db_schema_types(&schema).expect("foreign-key contracts should validate");
+    }
+
+    #[test]
     fn postgres_db_check_and_pull_run_when_test_url_is_configured() {
         let Ok(url) = std::env::var("AXONYX_TEST_POSTGRES_URL") else {
             return;
@@ -22957,6 +23220,8 @@ sqlite_busy_timeout_ms = 700
         let root = make_temp_dir("db-postgres-live");
         let suffix = std::process::id();
         let table_name = format!("axonyx_schema_test_{suffix}");
+        let parent_table = format!("axonyx_schema_authors_{suffix}");
+        let relation_name = format!("axonyx_schema_author_fk_{suffix}");
         let status_type = format!("axonyx_schema_status_{suffix}");
         let price_domain = format!("axonyx_schema_price_{suffix}");
         let migration = ax_backend_runtime::AxMigration {
@@ -22966,19 +23231,32 @@ sqlite_busy_timeout_ms = 700
             up_sql: format!(
                 "create type \"{status_type}\" as enum ('draft', 'published');
                  create domain \"{price_domain}\" as numeric(38, 12) check (value >= 0);
+                 create table \"{parent_table}\" (
+                   tenant_id uuid not null,
+                   id uuid not null,
+                   primary key (tenant_id, id)
+                 );
                  create table \"{table_name}\" (
                    id uuid primary key,
+                   tenant_id uuid not null,
+                   author_id uuid not null,
                    amount numeric(38, 12) not null,
                    price \"{price_domain}\" not null,
                    status \"{status_type}\" not null,
                    history \"{status_type}\"[] not null,
                    tags text[] not null,
                    published_at timestamptz,
-                   metadata jsonb
+                   metadata jsonb,
+                   constraint \"{relation_name}\"
+                     foreign key (tenant_id, author_id)
+                     references \"{parent_table}\" (tenant_id, id)
+                     on update cascade
+                     on delete restrict
                  );"
             ),
             down_sql: format!(
                 "drop table \"{table_name}\";
+                 drop table \"{parent_table}\";
                  drop domain \"{price_domain}\";
                  drop type \"{status_type}\";"
             ),
@@ -23044,6 +23322,15 @@ sqlite_busy_timeout_ms = 700
             assert_eq!(column("tags").ax_type, "List<String>");
             assert_eq!(column("published_at").ax_type, "DateTime");
             assert_eq!(column("metadata").ax_type, "Json");
+            assert_eq!(table.relations.len(), 1);
+            let relation = &table.relations[0];
+            assert_eq!(relation.name, relation_name);
+            assert_eq!(relation.columns, ["tenant_id", "author_id"]);
+            assert_eq!(relation.target_schema, "public");
+            assert_eq!(relation.target_table, parent_table);
+            assert_eq!(relation.target_columns, ["tenant_id", "id"]);
+            assert_eq!(relation.on_update, "cascade");
+            assert_eq!(relation.on_delete, "restrict");
 
             let generated = fs::read_to_string(root.join("app/generated/postgres-db.ax"))?;
             assert!(generated.contains(&format!(
