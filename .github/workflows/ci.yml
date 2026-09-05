@@ -72,6 +72,39 @@ jobs:
         working-directory: vendor/axonyx-runtime
         run: cargo test
 
+  postgres:
+    name: Postgres CLI Integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: axonyx_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d axonyx_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      AXONYX_TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/axonyx_test?sslmode=disable
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify Postgres check and schema pull
+        run: cargo test -p cargo-axonyx tests::postgres_db_check_and_pull_run_when_test_url_is_configured -- --exact
+
   package:
     name: Package Rehearsal
     runs-on: ubuntu-latest
