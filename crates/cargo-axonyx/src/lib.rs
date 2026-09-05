@@ -6468,8 +6468,7 @@ fn referenced_api_schemas<'a>(
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut pending = types
         .into_iter()
-        .flat_map(backend_return_contract_named_types)
-        .map(str::to_string)
+        .flat_map(api_schema_type_names)
         .collect::<Vec<_>>();
     let mut names = std::collections::BTreeSet::new();
 
@@ -6484,8 +6483,7 @@ fn referenced_api_schemas<'a>(
             schema
                 .fields
                 .iter()
-                .flat_map(|field| backend_return_contract_named_types(&field.ty))
-                .map(str::to_string),
+                .flat_map(|field| api_schema_type_names(&field.ty)),
         );
     }
 
@@ -6495,6 +6493,49 @@ fn referenced_api_schemas<'a>(
             .filter_map(|name| by_name.get(name.as_str()).map(|schema| (*schema).clone()))
             .collect(),
     )
+}
+
+fn api_schema_type_names(annotation: &str) -> Vec<String> {
+    let Ok(ty) = AxType::parse_annotation(annotation) else {
+        return backend_return_contract_named_types(annotation)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    };
+    let mut names = Vec::new();
+    collect_api_schema_type_names(&ty, &mut names);
+    names
+}
+
+fn collect_api_schema_type_names(ty: &AxType, names: &mut Vec<String>) {
+    match ty {
+        AxType::Record(name) => names.push(name.clone()),
+        AxType::List(inner)
+        | AxType::Set(inner)
+        | AxType::Optional(inner)
+        | AxType::Secret(inner)
+        | AxType::Public(inner)
+        | AxType::Signal(inner) => collect_api_schema_type_names(inner, names),
+        AxType::Map(key, value) | AxType::Result(key, value) | AxType::Resource(key, value) => {
+            collect_api_schema_type_names(key, names);
+            collect_api_schema_type_names(value, names);
+        }
+        AxType::String
+        | AxType::Number
+        | AxType::Int
+        | AxType::Float
+        | AxType::Decimal
+        | AxType::Bool
+        | AxType::DateTime
+        | AxType::Date
+        | AxType::Time
+        | AxType::Uuid
+        | AxType::Bytes
+        | AxType::Json
+        | AxType::Never
+        | AxType::Void
+        | AxType::Unknown => {}
+    }
 }
 
 fn canonical_api_schemas(mut schemas: Vec<ApiSchemaReport>) -> Vec<ApiSchemaReport> {
@@ -20730,7 +20771,7 @@ route DELETE "/api/posts/:slug"
                     },
                     ApiSchemaFieldReport {
                         name: "author".to_string(),
-                        ty: "Author".to_string(),
+                        ty: "Map<String, Optional<Author>>".to_string(),
                         optional: false,
                     },
                 ],
