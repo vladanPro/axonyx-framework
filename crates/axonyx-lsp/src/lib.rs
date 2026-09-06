@@ -6,8 +6,8 @@ use std::process::Command;
 
 use axonyx_core::ax_formatter_prelude::format_ax_source;
 use axonyx_core::ax_language_service_prelude::{
-    ax_source_imports, classify_ax_source, diagnose_ax_source, diagnose_ax_workspace_imports,
-    resolve_ax_import_path, AxSourceKind,
+    ax_source_imports, ax_source_symbols, classify_ax_source, diagnose_ax_source,
+    diagnose_ax_workspace_imports, resolve_ax_import_path, AxLanguageSymbol, AxSourceKind,
 };
 use serde_json::{json, Value};
 
@@ -263,37 +263,142 @@ fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
         return None;
     }
 
-    let import = ax_source_imports(&importing_path.to_string_lossy(), &document.text)
-        .into_iter()
-        .find(|import| import.line.saturating_sub(1) == line)?;
-    if !cursor_is_on_import_source(source_line, &import.source, character) {
-        return None;
-    }
     let kind = classify_ax_source(&importing_path.to_string_lossy(), &document.text);
-    if kind == AxSourceKind::Page
-        && (import.source.starts_with("./") || import.source.starts_with("../"))
+    let imports = ax_source_imports(&importing_path.to_string_lossy(), &document.text);
+
+    if let Some(import) = imports
+        .iter()
+        .find(|import| import.line.saturating_sub(1) == line)
     {
-        return None;
+        if cursor_is_on_import_source(source_line, &import.source, character) {
+            let target = resolve_definition_import(
+                root,
+                &importing_path,
+                kind,
+                &import.source,
+                &state.package_roots,
+            )?;
+            return target.is_file().then(|| file_start_location(&target));
+        }
     }
 
-    let target = resolve_ax_import_path(
-        root,
-        &importing_path,
-        kind,
-        &import.source,
-        &state.package_roots,
-    )?;
-    if !target.is_file() {
-        return None;
+    let symbol_name = identifier_at_utf16_position(source_line, character)?;
+    if let Some(symbol) = ax_source_symbols(&importing_path.to_string_lossy(), &document.text)
+        .into_iter()
+        .find(|symbol| symbol.name == symbol_name)
+    {
+        return Some(symbol_location(uri, &symbol));
     }
 
-    Some(json!({
-        "uri": path_to_file_uri(&target),
+    for import in imports {
+        let imported_name = import.bindings.iter().find_map(|binding| {
+            if binding.local == symbol_name {
+                return (binding.imported != "*").then(|| binding.imported.clone());
+            }
+            let member = symbol_name.strip_prefix(&format!("{}.", binding.local))?;
+            (binding.imported == "*" && !member.is_empty()).then(|| member.to_string())
+        });
+        let Some(imported_name) = imported_name else {
+            continue;
+        };
+        let target = resolve_definition_import(
+            root,
+            &importing_path,
+            kind,
+            &import.source,
+            &state.package_roots,
+        )?;
+        if !target.is_file() {
+            return None;
+        }
+        let target_uri = path_to_file_uri(&target);
+        let target_source = state
+            .documents
+            .get(&target_uri)
+            .map(|document| document.text.clone())
+            .or_else(|| fs::read_to_string(&target).ok())?;
+        let target_symbol = ax_source_symbols(&target.to_string_lossy(), &target_source)
+            .into_iter()
+            .find(|symbol| symbol.name == imported_name);
+        return Some(
+            target_symbol
+                .as_ref()
+                .map(|symbol| symbol_location(&target_uri, symbol))
+                .unwrap_or_else(|| file_start_location(&target)),
+        );
+    }
+
+    None
+}
+
+fn resolve_definition_import(
+    root: &Path,
+    importing_path: &Path,
+    kind: AxSourceKind,
+    source: &str,
+    package_roots: &BTreeMap<String, PathBuf>,
+) -> Option<PathBuf> {
+    if kind == AxSourceKind::Page && (source.starts_with("./") || source.starts_with("../")) {
+        return None;
+    }
+    resolve_ax_import_path(root, importing_path, kind, source, package_roots)
+}
+
+fn file_start_location(path: &Path) -> Value {
+    json!({
+        "uri": path_to_file_uri(path),
         "range": {
             "start": { "line": 0, "character": 0 },
             "end": { "line": 0, "character": 0 }
         }
-    }))
+    })
+}
+
+fn symbol_location(uri: &str, symbol: &AxLanguageSymbol) -> Value {
+    let line = symbol.line.saturating_sub(1);
+    let character = symbol.column.saturating_sub(1);
+    json!({
+        "uri": uri,
+        "range": {
+            "start": { "line": line, "character": character },
+            "end": {
+                "line": line,
+                "character": character + symbol.name.encode_utf16().count()
+            }
+        }
+    })
+}
+
+fn identifier_at_utf16_position(line: &str, character: usize) -> Option<String> {
+    let byte = utf16_character_to_byte(line, character)?;
+    let bytes = line.as_bytes();
+    let mut start = byte.min(bytes.len());
+    while start > 0 && is_symbol_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    let mut end = byte.min(bytes.len());
+    while end < bytes.len() && is_symbol_byte(bytes[end]) {
+        end += 1;
+    }
+    (start < end).then(|| line[start..end].to_string())
+}
+
+fn utf16_character_to_byte(line: &str, character: usize) -> Option<usize> {
+    let mut utf16_offset = 0;
+    for (byte, value) in line.char_indices() {
+        if utf16_offset == character {
+            return Some(byte);
+        }
+        utf16_offset += value.len_utf16();
+        if utf16_offset > character {
+            return None;
+        }
+    }
+    (utf16_offset == character).then_some(line.len())
+}
+
+fn is_symbol_byte(value: u8) -> bool {
+    value.is_ascii_alphanumeric() || matches!(value, b'_' | b'.')
 }
 
 fn cursor_is_on_import_source(line: &str, import_source: &str, character: usize) -> bool {
@@ -883,6 +988,108 @@ mod tests {
         assert_eq!(
             messages[2],
             json!({ "jsonrpc": "2.0", "id": 2, "result": null })
+        );
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn returns_imported_declaration_for_alias_binding_and_usage() {
+        let root = temp_workspace("symbol-definition");
+        let page = root.join("app/page.asx");
+        let component = root.join("app/components/Card.asx");
+        fs::write(
+            &component,
+            "component Card {\n  render ASX {\n    <article />\n  }\n}",
+        )
+        .expect("component should be written");
+        let root_uri = file_uri(&root);
+        let page_uri = file_uri(&page);
+        let source = "import { Card as Panel } from \"@/components/Card\"\n\npage Home() { return ASX { <Panel /> } }";
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": source
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 0, "character": 18 }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 2, "character": 29 }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        for response in [&messages[2], &messages[3]] {
+            assert_eq!(response["result"]["uri"], path_to_file_uri(&component));
+            assert_eq!(
+                response["result"]["range"],
+                json!({
+                    "start": { "line": 0, "character": 10 },
+                    "end": { "line": 0, "character": 14 }
+                })
+            );
+        }
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn returns_backend_declaration_for_namespace_member_usage() {
+        let root = temp_workspace("namespace-definition");
+        let route = root.join("app/posts/loader.ax");
+        let domain = root.join("app/posts/domain.ax");
+        fs::create_dir_all(root.join("app/posts")).expect("route should be created");
+        fs::write(&domain, "export fn visible() -> Bool {\n  return true\n}")
+            .expect("domain should be written");
+        let root_uri = file_uri(&root);
+        let route_uri = file_uri(&route);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": route_uri,
+                    "version": 1,
+                    "text": "import * as Domain from \"./domain.ax\"\n\nquery loadPosts() -> Bool {\n  return Domain.visible()\n}"
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": route_uri },
+                    "position": { "line": 3, "character": 17 }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        assert_eq!(messages[2]["result"]["uri"], path_to_file_uri(&domain));
+        assert_eq!(
+            messages[2]["result"]["range"],
+            json!({
+                "start": { "line": 0, "character": 10 },
+                "end": { "line": 0, "character": 17 }
+            })
         );
         fs::remove_dir_all(root).expect("workspace should be removed");
     }
