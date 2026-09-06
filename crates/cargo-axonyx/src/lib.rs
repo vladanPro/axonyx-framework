@@ -54,10 +54,19 @@ use axonyx_runtime::{
     AxPreviewActionResult, AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
     AX_STATE_WASM_PATH,
 };
+
+mod remote_contract;
+
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+#[cfg(test)]
+use remote_contract::validate_remote_contract_url;
+use remote_contract::{
+    inspect_remote_api_contract, print_remote_api_contract, read_api_contract_source,
+    resolve_remote_contract_output, verify_expected_contract_hash,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -154,6 +163,9 @@ enum Commands {
 
 #[derive(Debug, Parser)]
 struct ApiArgs {
+    #[command(subcommand)]
+    command: Option<ApiCommands>,
+
     /// Output format for the API contract report.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
@@ -169,6 +181,54 @@ struct ApiArgs {
     /// Override the OpenAPI output path. Use `-` to write to stdout.
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ApiCommands {
+    /// Inspect a remote or local OpenAPI contract without writing files.
+    Inspect(ApiContractInspectArgs),
+    /// Pull a remote or local OpenAPI contract into .axonyx/contracts.
+    Pull(ApiContractPullArgs),
+}
+
+#[derive(Debug, Parser)]
+struct ApiContractInspectArgs {
+    /// HTTPS URL or local OpenAPI JSON file.
+    source: String,
+
+    /// Output format for the contract summary.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+
+    /// Require the canonical JSON document to match this sha256 value.
+    #[arg(long)]
+    expect_hash: Option<String>,
+
+    /// Permit plain HTTP for non-loopback development endpoints.
+    #[arg(long)]
+    allow_http: bool,
+}
+
+#[derive(Debug, Parser)]
+struct ApiContractPullArgs {
+    /// HTTPS URL or local OpenAPI JSON file.
+    source: String,
+
+    /// Stable local contract name used for the default snapshot filename.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Override the snapshot output path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Require the canonical JSON document to match this sha256 value.
+    #[arg(long)]
+    expect_hash: Option<String>,
+
+    /// Permit plain HTTP for non-loopback development endpoints.
+    #[arg(long)]
+    allow_http: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -6334,6 +6394,13 @@ fn routes_report(root: &Path) -> Result<RoutesReport> {
 }
 
 fn api_command(args: ApiArgs) -> Result<()> {
+    if let Some(command) = args.command {
+        if args.schema || args.openapi || args.out.is_some() || args.format != CheckFormat::Text {
+            bail!("API inspect/pull subcommands cannot be combined with report/export flags");
+        }
+        return remote_api_contract_command(command);
+    }
+
     let root = app_root()?;
     let report = collect_api_report(&root)?;
 
@@ -6372,6 +6439,37 @@ fn api_command(args: ApiArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn remote_api_contract_command(command: ApiCommands) -> Result<()> {
+    match command {
+        ApiCommands::Inspect(args) => {
+            let document = read_api_contract_source(&args.source, args.allow_http, None)?;
+            let report = inspect_remote_api_contract(&args.source, &document)?;
+            verify_expected_contract_hash(args.expect_hash.as_deref(), &report)?;
+            match args.format {
+                CheckFormat::Text => print_remote_api_contract(&report),
+                CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            }
+            Ok(())
+        }
+        ApiCommands::Pull(args) => {
+            let root = app_root()?;
+            let document = read_api_contract_source(&args.source, args.allow_http, Some(&root))?;
+            let report = inspect_remote_api_contract(&args.source, &document)?;
+            verify_expected_contract_hash(args.expect_hash.as_deref(), &report)?;
+            let out = resolve_remote_contract_output(
+                &root,
+                &args.source,
+                args.name.as_deref(),
+                args.out.as_deref(),
+            )?;
+            let rendered = serde_json::to_string_pretty(&document)?;
+            write_or_print_api_output(Some(&out), &rendered)?;
+            print_remote_api_contract(&report);
+            Ok(())
+        }
+    }
 }
 
 const DEFAULT_OPENAPI_OUTPUT: &str = "public/openapi.json";
@@ -21134,6 +21232,121 @@ route GET "/api/posts" -> Post[]
     }
 
     #[test]
+    fn remote_api_contract_inspection_reports_stable_identity() {
+        let declared = format!("sha256:{}", "a".repeat(64));
+        let document = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "Forge API", "version": "2.4.1" },
+            "x-axonyx-contract-hash": declared,
+            "x-axonyx-response-validation": "always",
+            "paths": {
+                "/posts": {
+                    "parameters": [],
+                    "get": {},
+                    "post": {}
+                }
+            },
+            "components": { "schemas": { "Post": {} } }
+        });
+
+        let report =
+            inspect_remote_api_contract("https://api.example/openapi.json?token=secret", &document)
+                .expect("remote contract should inspect");
+
+        assert_eq!(report.source, "https://api.example/openapi.json");
+        assert_eq!(report.openapi, "3.1.0");
+        assert_eq!(report.title, "Forge API");
+        assert_eq!(report.version, "2.4.1");
+        assert_eq!(report.contract_hash, declared);
+        assert!(report.document_hash.starts_with("sha256:"));
+        assert_eq!(report.response_validation.as_deref(), Some("always"));
+        assert_eq!(report.paths, 1);
+        assert_eq!(report.operations, 2);
+        assert_eq!(report.schemas, 1);
+        verify_expected_contract_hash(Some(&report.document_hash), &report)
+            .expect("matching expected hash should pass");
+    }
+
+    #[test]
+    fn remote_api_contract_rejects_invalid_documents_and_hash_drift() {
+        let invalid = serde_json::json!({
+            "openapi": "2.0",
+            "info": { "title": "Old API", "version": "1" },
+            "paths": {}
+        });
+        assert!(inspect_remote_api_contract("old.json", &invalid)
+            .expect_err("OpenAPI 2 should fail")
+            .to_string()
+            .contains("expected OpenAPI 3.x"));
+
+        let document = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "Forge API", "version": "1" },
+            "paths": {}
+        });
+        let report =
+            inspect_remote_api_contract("forge.json", &document).expect("OpenAPI 3 should inspect");
+        let wrong = format!("sha256:{}", "f".repeat(64));
+        assert!(verify_expected_contract_hash(Some(&wrong), &report)
+            .expect_err("hash drift should fail")
+            .to_string()
+            .contains("hash mismatch"));
+    }
+
+    #[test]
+    fn remote_api_contract_url_policy_prefers_https_and_loopback_http() {
+        validate_remote_contract_url("https://api.example/openapi.json", false)
+            .expect("HTTPS should pass");
+        validate_remote_contract_url("http://127.0.0.1:3000/openapi.json", false)
+            .expect("IPv4 loopback should pass");
+        validate_remote_contract_url("http://[::1]:3000/openapi.json", false)
+            .expect("IPv6 loopback should pass");
+        validate_remote_contract_url("http://api.example/openapi.json", true)
+            .expect("explicit insecure HTTP should pass");
+
+        assert!(
+            validate_remote_contract_url("http://api.example/openapi.json", false)
+                .expect_err("remote HTTP should fail")
+                .to_string()
+                .contains("--allow-http")
+        );
+        assert!(validate_remote_contract_url(
+            "https://user:secret@api.example/openapi.json",
+            false
+        )
+        .expect_err("embedded credentials should fail")
+        .to_string()
+        .contains("embedded credentials"));
+    }
+
+    #[test]
+    fn remote_api_contract_pull_uses_safe_project_snapshot_path() {
+        let root = make_temp_dir("remote-contract-output");
+        assert_eq!(
+            resolve_remote_contract_output(
+                &root,
+                "https://api.example:8443/openapi.json",
+                None,
+                None,
+            )
+            .expect("default snapshot should resolve"),
+            root.join(".axonyx/contracts/api-example.openapi.json")
+        );
+        assert_eq!(
+            resolve_remote_contract_output(
+                &root,
+                "https://api.example/openapi.json",
+                Some("Billing V2"),
+                None,
+            )
+            .expect("named snapshot should resolve"),
+            root.join(".axonyx/contracts/billing-v2.openapi.json")
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn routes_report_includes_server_streaming_mode() {
         let root = make_temp_dir("route-report-stream-mode");
         fs::write(
@@ -25060,6 +25273,53 @@ return ASX { <Copy>{posts}</Copy> }
         };
         assert!(args.openapi);
         assert_eq!(args.out.as_deref(), Some(Path::new("public/openapi.json")));
+    }
+
+    #[test]
+    fn parses_api_contract_inspect_command() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "api",
+            "inspect",
+            "https://api.example/openapi.json",
+            "--format",
+            "json",
+            "--expect-hash",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .expect("API inspect command should parse");
+
+        let Commands::Api(args) = cli.command else {
+            panic!("expected api command");
+        };
+        let Some(ApiCommands::Inspect(inspect)) = args.command else {
+            panic!("expected inspect subcommand");
+        };
+        assert_eq!(inspect.format, CheckFormat::Json);
+        assert_eq!(inspect.source, "https://api.example/openapi.json");
+        assert!(inspect.expect_hash.is_some());
+    }
+
+    #[test]
+    fn parses_api_contract_pull_command() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "api",
+            "pull",
+            "https://api.example/openapi.json",
+            "--name",
+            "billing",
+        ])
+        .expect("API pull command should parse");
+
+        let Commands::Api(args) = cli.command else {
+            panic!("expected api command");
+        };
+        let Some(ApiCommands::Pull(pull)) = args.command else {
+            panic!("expected pull subcommand");
+        };
+        assert_eq!(pull.name.as_deref(), Some("billing"));
+        assert_eq!(pull.source, "https://api.example/openapi.json");
     }
 
     #[test]
