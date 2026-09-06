@@ -63,6 +63,7 @@ connection forever:
 request_timeout_seconds = 2
 shutdown_grace_seconds = 5
 max_connections = 1024
+api_response_validation = "development"
 ```
 
 The same timeout is respected by the standard transport and the Tokio preview
@@ -122,6 +123,20 @@ render`. The Melt records whether compiled backend code uses `db.*`. Static
 applications therefore need no database configuration, while database-backed
 applications run one direct SQLite/Postgres query probe without retrying or
 exposing connection details. A failed required dependency returns `503`.
+
+Declared API response contracts are enforced at the shared runtime boundary:
+
+```ax
+route GET "/api/posts" -> Post[] {
+  return json(posts)
+}
+```
+
+`[server].api_response_validation` accepts `off`, `development`, or `always`.
+Development is the default and catches payload drift in `cargo ax run dev`
+without adding production validation work. `always` applies the same check in
+the compiled Axum/Tokio server. Contract failures keep route/path diagnostics
+in server logs and return a redacted JSON `500` to the client.
 
 and the app should still be authored through:
 

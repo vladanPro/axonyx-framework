@@ -118,7 +118,14 @@ app:
 request_timeout_seconds = 2
 shutdown_grace_seconds = 5
 max_connections = 1024
+api_response_validation = "development"
 ```
+
+Typed API routes can enforce their declared `-> Type` response at the runtime
+boundary. `development` validates during `cargo ax run dev`, `always` also
+validates compiled production responses, and `off` disables the check. A
+mismatch is logged with its exact JSON path while clients receive a redacted
+JSON `500` response.
 
 This is intentionally a runtime choice, not an authoring burden: `.ax` pages,
 loaders, actions, and state patches keep the same shape while Axonyx chooses the

@@ -47,11 +47,12 @@ use axonyx_runtime::server_prelude::{
 };
 use axonyx_runtime::{
     ax_state_wasm_bytes, backend_prelude as ax_backend_runtime, execute_preview_action_sources,
-    execute_preview_action_sources_with_runtime, execute_preview_route_request_sources,
-    execute_preview_route_request_sources_with_runtime,
+    execute_preview_action_sources_with_runtime, execute_preview_route_request_sources_validated,
+    execute_preview_route_request_sources_with_runtime_validated,
     preview_ax_route_with_request_context_and_imports,
-    preview_ax_route_with_request_context_and_runtime_and_imports, AxPreviewActionResult,
-    AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore, AX_STATE_WASM_PATH,
+    preview_ax_route_with_request_context_and_runtime_and_imports, AxApiResponseValidationMode,
+    AxPreviewActionResult, AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
+    AX_STATE_WASM_PATH,
 };
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -687,6 +688,7 @@ struct AxServerRuntimeConfig {
     security_headers: bool,
     request_logging: bool,
     log_format: AxServerLogFormat,
+    api_response_validation: AxApiResponseValidationMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -777,6 +779,7 @@ impl AxServerRuntimeConfig {
                 DEFAULT_REQUEST_LOGGING_ENABLED,
             )?,
             log_format: configured_server_log_format(root)?,
+            api_response_validation: configured_api_response_validation(root)?,
         })
     }
 }
@@ -792,6 +795,7 @@ impl Default for AxServerRuntimeConfig {
             security_headers: DEFAULT_SECURITY_HEADERS_ENABLED,
             request_logging: DEFAULT_REQUEST_LOGGING_ENABLED,
             log_format: AxServerLogFormat::Text,
+            api_response_validation: AxApiResponseValidationMode::Development,
         }
     }
 }
@@ -960,6 +964,7 @@ struct RegistryItemReport {
 struct ApiReport {
     version: u32,
     contract_hash: String,
+    response_validation: String,
     routes: Vec<ApiRouteReport>,
     schemas: Vec<ApiSchemaReport>,
 }
@@ -3905,6 +3910,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_compression_check(root));
     checks.push(doctor_server_security_headers_check(root));
     checks.push(doctor_server_request_logging_check(root));
+    checks.push(doctor_api_response_validation_check(root));
     checks.push(doctor_database_runtime_policy_check(root));
     checks.push(doctor_error_boundaries_check(root));
     checks.push(doctor_aegis_config_check(root));
@@ -4101,6 +4107,25 @@ fn doctor_server_request_logging_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message,
             hint: Some("Set [server].request_logging to true/false and [server].log_format to \"text\" or \"json\"."),
+        },
+    }
+}
+
+fn doctor_api_response_validation_check(root: &Path) -> DoctorCheck {
+    match configured_api_response_validation(root) {
+        Ok(mode) => DoctorCheck {
+            code: "api-response-validation",
+            severity: DoctorSeverity::Ok,
+            message: format!("API response validation mode resolves to {}.", mode.label()),
+            hint: Some(
+                "Use development for local contract checks or always for production enforcement.",
+            ),
+        },
+        Err(message) => DoctorCheck {
+            code: "api-response-validation",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Set [server].api_response_validation to off, development, or always."),
         },
     }
 }
@@ -6380,7 +6405,12 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
         })
         .collect();
 
-    finalize_api_report(routes, collect_project_type_schemas(root)?)
+    let mut report = finalize_api_report(routes, collect_project_type_schemas(root)?)?;
+    report.response_validation = configured_api_response_validation(root)
+        .map_err(anyhow::Error::msg)?
+        .label()
+        .to_string();
+    Ok(report)
 }
 
 fn finalize_api_report(
@@ -6418,6 +6448,7 @@ fn finalize_api_report(
     Ok(ApiReport {
         version: 1,
         contract_hash,
+        response_validation: AxApiResponseValidationMode::Development.label().to_string(),
         routes,
         schemas,
     })
@@ -8371,6 +8402,28 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
                 severity: "error",
                 code: "axonyx-config-log-format",
                 message: "[server].log_format must be \"text\" or \"json\".".to_string(),
+            });
+        }
+    }
+
+    if let Some(validation) = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("api_response_validation"))
+    {
+        let valid = validation
+            .as_str()
+            .and_then(AxApiResponseValidationMode::parse)
+            .is_some();
+        if !valid {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&path),
+                line: line_for_config_key(&source, "api_response_validation"),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-api-response-validation",
+                message: "[server].api_response_validation must be \"off\", \"development\", or \"always\"."
+                    .to_string(),
             });
         }
     }
@@ -12312,6 +12365,9 @@ fn build_compiled_production_binary(
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let database_required = project_uses_database_runtime(root)?;
+    let validate_api_responses = configured_api_response_validation(root)
+        .map_err(anyhow::Error::msg)?
+        .enabled(false);
     let source = compiled_production_source(
         &dist_literal,
         &signal_aliases,
@@ -12319,6 +12375,7 @@ fn build_compiled_production_binary(
         &page_renderers,
         &database_runtime_defaults,
         database_required,
+        validate_api_responses,
     );
     fs::write(&source_path, source).with_context(|| {
         format!(
@@ -12516,6 +12573,7 @@ fn compiled_production_source(
     page_renderers: &[CompiledPageRenderer],
     database_runtime_defaults: &str,
     database_required: bool,
+    validate_api_responses: bool,
 ) -> String {
     let signal_match_arms = signal_aliases
         .iter()
@@ -12614,6 +12672,7 @@ struct CompiledBinding {{
 }}
 
 const DATABASE_REQUIRED: bool = {database_required};
+const VALIDATE_API_RESPONSES: bool = {validate_api_responses};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let host = std::env::var("AXONYX_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -12650,13 +12709,16 @@ fn handle_request(
     }}
 
     if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
-        let response = backend::dispatch_api_route(runtime, &request);
+        let response = backend::dispatch_api_route(runtime, &request, VALIDATE_API_RESPONSES);
         return secure(match response {{
             Ok(Some(response)) => response,
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
             Err(error) => {{
                 eprintln!("Axonyx compiled API error: {{error}}");
-                AxHttpResponse::text(500, "Internal Server Error")
+                AxHttpResponse::json(500, &json!({{
+                    "error": "internal_server_error",
+                    "message": "API request could not be completed."
+                }})).unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store()
             }}
         }});
     }}
@@ -14642,6 +14704,7 @@ fn print_api_text(report: &ApiReport) {
     }
 
     println!("API contract v{} {}:", report.version, report.contract_hash);
+    println!("Response validation: {}", report.response_validation);
     for route in &report.routes {
         let mut details = vec![format!("file={}", route.file)];
         if let Some(returns) = &route.returns {
@@ -14701,6 +14764,8 @@ fn print_api_schema_text(report: &ApiReport) {
         return;
     }
 
+    println!("// response-validation: {}", report.response_validation);
+
     for route in &report.routes {
         println!("// {} {}", route.method, route.route);
         println!("// request-hash: {}", route.request_hash);
@@ -14758,6 +14823,7 @@ fn api_report_openapi_value(report: &ApiReport) -> serde_json::Value {
         "openapi": "3.1.0",
         "x-axonyx-contract-version": report.version,
         "x-axonyx-contract-hash": report.contract_hash,
+        "x-axonyx-response-validation": report.response_validation,
         "info": {
             "title": "Axonyx API",
             "version": "0.1.0"
@@ -16526,7 +16592,7 @@ fn handle_http_request(
         return Ok(AxHttpResponse::text(200, version).with_no_store());
     }
 
-    if let Some(response) = execute_backend_route_request(state, &request)? {
+    if let Some(response) = execute_backend_route_request(state, mode, &request)? {
         return Ok(preview_response_to_http(response));
     }
 
@@ -16996,6 +17062,7 @@ fn normalize_request_for_routing(mut request: AxHttpRequest) -> AxHttpRequest {
 
 fn execute_backend_route_request(
     state: &DevServerState,
+    mode: AxServerMode,
     request: &AxHttpRequest,
 ) -> Result<Option<AxPreviewHttpResponse>> {
     let mut sources = Vec::new();
@@ -17020,15 +17087,20 @@ fn execute_backend_route_request(
         .preview_store
         .lock()
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+    let validate_response = state
+        .runtime_config
+        .api_response_validation
+        .enabled(mode == AxServerMode::Dev);
 
     if uses_db_runtime {
         let env = db_env_for_root(&state.root, None)?;
         let runtime = ax_backend_runtime::runtime_from_env(env)
             .with_context(|| "failed to initialize backend runtime from environment")?;
-        execute_preview_route_request_sources_with_runtime(
+        execute_preview_route_request_sources_with_runtime_validated(
             &source_refs,
             request,
             &runtime,
+            validate_response,
             &mut store,
         )
         .with_context(|| {
@@ -17038,14 +17110,18 @@ fn execute_backend_route_request(
             )
         })
     } else {
-        execute_preview_route_request_sources(&source_refs, request, &mut store).with_context(
-            || {
-                format!(
-                    "failed to execute backend route {} {}",
-                    request.method, request.target
-                )
-            },
+        execute_preview_route_request_sources_validated(
+            &source_refs,
+            request,
+            validate_response,
+            &mut store,
         )
+        .with_context(|| {
+            format!(
+                "failed to execute backend route {} {}",
+                request.method, request.target
+            )
+        })
     }
 }
 
@@ -17503,6 +17579,24 @@ fn configured_server_log_format(root: &Path) -> std::result::Result<AxServerLogF
     match axonyx_config_value(root, "server", "log_format") {
         Some(value) => parse_server_log_format_value(&value),
         None => parse_server_log_format_str(DEFAULT_LOG_FORMAT),
+    }
+}
+
+fn configured_api_response_validation(
+    root: &Path,
+) -> std::result::Result<AxApiResponseValidationMode, String> {
+    match axonyx_config_value(root, "server", "api_response_validation") {
+        Some(toml::Value::String(value)) => {
+            AxApiResponseValidationMode::parse(&value).ok_or_else(|| {
+                "[server].api_response_validation must be \"off\", \"development\", or \"always\"."
+                    .to_string()
+            })
+        }
+        Some(_) => Err(
+            "[server].api_response_validation must be \"off\", \"development\", or \"always\"."
+                .to_string(),
+        ),
+        None => Ok(AxApiResponseValidationMode::Development),
     }
 }
 
@@ -22208,7 +22302,7 @@ component ThemeSwitch() {
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
         fs::write(
             root.join("Axonyx.toml"),
-            "[app]\nname = \"demo\"\n\n[server]\ncompression = 12\nsecurity_headers = \"sometimes\"\nrequest_logging = []\nlog_format = \"xml\"\n",
+            "[app]\nname = \"demo\"\n\n[server]\ncompression = 12\nsecurity_headers = \"sometimes\"\nrequest_logging = []\nlog_format = \"xml\"\napi_response_validation = \"sometimes\"\n",
         )
         .expect("config should write");
         fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
@@ -22228,6 +22322,9 @@ component ThemeSwitch() {
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "axonyx-config-log-format"));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "axonyx-config-api-response-validation" }));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -24565,6 +24662,7 @@ action ValidPost
             }],
             "",
             true,
+            false,
         );
 
         assert!(source.contains("backend::dispatch_api_route"));
@@ -24583,6 +24681,9 @@ action ValidPost
         assert_eq!(source.matches("lazy_runtime_from_env(env)").count(), 1);
         assert!(source.contains("handle_request(&dist, runtime.as_ref(), request)"));
         assert!(source.contains("const DATABASE_REQUIRED: bool = true"));
+        assert!(source.contains("const VALIDATE_API_RESPONSES: bool = false"));
+        assert!(source
+            .contains("backend::dispatch_api_route(runtime, &request, VALIDATE_API_RESPONSES)"));
         assert!(source.contains("/__axonyx/ready"));
         assert!(source.contains("AxQueryExecutor::database_health(runtime)"));
         assert!(source.contains("cross_site_action_request"));
@@ -28239,7 +28340,7 @@ query loadFeatured(status: String) -> Post[] {
             body: Vec::new(),
         };
 
-        let response = execute_backend_route_request(&state, &request)
+        let response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
             .expect("backend route request should succeed")
             .expect("backend route should match");
 
@@ -28327,7 +28428,7 @@ page Posts() {
             body: Vec::new(),
         };
 
-        let response = execute_backend_route_request(&state, &request)
+        let response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
             .expect("backend route request should succeed")
             .expect("backend route should match");
 
@@ -28355,7 +28456,7 @@ page Posts() {
             .with_header("User-Agent", "AxonyxTest")
             .with_body(b"title=Hello+Axonyx".to_vec());
 
-        let response = execute_backend_route_request(&state, &request)
+        let response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
             .expect("backend route request should succeed")
             .expect("backend route should match");
 
@@ -28371,6 +28472,30 @@ page Posts() {
         let body = String::from_utf8(response.body).expect("json response should be utf-8");
         assert_eq!(body, "\"Hello Axonyx\"");
 
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn development_server_enforces_declared_api_response_contracts() {
+        let root = make_temp_dir("api-response-validation-dev");
+        fs::create_dir_all(root.join("routes").join("api")).expect("routes dir should exist");
+        fs::write(
+            root.join("routes").join("api").join("status.ax"),
+            "route GET \"/api/status\" -> String {\n  return json(7)\n}\n",
+        )
+        .expect("route should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest::new("GET", "/api/status");
+
+        let dev_response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
+            .expect("dev route should execute")
+            .expect("dev route should match");
+        let start_response = execute_backend_route_request(&state, AxServerMode::Start, &request)
+            .expect("start route should execute")
+            .expect("start route should match");
+
+        assert_eq!(dev_response.status, 500);
+        assert_eq!(start_response.status, 200);
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
