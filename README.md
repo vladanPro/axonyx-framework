@@ -348,6 +348,22 @@ path with `--out contracts/api.json`, use `--out -` for stdout, or set
 to `<app name> API` and its version follows the Cargo package version; both can
 be overridden with `[api].title` and `[api].version`.
 
+Inspect or pull another service's OpenAPI contract without executing remote
+code:
+
+```bash
+cargo ax api inspect https://service.example/openapi.json
+cargo ax api pull https://service.example/openapi.json --name service
+cargo ax api pull https://service.example/openapi.json --name service \
+  --expect-hash sha256:<canonical-document-hash>
+```
+
+Pull writes `.axonyx/contracts/service.openapi.json`. HTTPS is required for
+remote hosts; loopback HTTP remains available for development and
+`--allow-http` is an explicit escape hatch. Fetches have a ten-second timeout,
+no redirects, and a 2 MiB response limit. Query strings are excluded from
+reports so URL tokens are not persisted.
+
 `cargo ax schema pull` accepts sample JSON as a draft, but it can also read a typed
 envelope from an endpoint or file. When the source includes `schema`, Axonyx uses
 that contract instead of guessing from `null` values:
