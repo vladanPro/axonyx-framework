@@ -318,6 +318,7 @@ From an app root:
 ```bash
 cargo ax doctor
 cargo ax check
+cargo ax fmt --check
 cargo ax migrate asx --dry-run
 cargo ax g component ThemeSwitcher
 cargo ax g island CommandPalette
@@ -332,6 +333,12 @@ cargo ax build
 cargo ax run dev
 cargo ax test
 ```
+
+`cargo ax fmt` formats project `.asx` and `.ax` sources through the same Rust
+formatter that editor tooling can reuse. Use `cargo ax fmt --file app/page.asx`
+for one file, `--stdout` for a non-mutating preview, `--stdin` for editor pipes,
+or `--check` in CI. Formatter V0 owns whitespace only and does not rewrite
+expressions, strings, imports, or embedded client code.
 
 Axonyx 0.2 uses `.asx` for pages, layouts, boundaries, and UI components while
 keeping `.ax` for loaders, actions, API routes, domain code, and jobs. Existing
