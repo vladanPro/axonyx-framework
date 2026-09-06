@@ -197,6 +197,12 @@ return ASX {
   }
   if (!$ready) { throw "Compiled server did not become ready" }
 
+  $readiness = Invoke-AxRequest -Url "$baseUrl/__axonyx/ready" -Method "GET"
+  $readinessPayload = $readiness.Body | ConvertFrom-Json
+  if (!$readinessPayload.ok -or !$readinessPayload.database.required -or !$readinessPayload.database.ok -or $readinessPayload.database.driver -ne "sqlite") {
+    throw "Compiled database readiness response is invalid: $($readiness.Body)"
+  }
+
   $actionUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=SetTheme"
   $success = Invoke-AxRequest -Url $actionUrl -Body "theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
   if ($success.Headers["Content-Type"] -notmatch "application/ax-patch\+json") { throw "Missing patch content type" }

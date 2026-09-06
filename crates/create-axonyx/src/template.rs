@@ -31,6 +31,7 @@ const APP_ROUTE_POSTS_AX: &str = include_str!("../templates/minimal/routes/api/p
 const APP_JOB_DIGEST_AX: &str = include_str!("../templates/minimal/jobs/digest.ax.tpl");
 const APP_README: &str = include_str!("../templates/minimal/README.md.tpl");
 const APP_GITIGNORE: &str = include_str!("../templates/minimal/.gitignore.tpl");
+const APP_ENV: &str = include_str!("../templates/minimal/.env.tpl");
 const APP_ENV_EXAMPLE: &str = include_str!("../templates/minimal/.env.example.tpl");
 const APP_AEGIS_TOML: &str = include_str!("../templates/minimal/aegis.toml.tpl");
 const APP_PUBLIC_FAVICON_SVG: &str = include_str!("../templates/minimal/public/favicon.svg.tpl");
@@ -153,6 +154,10 @@ pub fn template_files(
             TemplateFile {
                 relative_path: "src/db/mod.rs",
                 contents: apply_vars(APP_DB_MOD_RS, &vars),
+            },
+            TemplateFile {
+                relative_path: ".env",
+                contents: apply_vars(APP_ENV, &vars),
             },
             TemplateFile {
                 relative_path: ".env.example",

@@ -29,6 +29,52 @@ sources, regenerates `src/generated/backend.rs`, and writes static HTML into
 In this template it shows the `CreatePost` inputs, including the optional
 `status?: string = "draft"` field used by the `ActionForm` on `/posts`.
 
+## Database Migrations
+
+The full-stack template keeps ordered SQL migrations in `db/migrations`, as
+configured by `[db].migrations` in `Axonyx.toml`.
+
+Create and edit the first migration:
+
+```bash
+cargo ax db migration create create_posts
+# edit db/migrations/<version>_create_posts/up.sql
+# edit db/migrations/<version>_create_posts/down.sql
+```
+
+Inspect and apply it locally:
+
+```bash
+cargo ax db status
+cargo ax db migrate --dry-run
+cargo ax db migrate
+cargo ax db pull
+```
+
+The pull writes `.axonyx/db/schema.json` plus `app/generated/db.ax`. From that
+point, `cargo ax check` validates `db.*` resource and field names against the
+real schema, validates typed mutations and required insert fields, while
+`cargo ax db check` reports live schema drift. Generated contracts include
+`*Row`, `*CreateInput`, and `*UpdateInput` types.
+
+Rollback always targets the latest applied migration:
+
+```bash
+cargo ax db rollback --dry-run
+cargo ax db rollback
+```
+
+Environment profiles load `.env.local` by default and `.env.<name>` for
+`--env <name>`. Production changes require explicit confirmation:
+
+```bash
+cargo ax db migrate --env prod --dry-run
+cargo ax db migrate --env prod --confirm
+```
+
+Applied checksums are immutable. If an applied migration changes locally,
+Axonyx stops instead of silently rewriting database history.
+
 ## Fast QA
 
 This starter includes `aegis.toml` for fast route checks before deploy.
@@ -93,7 +139,10 @@ Suggested first edit:
 
 ## Env
 
-Copy `.env.example` to `.env` and set your runtime values.
+The generated, git-ignored `.env` uses the in-memory adapter so the first
+`cargo ax run dev` works without external infrastructure. Copy the PostgreSQL
+settings from `.env.example` into `.env` when you are ready to use a persistent
+database.
 
 Axonyx backend env convention:
 
@@ -109,6 +158,9 @@ Recommended data config:
 - `AX_SECRET_DB_TRANSPORT=direct|api`
 - transport defaults to `direct` when omitted
 - dialect defaults to `postgres` when omitted
+- `[db]` in `Axonyx.toml` defines pool, query timeout, read retry, and SQLite lock-wait defaults
+- matching `AX_SECRET_DB_*` values override `Axonyx.toml` for each deployment
+- Axonyx retries only transient reads; mutations and transactions are never retried automatically
 
 Database adapter convention:
 

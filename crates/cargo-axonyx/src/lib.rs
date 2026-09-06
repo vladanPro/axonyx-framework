@@ -18,12 +18,12 @@ use axonyx_core::ax_ast_prelude::{
 };
 use axonyx_core::ax_backend_ast_prelude::{
     AxBackendBlock, AxBackendDocument, AxBackendStmt, AxBackendValue, AxHookPhase, AxReturn,
-    AxScopeStmt,
+    AxScopeStmt, AxTransactionOperation,
 };
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
     lower_backend_document, AxBackendPlan, AxFieldPlan, AxHandlerKind, AxReturnPlan, AxRustExpr,
-    AxStepPlan, AxValuePlan,
+    AxStepPlan, AxTransactionOperationPlan, AxValuePlan,
 };
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_lowering_prelude::AxValue;
@@ -53,10 +53,12 @@ use axonyx_runtime::{
     preview_ax_route_with_request_context_and_runtime_and_imports, AxPreviewActionResult,
     AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore, AX_STATE_WASM_PATH,
 };
+use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -67,7 +69,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.2.1";
+const AXONYX_RUNTIME_VERSION: &str = "0.3.0";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -311,6 +313,96 @@ struct DbArgs {
 enum DbCommands {
     Check(DbCheckArgs),
     Pull(DbPullArgs),
+    Migration(DbMigrationArgs),
+    Migrate(DbMigrateArgs),
+    Status(DbStatusArgs),
+    Rollback(DbRollbackArgs),
+}
+
+#[derive(Debug, Parser)]
+struct DbMigrationArgs {
+    #[command(subcommand)]
+    command: DbMigrationCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum DbMigrationCommands {
+    Create(DbMigrationCreateArgs),
+}
+
+#[derive(Debug, Parser)]
+struct DbMigrationCreateArgs {
+    /// Human-readable migration name, for example create_posts.
+    name: String,
+
+    /// Override the configured migration directory.
+    #[arg(long)]
+    dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DbMigrateArgs {
+    /// Target environment. Production requires --confirm unless this is a dry run.
+    #[arg(long, default_value = "local")]
+    env: String,
+
+    /// Temporarily override DATABASE_URL / DB_URL.
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Override the configured migration directory.
+    #[arg(long)]
+    dir: Option<PathBuf>,
+
+    /// Print the migration plan without changing the database.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Confirm a production database change.
+    #[arg(long)]
+    confirm: bool,
+}
+
+#[derive(Debug, Parser)]
+struct DbStatusArgs {
+    /// Target environment.
+    #[arg(long, default_value = "local")]
+    env: String,
+
+    /// Temporarily override DATABASE_URL / DB_URL.
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Override the configured migration directory.
+    #[arg(long)]
+    dir: Option<PathBuf>,
+
+    /// Output format for migration status.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+}
+
+#[derive(Debug, Parser)]
+struct DbRollbackArgs {
+    /// Target environment. Production requires --confirm unless this is a dry run.
+    #[arg(long, default_value = "local")]
+    env: String,
+
+    /// Temporarily override DATABASE_URL / DB_URL.
+    #[arg(long)]
+    url: Option<String>,
+
+    /// Override the configured migration directory.
+    #[arg(long)]
+    dir: Option<PathBuf>,
+
+    /// Print the rollback target without changing the database.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Confirm a production database rollback.
+    #[arg(long)]
+    confirm: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -337,6 +429,10 @@ struct DbPullArgs {
     /// Schema output path.
     #[arg(long, default_value = ".axonyx/db/schema.json")]
     out: PathBuf,
+
+    /// Generated Axonyx database type contract path.
+    #[arg(long, default_value = "app/generated/db.ax")]
+    types_out: PathBuf,
 }
 
 #[derive(Debug, Parser)]
@@ -578,6 +674,7 @@ struct DevServerState {
     root: PathBuf,
     preview_store: Mutex<AxPreviewStore>,
     runtime_config: AxServerRuntimeConfig,
+    database_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -861,6 +958,8 @@ struct RegistryItemReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ApiReport {
+    version: u32,
+    contract_hash: String,
     routes: Vec<ApiRouteReport>,
     schemas: Vec<ApiSchemaReport>,
 }
@@ -869,6 +968,8 @@ struct ApiReport {
 struct ApiRouteReport {
     method: String,
     route: String,
+    request_hash: String,
+    response_hash: String,
     returns: Option<String>,
     responses: Vec<ApiResponseReport>,
     auth: Vec<ApiAuthReport>,
@@ -1353,6 +1454,9 @@ struct DbCheckReport {
     transport: String,
     url: Option<String>,
     tables: Vec<String>,
+    schema_hash: Option<String>,
+    manifest_hash: Option<String>,
+    schema_drift: bool,
     message: String,
 }
 
@@ -1360,32 +1464,96 @@ struct DbCheckReport {
 struct DbPullReport {
     ok: bool,
     path: String,
+    types_path: String,
     schema: DbSchemaManifest,
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DbMigrationFile {
+    path: PathBuf,
+    migration: ax_backend_runtime::AxMigration,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbMigrationStatusEntry {
+    version: String,
+    name: String,
+    status: String,
+    checksum: String,
+    applied_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DbMigrationStatusReport {
+    driver: String,
+    environment: String,
+    url: Option<String>,
+    directory: String,
+    entries: Vec<DbMigrationStatusEntry>,
+    applied: usize,
+    pending: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DbSchemaManifest {
     version: u32,
     driver: String,
     transport: String,
     url: Option<String>,
+    #[serde(default)]
+    schema_hash: String,
+    #[serde(default = "default_db_types_path")]
+    types_path: String,
     tables: Vec<DbSchemaTable>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct DbSchemaTable {
-    name: String,
-    columns: Vec<DbSchemaColumn>,
+fn default_db_types_path() -> String {
+    "app/generated/db.ax".to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DbSchemaTable {
+    name: String,
+    #[serde(default = "default_db_resource_kind")]
+    kind: String,
+    #[serde(default)]
+    record: String,
+    columns: Vec<DbSchemaColumn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    relations: Vec<DbSchemaRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DbSchemaRelation {
+    name: String,
+    columns: Vec<String>,
+    target_schema: String,
+    target_table: String,
+    target_columns: Vec<String>,
+    on_update: String,
+    on_delete: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct DbSchemaColumn {
     name: String,
     ty: String,
+    #[serde(default)]
+    ax_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_type_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    db_type_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    enum_values: Vec<String>,
     nullable: bool,
     primary_key: bool,
     default: Option<String>,
+}
+
+fn default_db_resource_kind() -> String {
+    "table".to_string()
 }
 
 pub fn main_entry() {
@@ -1930,7 +2098,489 @@ fn db_command(args: DbArgs) -> Result<()> {
     match args.command {
         DbCommands::Check(args) => db_check_command(args),
         DbCommands::Pull(args) => db_pull_command(args),
+        DbCommands::Migration(args) => db_migration_command(args),
+        DbCommands::Migrate(args) => db_migrate_command(args),
+        DbCommands::Status(args) => db_status_command(args),
+        DbCommands::Rollback(args) => db_rollback_command(args),
     }
+}
+
+fn db_migration_command(args: DbMigrationArgs) -> Result<()> {
+    match args.command {
+        DbMigrationCommands::Create(args) => db_migration_create_command(args),
+    }
+}
+
+fn db_migration_create_command(args: DbMigrationCreateArgs) -> Result<()> {
+    let root = app_root()?;
+    let directory = migrations_directory(&root, args.dir.as_deref())?;
+    let path = create_migration_files(&directory, &args.name, Utc::now())?;
+    println!("Created migration {}", path.display());
+    println!("  - {}", path.join("up.sql").display());
+    println!("  - {}", path.join("down.sql").display());
+    Ok(())
+}
+
+fn db_migrate_command(args: DbMigrateArgs) -> Result<()> {
+    ensure_database_change_confirmed(&args.env, args.dry_run, args.confirm)?;
+    let root = app_root()?;
+    let directory = migrations_directory(&root, args.dir.as_deref())?;
+    let files = discover_migrations(&directory)?;
+    let (config, runtime) = migration_runtime(&root, &args.env, args.url.as_deref())?;
+    let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let pending = pending_migrations(&files, &history)?;
+
+    print_migration_target(&config, &args.env, &directory);
+    if pending.is_empty() {
+        println!("Database is up to date.");
+        return Ok(());
+    }
+    println!("Pending migrations: {}", pending.len());
+    for migration in &pending {
+        println!(
+            "  - {} {}",
+            migration.migration.version, migration.migration.name
+        );
+    }
+    if args.dry_run {
+        println!("Dry run: no database changes were made.");
+        return Ok(());
+    }
+
+    let migration_plan = pending
+        .iter()
+        .map(|migration| migration.migration.clone())
+        .collect::<Vec<_>>();
+    let applied =
+        ax_backend_runtime::AxMigrationExecutor::apply_migrations(&runtime, &migration_plan)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let skipped = migration_plan.len().saturating_sub(applied.len());
+    if skipped > 0 {
+        println!(
+            "Skipped {skipped} migration(s) already applied while waiting for the migration lock."
+        );
+    }
+    for migration in applied {
+        println!(
+            "Applied {} {} ({} ms)",
+            migration.version, migration.name, migration.execution_ms
+        );
+    }
+    Ok(())
+}
+
+fn db_status_command(args: DbStatusArgs) -> Result<()> {
+    let root = app_root()?;
+    let directory = migrations_directory(&root, args.dir.as_deref())?;
+    let files = discover_migrations(&directory)?;
+    let (config, runtime) = migration_runtime(&root, &args.env, args.url.as_deref())?;
+    let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let report = migration_status_report(&config, &args.env, &directory, &files, &history)?;
+
+    match args.format {
+        CheckFormat::Text => print_migration_status(&report),
+        CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+    }
+    Ok(())
+}
+
+fn db_rollback_command(args: DbRollbackArgs) -> Result<()> {
+    ensure_database_change_confirmed(&args.env, args.dry_run, args.confirm)?;
+    let root = app_root()?;
+    let directory = migrations_directory(&root, args.dir.as_deref())?;
+    let files = discover_migrations(&directory)?;
+    let (config, runtime) = migration_runtime(&root, &args.env, args.url.as_deref())?;
+    let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let _ = pending_migrations(&files, &history)?;
+    let latest = history
+        .last()
+        .context("database migration history is empty; there is nothing to roll back")?;
+    let migration = files
+        .iter()
+        .find(|file| file.migration.version == latest.version)
+        .context("latest applied migration file is missing locally")?;
+
+    print_migration_target(&config, &args.env, &directory);
+    println!(
+        "Rollback: {} {}",
+        migration.migration.version, migration.migration.name
+    );
+    if args.dry_run {
+        println!("Dry run: no database changes were made.");
+        return Ok(());
+    }
+    ax_backend_runtime::AxMigrationExecutor::rollback_migration(&runtime, &migration.migration)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    println!(
+        "Rolled back {} {}",
+        migration.migration.version, migration.migration.name
+    );
+    Ok(())
+}
+
+fn migration_runtime(
+    root: &Path,
+    environment: &str,
+    url_override: Option<&str>,
+) -> Result<(
+    ax_backend_runtime::AxDatabaseConfig,
+    ax_backend_runtime::AxDatabaseRuntime<Box<dyn ax_backend_runtime::AxDatabaseAdapter>>,
+)> {
+    let env = db_env_for_root_profile(root, url_override, environment)?;
+    let config = env
+        .database_config()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    config
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if config.transport != ax_backend_runtime::AxDataTransport::Direct {
+        bail!("database migrations require direct transport");
+    }
+    if !matches!(
+        config.driver,
+        ax_backend_runtime::AxDatabaseDriver::Sqlite
+            | ax_backend_runtime::AxDatabaseDriver::Postgres
+    ) {
+        bail!(
+            "database migrations support SQLite and Postgres; configured driver is {}",
+            config.driver.as_str()
+        );
+    }
+    let runtime = ax_backend_runtime::runtime_from_env(env)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok((config, runtime))
+}
+
+fn ensure_database_change_confirmed(
+    environment: &str,
+    dry_run: bool,
+    confirmed: bool,
+) -> Result<()> {
+    let environment = normalized_environment_profile(environment)?;
+    if is_production_environment(&environment) && !dry_run && !confirmed {
+        bail!(
+            "database changes for environment `{environment}` require --confirm; use --dry-run to inspect the plan safely"
+        );
+    }
+    Ok(())
+}
+
+fn is_production_environment(environment: &str) -> bool {
+    matches!(
+        environment.trim().to_ascii_lowercase().as_str(),
+        "prod" | "production"
+    )
+}
+
+fn normalized_environment_profile(environment: &str) -> Result<String> {
+    let normalized = environment.trim().to_ascii_lowercase();
+    let normalized = if normalized.is_empty() {
+        "local".to_string()
+    } else {
+        normalized
+    };
+    if !normalized
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        bail!("invalid database environment `{environment}`; use letters, numbers, `_`, or `-`");
+    }
+    Ok(normalized)
+}
+
+fn migrations_directory(root: &Path, override_dir: Option<&Path>) -> Result<PathBuf> {
+    let configured = if let Some(path) = override_dir {
+        path.to_path_buf()
+    } else {
+        let config_path = root.join("Axonyx.toml");
+        let configured = fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|source| source.parse::<toml::Value>().ok())
+            .and_then(|value| {
+                value
+                    .get("db")
+                    .and_then(|db| db.get("migrations"))
+                    .and_then(toml::Value::as_str)
+                    .map(PathBuf::from)
+            });
+        configured.unwrap_or_else(|| PathBuf::from("db/migrations"))
+    };
+    Ok(if configured.is_absolute() {
+        configured
+    } else {
+        root.join(configured)
+    })
+}
+
+fn create_migration_files(
+    directory: &Path,
+    name: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<PathBuf> {
+    let name = migration_name_slug(name)?;
+    fs::create_dir_all(directory).with_context(|| {
+        format!(
+            "failed to create migration directory {}",
+            directory.display()
+        )
+    })?;
+    let timestamp = now.format("%Y%m%d%H%M%S").to_string();
+    let sequence = next_migration_sequence(directory, &timestamp)?;
+    let folder = directory.join(format!("{timestamp}_{sequence:03}_{name}"));
+    fs::create_dir(&folder)
+        .with_context(|| format!("failed to create migration {}", folder.display()))?;
+    fs::write(
+        folder.join("up.sql"),
+        "-- Add forward migration SQL here.\n",
+    )?;
+    fs::write(
+        folder.join("down.sql"),
+        "-- Add rollback migration SQL here.\n",
+    )?;
+    Ok(folder)
+}
+
+fn migration_name_slug(name: &str) -> Result<String> {
+    let mut slug = String::new();
+    let mut separator = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            separator = false;
+        } else if !separator && !slug.is_empty() {
+            slug.push('_');
+            separator = true;
+        }
+    }
+    while slug.ends_with('_') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        bail!("migration name must contain at least one ASCII letter or number");
+    }
+    Ok(slug)
+}
+
+fn next_migration_sequence(directory: &Path, timestamp: &str) -> Result<u16> {
+    let mut highest = 0_u16;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let mut parts = name.splitn(3, '_');
+        if parts.next() != Some(timestamp) {
+            continue;
+        }
+        let Some(sequence) = parts.next().and_then(|value| value.parse::<u16>().ok()) else {
+            continue;
+        };
+        highest = highest.max(sequence);
+    }
+    let next = highest.saturating_add(1);
+    if next > 999 {
+        bail!("migration sequence exhausted for timestamp {timestamp}");
+    }
+    Ok(next)
+}
+
+fn discover_migrations(directory: &Path) -> Result<Vec<DbMigrationFile>> {
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut migrations = Vec::new();
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("failed to read migrations from {}", directory.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        migrations.push(read_migration_directory(&entry.path())?);
+    }
+    migrations.sort_by(|left, right| left.migration.version.cmp(&right.migration.version));
+    for pair in migrations.windows(2) {
+        if pair[0].migration.version == pair[1].migration.version {
+            bail!(
+                "duplicate migration version `{}`",
+                pair[0].migration.version
+            );
+        }
+    }
+    Ok(migrations)
+}
+
+fn read_migration_directory(path: &Path) -> Result<DbMigrationFile> {
+    let folder = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("migration directory name is not valid UTF-8")?;
+    let mut parts = folder.splitn(3, '_');
+    let timestamp = parts.next().unwrap_or_default();
+    let sequence = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    if timestamp.len() != 14
+        || !timestamp.chars().all(|ch| ch.is_ascii_digit())
+        || sequence.len() != 3
+        || !sequence.chars().all(|ch| ch.is_ascii_digit())
+        || migration_name_slug(name).ok().as_deref() != Some(name)
+    {
+        bail!("invalid migration directory `{folder}`; expected YYYYMMDDHHMMSS_NNN_name");
+    }
+    let up_path = path.join("up.sql");
+    let down_path = path.join("down.sql");
+    let up_sql = fs::read_to_string(&up_path)
+        .with_context(|| format!("failed to read {}", up_path.display()))?;
+    let down_sql = fs::read_to_string(&down_path)
+        .with_context(|| format!("failed to read {}", down_path.display()))?;
+    if !sql_has_executable_statement(&up_sql) || !sql_has_executable_statement(&down_sql) {
+        bail!("migration `{folder}` requires executable SQL in both up.sql and down.sql");
+    }
+    let checksum = migration_checksum(&up_sql, &down_sql);
+    Ok(DbMigrationFile {
+        path: path.to_path_buf(),
+        migration: ax_backend_runtime::AxMigration {
+            version: format!("{timestamp}_{sequence}"),
+            name: name.to_string(),
+            checksum,
+            up_sql,
+            down_sql,
+        },
+    })
+}
+
+fn sql_has_executable_statement(sql: &str) -> bool {
+    sql.lines()
+        .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+        .any(|line| !line.trim().is_empty())
+}
+
+fn migration_checksum(up_sql: &str, down_sql: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"axonyx-migration-v1\0");
+    hasher.update(up_sql.replace("\r\n", "\n").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(down_sql.replace("\r\n", "\n").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn pending_migrations<'a>(
+    files: &'a [DbMigrationFile],
+    history: &[ax_backend_runtime::AxAppliedMigration],
+) -> Result<Vec<&'a DbMigrationFile>> {
+    let local = files
+        .iter()
+        .map(|file| (file.migration.version.as_str(), file))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for applied in history {
+        let file = local.get(applied.version.as_str()).with_context(|| {
+            format!(
+                "applied migration `{}` is missing from the local migration directory",
+                applied.version
+            )
+        })?;
+        if file.migration.checksum != applied.checksum {
+            bail!(
+                "migration `{}` checksum differs from the applied database history",
+                applied.version
+            );
+        }
+    }
+    let highest_applied = history.last().map(|migration| migration.version.as_str());
+    let pending = files
+        .iter()
+        .filter(|file| {
+            !history
+                .iter()
+                .any(|item| item.version == file.migration.version)
+        })
+        .collect::<Vec<_>>();
+    if let Some(highest) = highest_applied {
+        if let Some(out_of_order) = pending
+            .iter()
+            .find(|file| file.migration.version.as_str() < highest)
+        {
+            bail!(
+                "pending migration `{}` is older than applied migration `{highest}`",
+                out_of_order.migration.version
+            );
+        }
+    }
+    Ok(pending)
+}
+
+fn migration_status_report(
+    config: &ax_backend_runtime::AxDatabaseConfig,
+    environment: &str,
+    directory: &Path,
+    files: &[DbMigrationFile],
+    history: &[ax_backend_runtime::AxAppliedMigration],
+) -> Result<DbMigrationStatusReport> {
+    let pending = pending_migrations(files, history)?;
+    let entries = files
+        .iter()
+        .map(|file| {
+            let applied = history
+                .iter()
+                .find(|item| item.version == file.migration.version);
+            DbMigrationStatusEntry {
+                version: file.migration.version.clone(),
+                name: file.migration.name.clone(),
+                status: if applied.is_some() {
+                    "applied".to_string()
+                } else {
+                    "pending".to_string()
+                },
+                checksum: file.migration.checksum.clone(),
+                applied_at: applied.map(|item| item.applied_at.clone()),
+            }
+        })
+        .collect();
+    Ok(DbMigrationStatusReport {
+        driver: config.driver.as_str().to_string(),
+        environment: environment.to_string(),
+        url: config.url.as_deref().map(redact_db_url),
+        directory: directory.display().to_string(),
+        entries,
+        applied: history.len(),
+        pending: pending.len(),
+    })
+}
+
+fn print_migration_status(report: &DbMigrationStatusReport) {
+    println!("Database migration status");
+    println!("Driver: {}", report.driver);
+    println!("Environment: {}", report.environment);
+    if let Some(url) = &report.url {
+        println!("URL: {url}");
+    }
+    println!("Directory: {}", report.directory);
+    if report.entries.is_empty() {
+        println!("Migrations: none");
+        return;
+    }
+    for entry in &report.entries {
+        println!("  {:<8} {} {}", entry.status, entry.version, entry.name);
+    }
+    println!("Applied: {} | Pending: {}", report.applied, report.pending);
+}
+
+fn print_migration_target(
+    config: &ax_backend_runtime::AxDatabaseConfig,
+    environment: &str,
+    directory: &Path,
+) {
+    println!("Database migrations");
+    println!("Driver: {}", config.driver.as_str());
+    println!("Environment: {environment}");
+    if let Some(url) = config.url.as_deref() {
+        println!("URL: {}", redact_db_url(url));
+    }
+    println!("Directory: {}", directory.display());
 }
 
 fn db_check_command(args: DbCheckArgs) -> Result<()> {
@@ -1951,7 +2601,7 @@ fn db_check_command(args: DbCheckArgs) -> Result<()> {
 
 fn db_pull_command(args: DbPullArgs) -> Result<()> {
     let root = app_root()?;
-    let report = collect_db_pull_report(&root, args.url.as_deref(), &args.out)?;
+    let report = collect_db_pull_report(&root, args.url.as_deref(), &args.out, &args.types_out)?;
 
     match args.format {
         CheckFormat::Text => print_db_pull_text(&report),
@@ -1974,51 +2624,86 @@ fn collect_db_check_report(root: &Path, url_override: Option<&str>) -> Result<Db
         .validate()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    if config.driver != ax_backend_runtime::AxDatabaseDriver::Sqlite {
+    if config.transport == ax_backend_runtime::AxDataTransport::Api {
         return Ok(DbCheckReport {
             ok: true,
             driver: config.driver.as_str().to_string(),
             transport: config.transport.as_str().to_string(),
             url: config.url.map(|url| redact_db_url(&url)),
             message: format!(
-                "{} database config is valid. Live table introspection is available for SQLite first; {} introspection is planned next.",
-                display_database_driver(config.driver.as_str()),
-                config.driver.as_str()
+                "{} API transport config is valid. Direct table introspection is not available through an API transport.",
+                display_database_driver(config.driver.as_str())
             ),
             tables: Vec::new(),
+            schema_hash: None,
+            manifest_hash: None,
+            schema_drift: false,
         });
     }
 
-    let runtime = ax_backend_runtime::runtime_from_env(env)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let value = ax_backend_runtime::AxQueryExecutor::load(
-        &runtime,
-        &ax_backend_runtime::AxQueryRequest {
-            collection: "sqlite_master".to_string(),
-            filters: vec![ax_backend_runtime::AxQueryFilterRequest {
-                field: "type".to_string(),
-                op: ax_backend_runtime::AxQueryFilterOp::Eq,
-                value: serde_json::json!("table"),
-            }],
-            orders: vec![ax_backend_runtime::AxQueryOrderRequest {
-                field: "name".to_string(),
-                direction: ax_backend_runtime::AxQueryOrderDirection::Asc,
-            }],
-            limit: None,
-            offset: None,
-            mode: ax_backend_runtime::AxQueryMode::Many,
-        },
-    )
-    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-
-    let tables = sqlite_master_tables_from_value(&value);
+    let driver = config.driver.clone();
+    let live_schema = match driver {
+        ax_backend_runtime::AxDatabaseDriver::Sqlite => {
+            let url = config
+                .url
+                .as_deref()
+                .context("missing AX_SECRET_DB_URL for SQLite schema check")?;
+            Some(pull_sqlite_schema(&config, url)?)
+        }
+        ax_backend_runtime::AxDatabaseDriver::Postgres => Some(pull_postgres_schema(&config, env)?),
+        ax_backend_runtime::AxDatabaseDriver::MySql
+        | ax_backend_runtime::AxDatabaseDriver::Memory => None,
+    };
+    let tables = live_schema
+        .as_ref()
+        .map(|schema| {
+            schema
+                .tables
+                .iter()
+                .map(|table| table.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let local_schema = read_db_schema_manifest(root)?;
+    let schema_hash = live_schema
+        .as_ref()
+        .map(|schema| schema.schema_hash.clone());
+    let manifest_hash = local_schema
+        .as_ref()
+        .map(|schema| schema.schema_hash.clone());
+    let schema_drift = match (&live_schema, &local_schema) {
+        (Some(live), Some(local)) => {
+            live.driver != local.driver || live.schema_hash != local.schema_hash
+        }
+        _ => false,
+    };
+    let message = match driver {
+        _ if schema_drift => {
+            "Database schema differs from .axonyx/db/schema.json. Run `cargo ax db pull`."
+                .to_string()
+        }
+        ax_backend_runtime::AxDatabaseDriver::Sqlite => {
+            format!("SQLite database is reachable ({} resource(s)).", tables.len())
+        }
+        ax_backend_runtime::AxDatabaseDriver::Postgres => format!(
+            "Postgres database is reachable ({} public resource(s)).",
+            tables.len()
+        ),
+        _ => format!(
+            "{} database config is valid. Live table introspection is not implemented for this driver yet.",
+            display_database_driver(driver.as_str())
+        ),
+    };
     Ok(DbCheckReport {
-        ok: true,
+        ok: !schema_drift,
         driver: config.driver.as_str().to_string(),
         transport: config.transport.as_str().to_string(),
         url: config.url.map(|url| redact_db_url(&url)),
-        message: format!("SQLite database is reachable ({} table(s)).", tables.len()),
+        message,
         tables,
+        schema_hash,
+        manifest_hash,
+        schema_drift,
     })
 }
 
@@ -2030,6 +2715,12 @@ fn print_db_check_text(report: &DbCheckReport) {
         println!("URL: {url}");
     }
     println!("{}", report.message);
+    if let Some(hash) = &report.schema_hash {
+        println!("Live schema: {hash}");
+    }
+    if let Some(hash) = &report.manifest_hash {
+        println!("Pulled schema: {hash}");
+    }
     if report.tables.is_empty() {
         println!("Tables: none");
     } else {
@@ -2044,6 +2735,7 @@ fn collect_db_pull_report(
     root: &Path,
     url_override: Option<&str>,
     out: &Path,
+    types_out: &Path,
 ) -> Result<DbPullReport> {
     let env = db_env_for_root(root, url_override)?;
     let config = env
@@ -2053,18 +2745,30 @@ fn collect_db_pull_report(
         .validate()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    if config.driver != ax_backend_runtime::AxDatabaseDriver::Sqlite {
+    if config.transport != ax_backend_runtime::AxDataTransport::Direct {
+        bail!("cargo ax db pull requires direct database transport");
+    }
+
+    if !matches!(
+        config.driver,
+        ax_backend_runtime::AxDatabaseDriver::Sqlite
+            | ax_backend_runtime::AxDatabaseDriver::Postgres
+    ) {
         bail!(
-            "cargo ax db pull supports SQLite schema pulls first; configured driver is {}",
+            "cargo ax db pull supports SQLite and Postgres; configured driver is {}",
             config.driver.as_str()
         );
     }
 
     let Some(url) = config.url.clone() else {
-        bail!("missing AX_SECRET_DB_URL for SQLite schema pull");
+        bail!("missing AX_SECRET_DB_URL for database schema pull");
     };
 
-    let schema = pull_sqlite_schema(&config, &url)?;
+    let mut schema = match config.driver {
+        ax_backend_runtime::AxDatabaseDriver::Sqlite => pull_sqlite_schema(&config, &url)?,
+        ax_backend_runtime::AxDatabaseDriver::Postgres => pull_postgres_schema(&config, env)?,
+        _ => unreachable!("unsupported drivers were rejected above"),
+    };
     let out_path = if out.is_absolute() {
         out.to_path_buf()
     } else {
@@ -2080,14 +2784,38 @@ fn collect_db_pull_report(
         })?;
     }
 
+    schema.types_path = types_out.to_string_lossy().replace('\\', "/");
+    validate_db_schema_types(&schema)?;
     fs::write(&out_path, serde_json::to_string_pretty(&schema)?)
         .with_context(|| format!("failed to write database schema to {}", out_path.display()))?;
+
+    let types_path = if types_out.is_absolute() {
+        types_out.to_path_buf()
+    } else {
+        root.join(types_out)
+    };
+    if let Some(parent) = types_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create generated database type directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(&types_path, render_db_schema_types(&schema)).with_context(|| {
+        format!(
+            "failed to write generated database types to {}",
+            types_path.display()
+        )
+    })?;
 
     Ok(DbPullReport {
         ok: true,
         path: out_path.display().to_string(),
+        types_path: types_path.display().to_string(),
         message: format!(
-            "Pulled SQLite schema with {} table(s).",
+            "Pulled {} schema with {} resource(s).",
+            display_database_driver(schema.driver.as_str()),
             schema.tables.len()
         ),
         schema,
@@ -2102,13 +2830,20 @@ fn print_db_pull_text(report: &DbPullReport) {
         println!("URL: {url}");
     }
     println!("Schema: {}", report.path);
+    println!("Types: {}", report.types_path);
     println!("{}", report.message);
     if report.schema.tables.is_empty() {
-        println!("Tables: none");
+        println!("Resources: none");
     } else {
-        println!("Tables:");
+        println!("Resources:");
         for table in &report.schema.tables {
-            println!("  - {} ({} column(s))", table.name, table.columns.len());
+            println!(
+                "  - {} ({}, {}, {} column(s))",
+                table.name,
+                table.kind,
+                table.record,
+                table.columns.len()
+            );
         }
     }
 }
@@ -2121,28 +2856,307 @@ fn pull_sqlite_schema(
         .with_context(|| "failed to open SQLite database for schema pull")?;
     let tables = sqlite_schema_tables(&connection)?;
 
-    Ok(DbSchemaManifest {
-        version: 1,
+    Ok(finalize_db_schema_manifest(DbSchemaManifest {
+        version: 3,
         driver: config.driver.as_str().to_string(),
         transport: config.transport.as_str().to_string(),
         url: config.url.clone().map(|url| redact_db_url(&url)),
+        schema_hash: String::new(),
+        types_path: default_db_types_path(),
         tables,
-    })
+    }))
+}
+
+fn pull_postgres_schema(
+    config: &ax_backend_runtime::AxDatabaseConfig,
+    env: ax_backend_runtime::AxEnv,
+) -> Result<DbSchemaManifest> {
+    let runtime = ax_backend_runtime::runtime_from_env(env)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let columns = ax_backend_runtime::AxQueryExecutor::query(
+        &runtime,
+        &ax_backend_runtime::AxRawSqlRequest {
+            sql: POSTGRES_SCHEMA_QUERY.to_string(),
+            params: Vec::new(),
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let relations = ax_backend_runtime::AxQueryExecutor::query(
+        &runtime,
+        &ax_backend_runtime::AxRawSqlRequest {
+            sql: POSTGRES_RELATIONS_QUERY.to_string(),
+            params: Vec::new(),
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    Ok(finalize_db_schema_manifest(DbSchemaManifest {
+        version: 3,
+        driver: config.driver.as_str().to_string(),
+        transport: config.transport.as_str().to_string(),
+        url: config.url.clone().map(|url| redact_db_url(&url)),
+        schema_hash: String::new(),
+        types_path: default_db_types_path(),
+        tables: postgres_schema_tables_from_value(&columns, &relations)?,
+    }))
+}
+
+const POSTGRES_SCHEMA_QUERY: &str = r#"
+select
+  c.table_name,
+  case when t.table_type = 'VIEW' then 'view' else 'table' end as resource_kind,
+  c.column_name,
+  case
+    when c.data_type = 'ARRAY' then element_type.typname || '[]'
+    when c.data_type = 'USER-DEFINED' then c.udt_name
+    else c.data_type
+  end as data_type,
+  case
+    when c.domain_name is not null then 'domain'
+    when c.data_type = 'ARRAY' and element_type.typtype = 'e' then 'enum_array'
+    when c.data_type = 'ARRAY' then 'array'
+    when column_type.typtype = 'e' then 'enum'
+    else 'scalar'
+  end as db_type_kind,
+  case
+    when c.domain_name is not null then c.domain_name
+    when c.data_type = 'ARRAY' and element_type.typtype = 'e' then element_type.typname
+    when column_type.typtype = 'e' then column_type.typname
+    else null
+  end as db_type_name,
+  coalesce((
+    select json_agg(enum_label.enumlabel order by enum_label.enumsortorder)
+    from pg_catalog.pg_enum enum_label
+    where enum_label.enumtypid = case
+      when c.data_type = 'ARRAY' then element_type.oid
+      else column_type.oid
+    end
+  ), '[]'::json) as enum_values,
+  (c.is_nullable = 'YES') as nullable,
+  c.column_default,
+  exists (
+    select 1
+    from information_schema.table_constraints tc
+    join information_schema.key_column_usage kcu
+      on tc.constraint_name = kcu.constraint_name
+      and tc.table_schema = kcu.table_schema
+      and tc.table_name = kcu.table_name
+    where tc.constraint_type = 'PRIMARY KEY'
+      and tc.table_schema = c.table_schema
+      and tc.table_name = c.table_name
+      and kcu.column_name = c.column_name
+  ) as primary_key
+from information_schema.columns c
+join information_schema.tables t
+  on t.table_schema = c.table_schema
+  and t.table_name = c.table_name
+left join pg_catalog.pg_namespace column_namespace
+  on column_namespace.nspname = c.udt_schema
+left join pg_catalog.pg_type column_type
+  on column_type.typname = c.udt_name
+  and column_type.typnamespace = column_namespace.oid
+left join pg_catalog.pg_type element_type
+  on element_type.oid = column_type.typelem
+where c.table_schema = 'public'
+  and t.table_type in ('BASE TABLE', 'VIEW')
+  and c.table_name <> '_axonyx_migrations'
+order by c.table_name, c.ordinal_position
+"#;
+
+const POSTGRES_RELATIONS_QUERY: &str = r#"
+select
+  constraint_row.conname as relation_name,
+  source_table.relname as table_name,
+  target_schema.nspname as target_schema,
+  target_table.relname as target_table,
+  (
+    select json_agg(source_attribute.attname order by source_key.ordinality)
+    from unnest(constraint_row.conkey) with ordinality as source_key(attnum, ordinality)
+    join pg_catalog.pg_attribute source_attribute
+      on source_attribute.attrelid = constraint_row.conrelid
+      and source_attribute.attnum = source_key.attnum
+  ) as columns,
+  (
+    select json_agg(target_attribute.attname order by target_key.ordinality)
+    from unnest(constraint_row.confkey) with ordinality as target_key(attnum, ordinality)
+    join pg_catalog.pg_attribute target_attribute
+      on target_attribute.attrelid = constraint_row.confrelid
+      and target_attribute.attnum = target_key.attnum
+  ) as target_columns,
+  case constraint_row.confupdtype
+    when 'c' then 'cascade'
+    when 'n' then 'set_null'
+    when 'd' then 'set_default'
+    when 'r' then 'restrict'
+    else 'no_action'
+  end as on_update,
+  case constraint_row.confdeltype
+    when 'c' then 'cascade'
+    when 'n' then 'set_null'
+    when 'd' then 'set_default'
+    when 'r' then 'restrict'
+    else 'no_action'
+  end as on_delete
+from pg_catalog.pg_constraint constraint_row
+join pg_catalog.pg_class source_table
+  on source_table.oid = constraint_row.conrelid
+join pg_catalog.pg_namespace source_schema
+  on source_schema.oid = source_table.relnamespace
+join pg_catalog.pg_class target_table
+  on target_table.oid = constraint_row.confrelid
+join pg_catalog.pg_namespace target_schema
+  on target_schema.oid = target_table.relnamespace
+where constraint_row.contype = 'f'
+  and source_schema.nspname = 'public'
+order by source_table.relname, constraint_row.conname
+"#;
+
+fn postgres_schema_tables_from_value(
+    columns: &serde_json::Value,
+    relations: &serde_json::Value,
+) -> Result<Vec<DbSchemaTable>> {
+    let rows = columns
+        .as_array()
+        .context("Postgres schema introspection did not return a row array")?;
+    let mut tables = std::collections::BTreeMap::<String, (String, Vec<DbSchemaColumn>)>::new();
+
+    for row in rows {
+        let table = postgres_schema_string(row, "table_name")?;
+        let kind = row
+            .get("resource_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("table")
+            .to_string();
+        let sql_type = postgres_schema_string(row, "data_type")?;
+        let db_type_kind = row
+            .get("db_type_kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("scalar")
+            .to_string();
+        let db_type_name = row
+            .get("db_type_name")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let enum_values = row
+            .get("enum_values")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let column = DbSchemaColumn {
+            name: postgres_schema_string(row, "column_name")?,
+            ax_type: database_column_ax_type(
+                "postgres",
+                &sql_type,
+                &db_type_kind,
+                db_type_name.as_deref(),
+            ),
+            ty: sql_type,
+            db_type_kind: Some(db_type_kind),
+            db_type_name,
+            enum_values,
+            nullable: row
+                .get("nullable")
+                .and_then(serde_json::Value::as_bool)
+                .context("Postgres schema row is missing boolean `nullable`")?,
+            primary_key: row
+                .get("primary_key")
+                .and_then(serde_json::Value::as_bool)
+                .context("Postgres schema row is missing boolean `primary_key`")?,
+            default: row
+                .get("column_default")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        };
+        let entry = tables
+            .entry(table)
+            .or_insert_with(|| (kind.clone(), Vec::new()));
+        entry.1.push(column);
+    }
+
+    let mut relations = postgres_schema_relations_from_value(relations)?;
+    Ok(tables
+        .into_iter()
+        .map(|(name, (kind, columns))| DbSchemaTable {
+            record: db_resource_record_name(&name),
+            relations: relations.remove(&name).unwrap_or_default(),
+            name,
+            kind,
+            columns,
+        })
+        .collect())
+}
+
+fn postgres_schema_relations_from_value(
+    value: &serde_json::Value,
+) -> Result<std::collections::BTreeMap<String, Vec<DbSchemaRelation>>> {
+    let rows = value
+        .as_array()
+        .context("Postgres relation introspection did not return a row array")?;
+    let mut relations = std::collections::BTreeMap::<String, Vec<DbSchemaRelation>>::new();
+    for row in rows {
+        let table = postgres_schema_string(row, "table_name")?;
+        let relation = DbSchemaRelation {
+            name: postgres_schema_string(row, "relation_name")?,
+            columns: postgres_schema_string_array(row, "columns")?,
+            target_schema: postgres_schema_string(row, "target_schema")?,
+            target_table: postgres_schema_string(row, "target_table")?,
+            target_columns: postgres_schema_string_array(row, "target_columns")?,
+            on_update: postgres_schema_string(row, "on_update")?,
+            on_delete: postgres_schema_string(row, "on_delete")?,
+        };
+        relations.entry(table).or_default().push(relation);
+    }
+    Ok(relations)
+}
+
+fn postgres_schema_string(row: &serde_json::Value, field: &str) -> Result<String> {
+    row.get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("Postgres schema row is missing string `{field}`"))
+}
+
+fn postgres_schema_string_array(row: &serde_json::Value, field: &str) -> Result<Vec<String>> {
+    row.get(field)
+        .and_then(serde_json::Value::as_array)
+        .with_context(|| format!("Postgres schema row is missing array `{field}`"))?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .with_context(|| format!("Postgres schema array `{field}` contains a non-string"))
+        })
+        .collect()
 }
 
 fn sqlite_schema_tables(connection: &rusqlite::Connection) -> Result<Vec<DbSchemaTable>> {
     let mut statement = connection.prepare(
-        "select name from sqlite_master where type = 'table' and name not like 'sqlite_%' order by name",
+        "select name, type from sqlite_master where type in ('table', 'view') and name not like 'sqlite_%' and name <> '_axonyx_migrations' order by name",
     )?;
     let table_names = statement
-        .query_map([], |row| row.get::<_, String>(0))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     table_names
         .into_iter()
-        .map(|name| {
+        .map(|(name, kind)| {
             let columns = sqlite_schema_columns(connection, &name)?;
-            Ok(DbSchemaTable { name, columns })
+            Ok(DbSchemaTable {
+                record: db_resource_record_name(&name),
+                name,
+                kind,
+                columns,
+                relations: Vec::new(),
+            })
         })
         .collect()
 }
@@ -2157,9 +3171,14 @@ fn sqlite_schema_columns(
         .query_map([], |row| {
             let not_null = row.get::<_, i64>(3)? != 0;
             let primary_key = row.get::<_, i64>(5)? != 0;
+            let sql_type = row.get::<_, String>(2)?;
             Ok(DbSchemaColumn {
                 name: row.get(1)?,
-                ty: row.get::<_, String>(2)?,
+                ax_type: database_ax_type("sqlite", &sql_type),
+                ty: sql_type,
+                db_type_kind: None,
+                db_type_name: None,
+                enum_values: Vec::new(),
                 nullable: !not_null && !primary_key,
                 default: row.get(4)?,
                 primary_key,
@@ -2167,6 +3186,326 @@ fn sqlite_schema_columns(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(columns)
+}
+
+fn finalize_db_schema_manifest(mut schema: DbSchemaManifest) -> DbSchemaManifest {
+    for table in &mut schema.tables {
+        if table.kind.is_empty() {
+            table.kind = default_db_resource_kind();
+        }
+        if table.record.is_empty() {
+            table.record = db_resource_record_name(&table.name);
+        }
+        for column in &mut table.columns {
+            if column.ax_type.is_empty() {
+                column.ax_type = database_column_ax_type(
+                    &schema.driver,
+                    &column.ty,
+                    column.db_type_kind.as_deref().unwrap_or("scalar"),
+                    column.db_type_name.as_deref(),
+                );
+            }
+        }
+    }
+    schema.schema_hash = db_schema_hash(&schema.tables);
+    schema
+}
+
+fn read_db_schema_manifest(root: &Path) -> Result<Option<DbSchemaManifest>> {
+    let path = root.join(".axonyx/db/schema.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read database schema manifest {}", path.display()))?;
+    let schema = serde_json::from_str::<DbSchemaManifest>(&source).with_context(|| {
+        format!(
+            "database schema manifest {} is invalid; run `cargo ax db pull`",
+            path.display()
+        )
+    })?;
+    Ok(Some(finalize_db_schema_manifest(schema)))
+}
+
+fn db_schema_hash(tables: &[DbSchemaTable]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"axonyx-db-schema-v3\0");
+    hasher.update(serde_json::to_vec(tables).expect("database schema tables should serialize"));
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn db_resource_record_name(resource: &str) -> String {
+    format!("{}Row", sanitize_type_name(resource))
+}
+
+fn database_ax_type(driver: &str, sql_type: &str) -> String {
+    let normalized = sql_type.trim().to_ascii_lowercase();
+    if driver == "postgres" && normalized.ends_with("[]") {
+        return format!(
+            "List<{}>",
+            database_ax_type(driver, normalized.trim_end_matches("[]"))
+        );
+    }
+
+    let base = match normalized.as_str() {
+        "bool" | "boolean" => "Bool",
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "int2" | "int4"
+        | "int8" | "serial" | "bigserial" | "smallserial" => "Int",
+        "numeric" | "decimal" if driver == "postgres" => "Decimal",
+        "real" | "float" | "float4" | "float8" | "double" | "double precision" | "numeric"
+        | "decimal" => "Float",
+        "date" => "Date",
+        "time" | "time without time zone" | "time with time zone" => "Time",
+        "datetime"
+        | "timestamp"
+        | "timestamp without time zone"
+        | "timestamp with time zone"
+        | "timestamptz" => "DateTime",
+        "uuid" => "Uuid",
+        "blob" | "bytea" | "binary" | "varbinary" => "Bytes",
+        "json" | "jsonb" => "Json",
+        _ if normalized.contains("int") => "Int",
+        _ if normalized.contains("char")
+            || normalized.contains("text")
+            || normalized.contains("clob") =>
+        {
+            "String"
+        }
+        _ if normalized.contains("real")
+            || normalized.contains("floa")
+            || normalized.contains("doub") =>
+        {
+            "Float"
+        }
+        _ if normalized.contains("blob") => "Bytes",
+        _ => "String",
+    };
+    base.to_string()
+}
+
+fn database_column_ax_type(
+    driver: &str,
+    sql_type: &str,
+    db_type_kind: &str,
+    db_type_name: Option<&str>,
+) -> String {
+    match db_type_kind {
+        "enum" => db_type_name
+            .map(sanitize_type_name)
+            .unwrap_or_else(|| database_ax_type(driver, sql_type)),
+        "enum_array" => db_type_name
+            .map(|name| format!("List<{}>", sanitize_type_name(name)))
+            .unwrap_or_else(|| database_ax_type(driver, sql_type)),
+        _ => database_ax_type(driver, sql_type),
+    }
+}
+
+fn db_schema_enum_types(
+    schema: &DbSchemaManifest,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut enums = std::collections::BTreeMap::new();
+    for column in schema.tables.iter().flat_map(|table| &table.columns) {
+        if !matches!(column.db_type_kind.as_deref(), Some("enum" | "enum_array")) {
+            continue;
+        }
+        let Some(name) = column.db_type_name.as_deref() else {
+            continue;
+        };
+        enums
+            .entry(sanitize_type_name(name))
+            .or_insert_with(|| column.enum_values.clone());
+    }
+    enums
+}
+
+fn render_db_schema_types(schema: &DbSchemaManifest) -> String {
+    let mut output = String::new();
+    for (name, values) in db_schema_enum_types(schema) {
+        let values = values
+            .iter()
+            .map(|value| serde_json::to_string(value).expect("enum labels should serialize"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        output.push_str(&format!("export type {name} = {values}\n\n"));
+    }
+    for table in &schema.tables {
+        output.push_str(&format!("export type {} {{\n", table.record));
+        for column in &table.columns {
+            let ty = if column.nullable {
+                format!("Optional<{}>", column.ax_type)
+            } else {
+                column.ax_type.clone()
+            };
+            output.push_str(&format!("  {}: {}\n", column.name, ty));
+        }
+        output.push_str("}\n\n");
+
+        if table.kind == "view" {
+            continue;
+        }
+
+        let resource_type = sanitize_type_name(&table.name);
+        output.push_str(&format!("export type {resource_type}CreateInput {{\n"));
+        for column in &table.columns {
+            let optional = db_column_is_optional_on_insert(schema, column);
+            let ty = if optional {
+                format!("Optional<{}>", column.ax_type)
+            } else {
+                column.ax_type.clone()
+            };
+            output.push_str(&format!("  {}: {}\n", column.name, ty));
+        }
+        output.push_str("}\n\n");
+
+        output.push_str(&format!("export type {resource_type}UpdateInput {{\n"));
+        for column in &table.columns {
+            output.push_str(&format!(
+                "  {}: Optional<{}>\n",
+                column.name, column.ax_type
+            ));
+        }
+        output.push_str("}\n\n");
+    }
+    output
+}
+
+fn db_column_is_optional_on_insert(schema: &DbSchemaManifest, column: &DbSchemaColumn) -> bool {
+    column.nullable
+        || column.default.is_some()
+        || (schema.driver == "sqlite"
+            && column.primary_key
+            && database_ax_type(&schema.driver, &column.ty) == "Int")
+}
+
+fn validate_db_schema_types(schema: &DbSchemaManifest) -> Result<()> {
+    let mut enum_contracts = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for column in schema.tables.iter().flat_map(|table| &table.columns) {
+        if !matches!(column.db_type_kind.as_deref(), Some("enum" | "enum_array")) {
+            continue;
+        }
+        let name = column.db_type_name.as_deref().with_context(|| {
+            format!(
+                "Postgres enum column `{}` is missing its database type name",
+                column.name
+            )
+        })?;
+        if column.enum_values.is_empty() {
+            bail!("Postgres enum type `{name}` does not expose any labels");
+        }
+        let contract_name = sanitize_type_name(name);
+        if let Some(existing) = enum_contracts.insert(contract_name, column.enum_values.clone()) {
+            if existing != column.enum_values {
+                bail!("Postgres enum type `{name}` has inconsistent labels across columns");
+            }
+        }
+    }
+
+    let resources = schema
+        .tables
+        .iter()
+        .map(|table| (table.name.as_str(), table))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut records = std::collections::BTreeSet::new();
+    for table in &schema.tables {
+        if !is_backend_identifier_like(&table.name) {
+            bail!(
+                "database resource `{}` cannot be represented as an Axonyx db accessor; use an ASCII identifier, a compatible view alias, or db.query()",
+                table.name
+            );
+        }
+        if !records.insert(table.record.as_str()) {
+            bail!(
+                "database resources produce duplicate Axonyx row type `{}`; rename one resource",
+                table.record
+            );
+        }
+        for column in &table.columns {
+            if !is_backend_identifier_like(&column.name) {
+                bail!(
+                    "database column `{}.{}` cannot be represented as an Axonyx type field; use an ASCII identifier or db.query()",
+                    table.name,
+                    column.name
+                );
+            }
+            AxType::parse_annotation(&column.ax_type).with_context(|| {
+                format!(
+                    "database column `{}.{}` mapped to invalid Axonyx type `{}`",
+                    table.name, column.name, column.ax_type
+                )
+            })?;
+        }
+        let mut relation_names = std::collections::BTreeSet::new();
+        for relation in &table.relations {
+            if !relation_names.insert(relation.name.as_str()) {
+                bail!(
+                    "database resource `{}` contains duplicate relation `{}`",
+                    table.name,
+                    relation.name
+                );
+            }
+            if relation.columns.is_empty()
+                || relation.columns.len() != relation.target_columns.len()
+            {
+                bail!(
+                    "database relation `{}` must map the same non-zero number of source and target columns",
+                    relation.name
+                );
+            }
+            for column in &relation.columns {
+                if !table
+                    .columns
+                    .iter()
+                    .any(|candidate| candidate.name == *column)
+                {
+                    bail!(
+                        "database relation `{}` references missing source column `{}.{column}`",
+                        relation.name,
+                        table.name
+                    );
+                }
+            }
+            if relation.target_schema == "public" {
+                let target = resources
+                    .get(relation.target_table.as_str())
+                    .with_context(|| {
+                        format!(
+                            "database relation `{}` references missing target resource `{}`",
+                            relation.name, relation.target_table
+                        )
+                    })?;
+                for column in &relation.target_columns {
+                    if !target
+                        .columns
+                        .iter()
+                        .any(|candidate| candidate.name == *column)
+                    {
+                        bail!(
+                            "database relation `{}` references missing target column `{}.{column}`",
+                            relation.name,
+                            relation.target_table
+                        );
+                    }
+                }
+            }
+            for action in [&relation.on_update, &relation.on_delete] {
+                if !matches!(
+                    action.as_str(),
+                    "no_action" | "restrict" | "cascade" | "set_null" | "set_default"
+                ) {
+                    bail!(
+                        "database relation `{}` has unsupported referential action `{action}`",
+                        relation.name
+                    );
+                }
+            }
+        }
+    }
+    let generated = render_db_schema_types(schema);
+    if !generated.trim().is_empty() {
+        parse_backend_ax(&generated)
+            .context("generated database row contracts are not valid Axonyx source")?;
+    }
+    Ok(())
 }
 
 fn sqlite_database_path(url: &str) -> String {
@@ -2182,26 +3521,27 @@ fn sqlite_quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
-fn sqlite_master_tables_from_value(value: &serde_json::Value) -> Vec<String> {
-    let Some(items) = value.as_array() else {
-        return Vec::new();
-    };
-
-    items
-        .iter()
-        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
-        .filter(|name| !name.starts_with("sqlite_"))
-        .map(ToOwned::to_owned)
-        .collect()
+fn db_env_for_root(root: &Path, url_override: Option<&str>) -> Result<ax_backend_runtime::AxEnv> {
+    db_env_for_root_profile(root, url_override, "local")
 }
 
-fn db_env_for_root(root: &Path, url_override: Option<&str>) -> Result<ax_backend_runtime::AxEnv> {
+fn db_env_for_root_profile(
+    root: &Path,
+    url_override: Option<&str>,
+    environment: &str,
+) -> Result<ax_backend_runtime::AxEnv> {
     let mut env = ax_backend_runtime::AxEnv::new();
     merge_env_file_into_ax_env(&mut env, &root.join(".env"))?;
-    merge_env_file_into_ax_env(&mut env, &root.join(".env.local"))?;
+    let normalized = normalized_environment_profile(environment)?;
+    if normalized == "local" {
+        merge_env_file_into_ax_env(&mut env, &root.join(".env.local"))?;
+    } else {
+        merge_env_file_into_ax_env(&mut env, &root.join(format!(".env.{normalized}")))?;
+    }
     for (key, value) in std::env::vars() {
         set_ax_env_key(&mut env, &key, &value);
     }
+    merge_db_config_defaults_into_ax_env(&mut env, root)?;
     infer_database_driver_from_env_url(&mut env);
     if let Some(url) = url_override {
         env.secret
@@ -2212,6 +3552,38 @@ fn db_env_for_root(root: &Path, url_override: Option<&str>) -> Result<ax_backend
         }
     }
     Ok(env)
+}
+
+const DB_RUNTIME_CONFIG_KEYS: [(&str, &str); 6] = [
+    ("pool_max_size", "db_pool_max_size"),
+    ("pool_timeout_ms", "db_pool_timeout_ms"),
+    ("query_timeout_ms", "db_query_timeout_ms"),
+    ("read_retry_attempts", "db_read_retry_attempts"),
+    ("read_retry_backoff_ms", "db_read_retry_backoff_ms"),
+    ("sqlite_busy_timeout_ms", "db_sqlite_busy_timeout_ms"),
+];
+
+fn merge_db_config_defaults_into_ax_env(
+    env: &mut ax_backend_runtime::AxEnv,
+    root: &Path,
+) -> Result<()> {
+    let Some(table) = axonyx_config_table(root, "db") else {
+        return Ok(());
+    };
+
+    for (config_key, env_key) in DB_RUNTIME_CONFIG_KEYS {
+        let Some(value) = table.get(config_key) else {
+            continue;
+        };
+        let value = parse_db_runtime_config_value(config_key, value)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let long_env_key = format!("database_{}", env_key.trim_start_matches("db_"));
+        if !env.secret.contains_key(env_key) && !env.secret.contains_key(&long_env_key) {
+            env.secret.insert(env_key.to_string(), value.to_string());
+        }
+    }
+
+    Ok(())
 }
 
 fn infer_database_driver_from_env_url(env: &mut ax_backend_runtime::AxEnv) {
@@ -2533,6 +3905,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_compression_check(root));
     checks.push(doctor_server_security_headers_check(root));
     checks.push(doctor_server_request_logging_check(root));
+    checks.push(doctor_database_runtime_policy_check(root));
     checks.push(doctor_error_boundaries_check(root));
     checks.push(doctor_aegis_config_check(root));
     checks.push(doctor_api_contracts_check(root));
@@ -2554,6 +3927,38 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     }
 
     checks
+}
+
+fn doctor_database_runtime_policy_check(root: &Path) -> DoctorCheck {
+    let config = db_env_for_root(root, None).and_then(|env| {
+        env.database_config()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
+    });
+    match config {
+        Ok(config) => DoctorCheck {
+            code: "database-runtime-policy",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "Database policy: pool {} connections / {} ms checkout, {} ms query timeout, {} read retr{}, {} ms backoff, {} ms SQLite lock wait.",
+                config.pool_max_size,
+                config.pool_timeout_ms,
+                config.policy.query_timeout_ms,
+                config.policy.read_retry_attempts,
+                if config.policy.read_retry_attempts == 1 { "y" } else { "ies" },
+                config.policy.read_retry_backoff_ms,
+                config.policy.sqlite_busy_timeout_ms,
+            ),
+            hint: Some(
+                "Tune [db] defaults in Axonyx.toml; AX_SECRET_DB_* values override them per deployment.",
+            ),
+        },
+        Err(error) => DoctorCheck {
+            code: "database-runtime-policy",
+            severity: DoctorSeverity::Error,
+            message: error.to_string(),
+            hint: Some("Run `cargo ax check` and fix invalid [db] runtime policy values."),
+        },
+    }
 }
 
 fn doctor_server_body_limit_check(root: &Path) -> DoctorCheck {
@@ -2777,12 +4182,14 @@ fn doctor_api_contracts_check(root: &Path) -> DoctorCheck {
                 code: "api-contracts",
                 severity: DoctorSeverity::Ok,
                 message: format!(
-                    "{} API route{}, {} typed, {} auth-guarded, {} with response metadata; OpenAPI export ready.",
+                    "{} API route{}, {} typed, {} auth-guarded, {} with response metadata; contract v{} {}, OpenAPI export ready.",
                     routes,
                     if routes == 1 { "" } else { "s" },
                     typed,
                     auth_guarded,
-                    with_response_metadata
+                    with_response_metadata,
+                    report.version,
+                    report.contract_hash
                 ),
                 hint: None,
             }
@@ -2961,8 +4368,9 @@ fn doctor_render_deploy_checks(root: &Path) -> Vec<DoctorCheck> {
     checks.push(DoctorCheck {
         code: "deploy-render-health",
         severity: DoctorSeverity::Ok,
-        message: "Render health checks can use the built-in Axonyx health probe.".to_string(),
-        hint: Some("Health check path: /__axonyx/health"),
+        message: "Render health checks can use Axonyx readiness without coupling liveness to database access."
+            .to_string(),
+        hint: Some("Health check path: /__axonyx/ready"),
     });
 
     checks.push(match configured_max_request_body_bytes(root) {
@@ -4960,6 +6368,8 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
         .map(|route| ApiRouteReport {
             method: route.method.unwrap_or_else(|| "*".to_string()),
             route: route.route,
+            request_hash: String::new(),
+            response_hash: String::new(),
             returns: route.returns,
             responses: route.responses,
             auth: route.auth,
@@ -4970,10 +6380,180 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
         })
         .collect();
 
+    finalize_api_report(routes, collect_project_type_schemas(root)?)
+}
+
+fn finalize_api_report(
+    mut routes: Vec<ApiRouteReport>,
+    schemas: Vec<ApiSchemaReport>,
+) -> Result<ApiReport> {
+    for route in &mut routes {
+        route.request_hash = api_route_request_hash(route, &schemas)?;
+        route.response_hash = api_route_response_hash(route, &schemas)?;
+    }
+
+    let mut canonical_routes = routes.iter().collect::<Vec<_>>();
+    canonical_routes
+        .sort_by(|left, right| (&left.method, &left.route).cmp(&(&right.method, &right.route)));
+    let route_contracts = canonical_routes
+        .iter()
+        .map(|route| {
+            serde_json::json!({
+                "method": route.method,
+                "route": route.route,
+                "requestHash": route.request_hash,
+                "responseHash": route.response_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    let canonical_schemas = canonical_api_schemas(schemas.clone());
+    let contract_hash = api_contract_hash(
+        b"axonyx-api-v1\0",
+        &serde_json::json!({
+            "routes": route_contracts,
+            "schemas": canonical_schemas,
+        }),
+    )?;
+
     Ok(ApiReport {
+        version: 1,
+        contract_hash,
         routes,
-        schemas: collect_project_type_schemas(root)?,
+        schemas,
     })
+}
+
+fn api_route_request_hash(route: &ApiRouteReport, schemas: &[ApiSchemaReport]) -> Result<String> {
+    let mut inputs = route.inputs.clone();
+    inputs.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut auth = route.auth.clone();
+    auth.sort_by(|left, right| left.scheme.cmp(right.scheme));
+    let referenced = referenced_api_schemas(inputs.iter().map(|input| input.ty.as_str()), schemas);
+
+    api_contract_hash(
+        b"axonyx-api-request-v1\0",
+        &serde_json::json!({
+            "method": route.method,
+            "route": route.route,
+            "params": route.params,
+            "auth": auth,
+            "inputs": inputs,
+            "schemas": referenced,
+        }),
+    )
+}
+
+fn api_route_response_hash(route: &ApiRouteReport, schemas: &[ApiSchemaReport]) -> Result<String> {
+    let mut responses = route.responses.clone();
+    responses.sort_by_key(|response| response.status);
+    let referenced = referenced_api_schemas(route.returns.iter().map(String::as_str), schemas);
+
+    api_contract_hash(
+        b"axonyx-api-response-v1\0",
+        &serde_json::json!({
+            "returns": route.returns,
+            "responses": responses,
+            "schemas": referenced,
+        }),
+    )
+}
+
+fn referenced_api_schemas<'a>(
+    types: impl IntoIterator<Item = &'a str>,
+    schemas: &[ApiSchemaReport],
+) -> Vec<ApiSchemaReport> {
+    let by_name = schemas
+        .iter()
+        .map(|schema| (schema.name.as_str(), schema))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut pending = types
+        .into_iter()
+        .flat_map(api_schema_type_names)
+        .collect::<Vec<_>>();
+    let mut names = std::collections::BTreeSet::new();
+
+    while let Some(name) = pending.pop() {
+        if !names.insert(name.clone()) {
+            continue;
+        }
+        let Some(schema) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        pending.extend(
+            schema
+                .fields
+                .iter()
+                .flat_map(|field| api_schema_type_names(&field.ty)),
+        );
+    }
+
+    canonical_api_schemas(
+        names
+            .into_iter()
+            .filter_map(|name| by_name.get(name.as_str()).map(|schema| (*schema).clone()))
+            .collect(),
+    )
+}
+
+fn api_schema_type_names(annotation: &str) -> Vec<String> {
+    let Ok(ty) = AxType::parse_annotation(annotation) else {
+        return backend_return_contract_named_types(annotation)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    };
+    let mut names = Vec::new();
+    collect_api_schema_type_names(&ty, &mut names);
+    names
+}
+
+fn collect_api_schema_type_names(ty: &AxType, names: &mut Vec<String>) {
+    match ty {
+        AxType::Record(name) => names.push(name.clone()),
+        AxType::List(inner)
+        | AxType::Set(inner)
+        | AxType::Optional(inner)
+        | AxType::Secret(inner)
+        | AxType::Public(inner)
+        | AxType::Signal(inner) => collect_api_schema_type_names(inner, names),
+        AxType::Map(key, value) | AxType::Result(key, value) | AxType::Resource(key, value) => {
+            collect_api_schema_type_names(key, names);
+            collect_api_schema_type_names(value, names);
+        }
+        AxType::String
+        | AxType::Number
+        | AxType::Int
+        | AxType::Float
+        | AxType::Decimal
+        | AxType::Bool
+        | AxType::DateTime
+        | AxType::Date
+        | AxType::Time
+        | AxType::Uuid
+        | AxType::Bytes
+        | AxType::Json
+        | AxType::Never
+        | AxType::Void
+        | AxType::Unknown => {}
+    }
+}
+
+fn canonical_api_schemas(mut schemas: Vec<ApiSchemaReport>) -> Vec<ApiSchemaReport> {
+    for schema in &mut schemas {
+        schema
+            .fields
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        schema.literals.sort();
+    }
+    schemas.sort_by(|left, right| left.name.cmp(&right.name));
+    schemas
+}
+
+fn api_contract_hash(domain: &[u8], value: &impl Serialize) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(serde_json::to_vec(value)?);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn collect_action_report(root: &Path) -> Result<ActionReport> {
@@ -6285,8 +7865,36 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     diagnostics.extend(check_route_manifest(root)?);
     diagnostics.extend(check_action_patch_contracts(root)?);
     diagnostics.extend(check_query_function_call_contracts(root)?);
+    diagnostics.extend(check_generated_database_contract(root)?);
 
     Ok(diagnostics)
+}
+
+fn check_generated_database_contract(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let Some(schema) = read_db_schema_manifest(root)? else {
+        return Ok(Vec::new());
+    };
+    let configured_path = Path::new(&schema.types_path);
+    let path = if configured_path.is_absolute() {
+        configured_path.to_path_buf()
+    } else {
+        root.join(configured_path)
+    };
+    let expected = render_db_schema_types(&schema);
+    let actual = fs::read_to_string(&path).ok();
+    if actual.as_deref() == Some(expected.as_str()) {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![CheckDiagnostic {
+        file: display_path(&path),
+        line: 1,
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-generated-types",
+        message: "generated database types are missing or stale; run `cargo ax db pull`"
+            .to_string(),
+    }])
 }
 
 fn check_query_function_call_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
@@ -6614,6 +8222,23 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     };
     let mut diagnostics = Vec::new();
+    if let Some(db) = value.get("db").and_then(toml::Value::as_table) {
+        for (key, _) in DB_RUNTIME_CONFIG_KEYS {
+            let Some(value) = db.get(key) else {
+                continue;
+            };
+            if let Err(message) = parse_db_runtime_config_value(key, value) {
+                diagnostics.push(CheckDiagnostic {
+                    file: display_path(&path),
+                    line: line_for_config_key(&source, key),
+                    column: 1,
+                    severity: "error",
+                    code: "axonyx-config-db-runtime",
+                    message,
+                });
+            }
+        }
+    }
     if let Some(stream_pages) = value
         .get("server")
         .and_then(toml::Value::as_table)
@@ -7238,9 +8863,21 @@ fn check_backend_database_surface(
     document: &AxBackendDocument,
 ) -> Vec<CheckDiagnostic> {
     let mut diagnostics = Vec::new();
-    let resources = root
-        .and_then(|root| collect_project_database_resources(root).ok())
-        .unwrap_or_default();
+    let resources = match root.map(collect_project_database_resources) {
+        Some(Ok(resources)) => resources,
+        Some(Err(error)) => {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: 1,
+                column: 1,
+                severity: "error",
+                code: "axonyx-db-schema",
+                message: error.to_string(),
+            });
+            DbResourceCatalog::default()
+        }
+        None => DbResourceCatalog::default(),
+    };
 
     for block in &document.blocks {
         match block {
@@ -7248,6 +8885,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &root.body,
+                &[],
                 &resources,
                 &mut diagnostics,
             ),
@@ -7255,6 +8893,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &route.body,
+                &route.input,
                 &resources,
                 &mut diagnostics,
             ),
@@ -7262,6 +8901,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &loader.body,
+                &loader.input,
                 &resources,
                 &mut diagnostics,
             ),
@@ -7269,6 +8909,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &action.body,
+                &action.input,
                 &resources,
                 &mut diagnostics,
             ),
@@ -7276,6 +8917,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &function.body,
+                &function.input,
                 &resources,
                 &mut diagnostics,
             ),
@@ -7283,6 +8925,7 @@ fn check_backend_database_surface(
                 path,
                 source,
                 &job.body,
+                &[],
                 &resources,
                 &mut diagnostics,
             ),
@@ -7297,7 +8940,8 @@ fn collect_db_surface_diagnostics_from_stmts(
     path: &Path,
     source: &str,
     body: &[AxBackendStmt],
-    resources: &std::collections::BTreeSet<String>,
+    input: &[axonyx_core::ax_backend_ast_prelude::AxField],
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     for stmt in body {
@@ -7312,13 +8956,76 @@ fn collect_db_surface_diagnostics_from_stmts(
                 ),
                 AxBackendValue::Query(query) => {
                     if let Some(collection) = query_source_collection(&query.source) {
-                        collect_db_resource_diagnostic(
+                        let unknown = collect_db_resource_diagnostic(
                             path,
                             source,
                             collection,
                             resources,
                             diagnostics,
                         );
+                        if !unknown {
+                            for join in &query.joins {
+                                let target_unknown = collect_db_resource_diagnostic(
+                                    path,
+                                    source,
+                                    &join.collection,
+                                    resources,
+                                    diagnostics,
+                                );
+                                for column in &join.columns {
+                                    collect_db_field_diagnostic(
+                                        path,
+                                        source,
+                                        collection,
+                                        &column.source,
+                                        resources,
+                                        diagnostics,
+                                    );
+                                    if !target_unknown {
+                                        collect_db_field_diagnostic(
+                                            path,
+                                            source,
+                                            &join.collection,
+                                            &column.target,
+                                            resources,
+                                            diagnostics,
+                                        );
+                                    }
+                                }
+                                if !target_unknown {
+                                    collect_db_join_contract_diagnostic(
+                                        path,
+                                        source,
+                                        collection,
+                                        join,
+                                        resources,
+                                        diagnostics,
+                                    );
+                                }
+                            }
+                            for filter in &query.filters {
+                                collect_db_query_field_diagnostic(
+                                    path,
+                                    source,
+                                    collection,
+                                    &filter.field,
+                                    &query.joins,
+                                    resources,
+                                    diagnostics,
+                                );
+                            }
+                            for order in &query.orders {
+                                collect_db_query_field_diagnostic(
+                                    path,
+                                    source,
+                                    collection,
+                                    &order.field,
+                                    &query.joins,
+                                    resources,
+                                    diagnostics,
+                                );
+                            }
+                        }
                     }
                     for filter in &query.filters {
                         collect_db_surface_diagnostics_from_expr(
@@ -7332,27 +9039,62 @@ fn collect_db_surface_diagnostics_from_stmts(
                 }
             },
             AxBackendStmt::Env(_) => {}
-            AxBackendStmt::Insert(mutation)
-            | AxBackendStmt::Update(mutation)
-            | AxBackendStmt::Delete(mutation) => {
-                for field in &mutation.fields {
-                    collect_db_surface_diagnostics_from_expr(
+            AxBackendStmt::Transaction(transaction) => {
+                for operation in &transaction.operations {
+                    let (kind, mutation) = match operation {
+                        AxTransactionOperation::Insert(mutation) => {
+                            (DbMutationKind::Insert, mutation)
+                        }
+                        AxTransactionOperation::Update(mutation) => {
+                            (DbMutationKind::Update, mutation)
+                        }
+                        AxTransactionOperation::Delete(mutation) => {
+                            (DbMutationKind::Delete, mutation)
+                        }
+                    };
+                    collect_db_mutation_surface_diagnostics(
                         path,
                         source,
-                        &field.value,
+                        kind,
+                        mutation,
+                        input,
                         resources,
                         diagnostics,
                     );
                 }
-                for filter in &mutation.filters {
-                    collect_db_surface_diagnostics_from_expr(
-                        path,
-                        source,
-                        &filter.value,
-                        resources,
-                        diagnostics,
-                    );
-                }
+            }
+            AxBackendStmt::Insert(mutation) => {
+                collect_db_mutation_surface_diagnostics(
+                    path,
+                    source,
+                    DbMutationKind::Insert,
+                    mutation,
+                    input,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::Update(mutation) => {
+                collect_db_mutation_surface_diagnostics(
+                    path,
+                    source,
+                    DbMutationKind::Update,
+                    mutation,
+                    input,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::Delete(mutation) => {
+                collect_db_mutation_surface_diagnostics(
+                    path,
+                    source,
+                    DbMutationKind::Delete,
+                    mutation,
+                    input,
+                    resources,
+                    diagnostics,
+                );
             }
             AxBackendStmt::Patch(patch) => {
                 collect_db_surface_diagnostics_from_expr(
@@ -7455,6 +9197,90 @@ fn collect_db_surface_diagnostics_from_stmts(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DbMutationKind {
+    Insert,
+    Update,
+    Delete,
+}
+
+fn collect_db_mutation_surface_diagnostics(
+    path: &Path,
+    source: &str,
+    kind: DbMutationKind,
+    mutation: &axonyx_core::ax_backend_ast_prelude::AxMutation,
+    input: &[axonyx_core::ax_backend_ast_prelude::AxField],
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let unknown =
+        collect_db_resource_diagnostic(path, source, &mutation.collection, resources, diagnostics);
+    if !unknown {
+        collect_db_writable_diagnostic(path, source, &mutation.collection, resources, diagnostics);
+        for field in &mutation.fields {
+            collect_db_field_diagnostic(
+                path,
+                source,
+                &mutation.collection,
+                &field.name,
+                resources,
+                diagnostics,
+            );
+            collect_db_value_type_diagnostic(
+                path,
+                source,
+                &mutation.collection,
+                &field.name,
+                &field.value,
+                input,
+                resources,
+                diagnostics,
+            );
+        }
+        for filter in &mutation.filters {
+            collect_db_field_diagnostic(
+                path,
+                source,
+                &mutation.collection,
+                &filter.field,
+                resources,
+                diagnostics,
+            );
+            collect_db_value_type_diagnostic(
+                path,
+                source,
+                &mutation.collection,
+                &filter.field,
+                &filter.value,
+                input,
+                resources,
+                diagnostics,
+            );
+        }
+        if kind == DbMutationKind::Insert {
+            collect_db_required_insert_diagnostics(path, source, mutation, resources, diagnostics);
+        }
+    }
+    for field in &mutation.fields {
+        collect_db_surface_diagnostics_from_expr(
+            path,
+            source,
+            &field.value,
+            resources,
+            diagnostics,
+        );
+    }
+    for filter in &mutation.filters {
+        collect_db_surface_diagnostics_from_expr(
+            path,
+            source,
+            &filter.value,
+            resources,
+            diagnostics,
+        );
+    }
+}
+
 fn query_source_collection(source: &AxQuerySource) -> Option<&str> {
     match source {
         AxQuerySource::Stream { collection } => Some(collection),
@@ -7466,7 +9292,7 @@ fn collect_db_surface_diagnostics_from_return(
     path: &Path,
     source: &str,
     value: &AxReturn,
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     if let AxReturn::Expr(expr) = value {
@@ -7478,7 +9304,7 @@ fn collect_db_surface_diagnostics_from_expr(
     path: &Path,
     source: &str,
     expr: &AxExpr,
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     match expr {
@@ -7543,7 +9369,7 @@ fn collect_db_call_diagnostic(
     source: &str,
     call_path: &[String],
     args: &[AxExpr],
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) {
     if call_path == ["db", "query"] {
@@ -7604,7 +9430,7 @@ fn collect_db_resource_diagnostic(
     path: &Path,
     source: &str,
     resource: &str,
-    resources: &std::collections::BTreeSet<String>,
+    resources: &DbResourceCatalog,
     diagnostics: &mut Vec<CheckDiagnostic>,
 ) -> bool {
     if resources.is_empty() || resources.contains(resource) {
@@ -7622,6 +9448,277 @@ fn collect_db_resource_diagnostic(
     true
 }
 
+fn collect_db_field_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    field: &str,
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(contract) = resources.get(resource) else {
+        return;
+    };
+    let Some(columns) = &contract.columns else {
+        return;
+    };
+    if columns.contains_key(field) {
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, field),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-field",
+        message: format!(
+            "unknown field `{field}` on db resource `{resource}` (row type `{}`)",
+            contract.record
+        ),
+    });
+}
+
+fn collect_db_query_field_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    field: &str,
+    joins: &[axonyx_core::ax_query_ast_prelude::AxQueryJoin],
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some((qualifier, field_name)) = field.split_once('.') else {
+        collect_db_field_diagnostic(path, source, resource, field, resources, diagnostics);
+        return;
+    };
+    if qualifier == resource
+        || joins
+            .iter()
+            .any(|join| join.collection.as_str() == qualifier)
+    {
+        collect_db_field_diagnostic(path, source, qualifier, field_name, resources, diagnostics);
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, field),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-query-qualifier",
+        message: format!(
+            "query field `{field}` references `{qualifier}`, but that resource is not the query source or an explicit join"
+        ),
+    });
+}
+
+fn collect_db_join_contract_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    join: &axonyx_core::ax_query_ast_prelude::AxQueryJoin,
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(contract) = resources.get(resource) else {
+        return;
+    };
+    let Some(relations) = &contract.relations else {
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_source_pattern(source, &format!("join(db.{}", join.collection)),
+            column: 1,
+            severity: "error",
+            code: "axonyx-db-relation",
+            message: format!(
+                "typed join `db.{resource}` -> `db.{}` requires a pulled database schema; run `cargo ax db pull`",
+                join.collection
+            ),
+        });
+        return;
+    };
+    let mut requested_pairs = join
+        .columns
+        .iter()
+        .map(|column| (column.source.as_str(), column.target.as_str()))
+        .collect::<Vec<_>>();
+    requested_pairs.sort_unstable();
+    if relations.iter().any(|relation| {
+        let mut relation_pairs = relation
+            .columns
+            .iter()
+            .zip(&relation.target_columns)
+            .map(|(source, target)| (source.as_str(), target.as_str()))
+            .collect::<Vec<_>>();
+        relation_pairs.sort_unstable();
+        relation.target_schema == "public"
+            && relation.target_table == join.collection
+            && relation_pairs == requested_pairs
+    }) {
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, &format!("join(db.{}", join.collection)),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-relation",
+        message: format!(
+            "typed join `db.{resource}` -> `db.{}` does not match a pulled foreign-key contract",
+            join.collection
+        ),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_db_value_type_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    field: &str,
+    value: &AxExpr,
+    input: &[axonyx_core::ax_backend_ast_prelude::AxField],
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(column) = resources
+        .get(resource)
+        .and_then(|contract| contract.columns.as_ref())
+        .and_then(|columns| columns.get(field))
+    else {
+        return;
+    };
+    let Ok(expected) = AxType::parse_annotation(&column.ty) else {
+        return;
+    };
+
+    let mismatch = if is_static_db_value(value) {
+        !db_static_value_matches(value, &expected)
+    } else if let Some(actual) = direct_input_expr_type(value, input) {
+        !db_types_are_assignable(&actual, &expected)
+    } else {
+        false
+    };
+    if !mismatch {
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, field),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-value-type",
+        message: format!(
+            "value `{}` is not assignable to `{}` for db field `{}.{field}`",
+            format_ax_expr(value),
+            expected.display_name(),
+            resource
+        ),
+    });
+}
+
+fn db_static_value_matches(value: &AxExpr, expected: &AxType) -> bool {
+    if expected.accepts_state_initializer(value) {
+        return true;
+    }
+    if matches!(value, AxExpr::Unary { .. }) {
+        return AxDataContext::new()
+            .resolve_expr_type(value)
+            .is_ok_and(|actual| db_types_are_assignable(&actual, expected));
+    }
+    false
+}
+
+fn is_static_db_value(value: &AxExpr) -> bool {
+    match value {
+        AxExpr::String(_) | AxExpr::Number(_) | AxExpr::Float(_) | AxExpr::Bool(_) => true,
+        AxExpr::Identifier(name) => name == "null",
+        AxExpr::List(items) => items.iter().all(is_static_db_value),
+        AxExpr::Object(fields) => fields.values().all(is_static_db_value),
+        AxExpr::Unary { expr, .. } => is_static_db_value(expr),
+        AxExpr::Binary { .. }
+        | AxExpr::Index { .. }
+        | AxExpr::Member { .. }
+        | AxExpr::OptionalMember { .. }
+        | AxExpr::Call { .. } => false,
+    }
+}
+
+fn direct_input_expr_type(
+    value: &AxExpr,
+    input: &[axonyx_core::ax_backend_ast_prelude::AxField],
+) -> Option<AxType> {
+    let (object, property) = match value {
+        AxExpr::Member { object, property } | AxExpr::OptionalMember { object, property } => {
+            (object.as_ref(), property)
+        }
+        _ => return None,
+    };
+    if !matches!(object, AxExpr::Identifier(name) if name == "input") {
+        return None;
+    }
+
+    let field = input.iter().find(|field| field.name == *property)?;
+    let mut ty = backend_input_ax_type(&field.ty)?;
+    if field.optional || matches!(value, AxExpr::OptionalMember { .. }) {
+        ty = AxType::optional(ty);
+    }
+    Some(ty)
+}
+
+fn backend_input_ax_type(annotation: &str) -> Option<AxType> {
+    let ty = match annotation.trim() {
+        "string" => AxType::String,
+        "bool" | "boolean" => AxType::Bool,
+        "i64" | "u64" | "int" | "integer" => AxType::Int,
+        "f64" | "float" => AxType::Float,
+        "number" => AxType::Number,
+        other => AxType::parse_annotation(other).ok()?,
+    };
+    Some(ty)
+}
+
+fn db_types_are_assignable(actual: &AxType, expected: &AxType) -> bool {
+    match (actual, expected) {
+        (AxType::Unknown, _) | (_, AxType::Unknown | AxType::Json) => true,
+        (AxType::Optional(actual), AxType::Optional(expected)) => {
+            db_types_are_assignable(actual, expected)
+        }
+        (actual, AxType::Optional(expected)) => db_types_are_assignable(actual, expected),
+        (AxType::Optional(_), _) => false,
+        (AxType::Int | AxType::Number, AxType::Number | AxType::Int) => true,
+        (AxType::Int | AxType::Number | AxType::Float, AxType::Float) => true,
+        _ => actual == expected,
+    }
+}
+
+fn collect_db_writable_diagnostic(
+    path: &Path,
+    source: &str,
+    resource: &str,
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(contract) = resources.get(resource) else {
+        return;
+    };
+    if contract.kind != "view" {
+        return;
+    }
+
+    diagnostics.push(CheckDiagnostic {
+        file: display_path(path),
+        line: line_for_source_pattern(source, &format!("db.{resource}.")),
+        column: 1,
+        severity: "error",
+        code: "axonyx-db-read-only",
+        message: format!("db resource `{resource}` is a read-only view"),
+    });
+}
+
 fn line_for_db_call(source: &str, call_path: &[String]) -> usize {
     if call_path.len() >= 2 {
         let line = line_for_source_pattern(source, &format!("db.{}.", call_path[1]));
@@ -7633,15 +9730,158 @@ fn line_for_db_call(source: &str, call_path: &[String]) -> usize {
     line_for_source_pattern(source, "db.")
 }
 
-fn collect_project_database_resources(root: &Path) -> Result<std::collections::BTreeSet<String>> {
-    Ok(collect_project_type_schemas(root)?
+#[derive(Debug, Clone, Default)]
+struct DbResourceCatalog {
+    resources: std::collections::BTreeMap<String, DbResourceContract>,
+}
+
+#[derive(Debug, Clone)]
+struct DbResourceContract {
+    kind: String,
+    record: String,
+    columns: Option<std::collections::BTreeMap<String, DbColumnContract>>,
+    relations: Option<Vec<DbRelationContract>>,
+}
+
+#[derive(Debug, Clone)]
+struct DbRelationContract {
+    columns: Vec<String>,
+    target_schema: String,
+    target_table: String,
+    target_columns: Vec<String>,
+}
+
+fn collect_db_required_insert_diagnostics(
+    path: &Path,
+    source: &str,
+    mutation: &axonyx_core::ax_backend_ast_prelude::AxMutation,
+    resources: &DbResourceCatalog,
+    diagnostics: &mut Vec<CheckDiagnostic>,
+) {
+    let Some(contract) = resources.get(&mutation.collection) else {
+        return;
+    };
+    let Some(columns) = &contract.columns else {
+        return;
+    };
+    let provided = mutation
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for (name, column) in columns {
+        if column.required_on_insert && !provided.contains(name.as_str()) {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(path),
+                line: line_for_source_pattern(source, &format!("db.{}.", mutation.collection)),
+                column: 1,
+                severity: "error",
+                code: "axonyx-db-required-field",
+                message: format!(
+                    "insert into db resource `{}` is missing required field `{name}`",
+                    mutation.collection
+                ),
+            });
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DbColumnContract {
+    ty: String,
+    required_on_insert: bool,
+}
+
+impl DbResourceCatalog {
+    fn is_empty(&self) -> bool {
+        self.resources.is_empty()
+    }
+
+    fn contains(&self, resource: &str) -> bool {
+        self.resources.contains_key(resource)
+    }
+
+    fn get(&self, resource: &str) -> Option<&DbResourceContract> {
+        self.resources.get(resource)
+    }
+}
+
+fn collect_project_database_resources(root: &Path) -> Result<DbResourceCatalog> {
+    if let Some(schema) = read_db_schema_manifest(root)? {
+        let driver = schema.driver.clone();
+        return Ok(DbResourceCatalog {
+            resources: schema
+                .tables
+                .into_iter()
+                .map(|table| {
+                    let relations = table
+                        .relations
+                        .into_iter()
+                        .map(|relation| DbRelationContract {
+                            columns: relation.columns,
+                            target_schema: relation.target_schema,
+                            target_table: relation.target_table,
+                            target_columns: relation.target_columns,
+                        })
+                        .collect();
+                    let columns = table
+                        .columns
+                        .into_iter()
+                        .map(|column| {
+                            let required_on_insert = !column.nullable
+                                && column.default.is_none()
+                                && !(driver == "sqlite"
+                                    && column.primary_key
+                                    && database_ax_type(&driver, &column.ty) == "Int");
+                            (
+                                column.name,
+                                DbColumnContract {
+                                    ty: if column.nullable {
+                                        format!("Optional<{}>", column.ax_type)
+                                    } else {
+                                        column.ax_type
+                                    },
+                                    required_on_insert,
+                                },
+                            )
+                        })
+                        .collect();
+                    (
+                        table.name,
+                        DbResourceContract {
+                            kind: table.kind,
+                            record: table.record,
+                            columns: Some(columns),
+                            relations: Some(relations),
+                        },
+                    )
+                })
+                .collect(),
+        });
+    }
+
+    let mut resources = std::collections::BTreeMap::new();
+    for schema in collect_project_type_schemas(root)?
         .into_iter()
         .filter(|schema| schema.literals.is_empty())
-        .flat_map(|schema| database_resource_names_for_type(&schema.name))
-        .collect())
+    {
+        for name in database_resource_names_for_type(&schema.name) {
+            resources.entry(name).or_insert_with(|| DbResourceContract {
+                kind: "inferred".to_string(),
+                record: schema.name.clone(),
+                columns: None,
+                relations: None,
+            });
+        }
+    }
+    Ok(DbResourceCatalog { resources })
 }
 
 fn database_resource_names_for_type(type_name: &str) -> Vec<String> {
+    if let Some(resource_type) = type_name.strip_suffix("Row") {
+        return vec![pascal_to_snake(resource_type)];
+    }
     let snake = pascal_to_snake(type_name);
     let plural = pluralize_resource_name(&snake);
     if plural == snake {
@@ -8083,6 +10323,9 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
             value: AxValuePlan::Query(query),
             ..
         } => query_uses_input_scope(query),
+        AxStepPlan::Transaction { operations } => operations
+            .iter()
+            .any(transaction_operation_uses_input_scope),
         AxStepPlan::Require { value, .. } => expr_uses_input_scope(value),
         AxStepPlan::Return(AxReturnPlan::Expr(expr) | AxReturnPlan::Json(expr)) => {
             expr_uses_input_scope(expr)
@@ -8128,6 +10371,27 @@ fn query_uses_input_scope(query: &axonyx_core::ax_backend_lowering_prelude::AxQu
         .any(|filter| expr_uses_input_scope(&filter.value))
 }
 
+fn transaction_operation_uses_input_scope(operation: &AxTransactionOperationPlan) -> bool {
+    match operation {
+        AxTransactionOperationPlan::Insert { fields, .. } => fields
+            .iter()
+            .any(|field| expr_uses_input_scope(&field.value)),
+        AxTransactionOperationPlan::Update {
+            fields, filters, ..
+        } => {
+            fields
+                .iter()
+                .any(|field| expr_uses_input_scope(&field.value))
+                || filters
+                    .iter()
+                    .any(|filter| expr_uses_input_scope(&filter.value))
+        }
+        AxTransactionOperationPlan::Delete { filters, .. } => filters
+            .iter()
+            .any(|filter| expr_uses_input_scope(&filter.value)),
+    }
+}
+
 fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
     plan.handlers.iter().any(|handler| {
         handler.steps.iter().any(|step| match step {
@@ -8151,10 +10415,34 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => fields
                 .iter()
                 .any(|field| field.value.code.contains("Auth.signedSession")),
+            AxStepPlan::Transaction { operations } => operations
+                .iter()
+                .any(transaction_operation_uses_signed_session),
             AxStepPlan::Send { payload, .. } => payload.code.contains("Auth.signedSession"),
             AxStepPlan::Let { .. } | AxStepPlan::Delete { .. } | AxStepPlan::Return(_) => false,
         })
     })
+}
+
+fn transaction_operation_uses_signed_session(operation: &AxTransactionOperationPlan) -> bool {
+    match operation {
+        AxTransactionOperationPlan::Insert { fields, .. } => fields
+            .iter()
+            .any(|field| field.value.code.contains("Auth.signedSession")),
+        AxTransactionOperationPlan::Update {
+            fields, filters, ..
+        } => {
+            fields
+                .iter()
+                .any(|field| field.value.code.contains("Auth.signedSession"))
+                || filters
+                    .iter()
+                    .any(|filter| filter.value.code.contains("Auth.signedSession"))
+        }
+        AxTransactionOperationPlan::Delete { filters, .. } => filters
+            .iter()
+            .any(|filter| filter.value.code.contains("Auth.signedSession")),
+    }
 }
 
 fn backend_plan_uses_database(plan: &AxBackendPlan) -> bool {
@@ -8178,7 +10466,10 @@ fn step_uses_database(step: &AxStepPlan) -> bool {
             axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::Stream { .. }
                 | axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::RawSql { .. }
         ),
-        AxStepPlan::Insert { .. } | AxStepPlan::Update { .. } | AxStepPlan::Delete { .. } => true,
+        AxStepPlan::Transaction { .. }
+        | AxStepPlan::Insert { .. }
+        | AxStepPlan::Update { .. }
+        | AxStepPlan::Delete { .. } => true,
         _ => false,
     }
 }
@@ -8267,6 +10558,11 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
         AxStepPlan::Hook { value, .. } => collect_env_refs_from_expr(value, refs),
         AxStepPlan::ClearCookie { name } => collect_env_refs_from_expr(name, refs),
         AxStepPlan::Revalidate { target, .. } => collect_env_refs_from_expr(target, refs),
+        AxStepPlan::Transaction { operations } => {
+            for operation in operations {
+                collect_env_refs_from_transaction_operation(operation, refs);
+            }
+        }
         AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => {
             for field in fields {
                 collect_env_refs_from_expr(&field.value, refs);
@@ -8278,6 +10574,34 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
             }
         }
         AxStepPlan::Send { payload, .. } => collect_env_refs_from_expr(payload, refs),
+    }
+}
+
+fn collect_env_refs_from_transaction_operation(
+    operation: &AxTransactionOperationPlan,
+    refs: &mut std::collections::BTreeSet<String>,
+) {
+    match operation {
+        AxTransactionOperationPlan::Insert { fields, .. } => {
+            for field in fields {
+                collect_env_refs_from_expr(&field.value, refs);
+            }
+        }
+        AxTransactionOperationPlan::Update {
+            fields, filters, ..
+        } => {
+            for field in fields {
+                collect_env_refs_from_expr(&field.value, refs);
+            }
+            for filter in filters {
+                collect_env_refs_from_expr(&filter.value, refs);
+            }
+        }
+        AxTransactionOperationPlan::Delete { filters, .. } => {
+            for filter in filters {
+                collect_env_refs_from_expr(&filter.value, refs);
+            }
+        }
     }
 }
 
@@ -9302,6 +11626,7 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidInputSection { line }
         | AxBackendParseError::InvalidField { line }
         | AxBackendParseError::InvalidTypeDeclaration { line }
+        | AxBackendParseError::InvalidTransaction { line }
         | AxBackendParseError::InvalidMutation { line }
         | AxBackendParseError::InvalidAssignment { line }
         | AxBackendParseError::InvalidHeader { line }
@@ -9804,10 +12129,12 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let server_config = AxServerConfig::new(args.host, port, mode);
     let bind = server_config.bind_addr();
     let preview_store = preview_store_from_content(&root)?;
+    let database_required = project_uses_database_runtime(&root)?;
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(preview_store),
         runtime_config,
+        database_required,
     });
 
     print_backend_build_status(&backend_status);
@@ -9983,11 +12310,15 @@ fn build_compiled_production_binary(
     let signal_aliases = compiled_action_signal_aliases(root)?;
     let data_bindings = compiled_data_bindings(root)?;
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
+    let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
+    let database_required = project_uses_database_runtime(root)?;
     let source = compiled_production_source(
         &dist_literal,
         &signal_aliases,
         &data_bindings,
         &page_renderers,
+        &database_runtime_defaults,
+        database_required,
     );
     fs::write(&source_path, source).with_context(|| {
         format!(
@@ -10159,11 +12490,32 @@ fn compiled_loader_arg_source(expr: &AxExpr) -> Option<String> {
     }
 }
 
+fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
+    let Some(table) = axonyx_config_table(root, "db") else {
+        return Ok(String::new());
+    };
+    let mut steps = String::new();
+    for (config_key, env_key) in DB_RUNTIME_CONFIG_KEYS {
+        let Some(value) = table.get(config_key) else {
+            continue;
+        };
+        let value = parse_db_runtime_config_value(config_key, value)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let long_env_key = format!("database_{}", env_key.trim_start_matches("db_"));
+        steps.push_str(&format!(
+            "    if !env.secret.contains_key({env_key:?}) && !env.secret.contains_key({long_env_key:?}) {{ env.secret.insert({env_key:?}.to_string(), {value:?}.to_string()); }}\n"
+        ));
+    }
+    Ok(steps)
+}
+
 fn compiled_production_source(
     dist_literal: &str,
     signal_aliases: &[(String, String, String)],
     data_bindings: &[CompiledDataBinding],
     page_renderers: &[CompiledPageRenderer],
+    database_runtime_defaults: &str,
+    database_required: bool,
 ) -> String {
     let signal_match_arms = signal_aliases
         .iter()
@@ -10244,7 +12596,7 @@ fn compiled_production_source(
 use std::path::{{Component, Path, PathBuf}};
 use std::sync::Arc;
 
-use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxEnv}};
+use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
 use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
 use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
@@ -10261,34 +12613,44 @@ struct CompiledBinding {{
     query_key: &'static [&'static str],
 }}
 
+const DATABASE_REQUIRED: bool = {database_required};
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let host = std::env::var("AXONYX_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("AXONYX_PORT").unwrap_or_else(|_| "3000".to_string());
     let bind = format!("{{host}}:{{port}}");
     let dist = PathBuf::from({dist_literal});
-    let handler: AxCompiledHandler = Arc::new(move |request| handle_request(&dist, request));
+    let mut env = AxEnv::from_env();
+{database_runtime_defaults}    let runtime = Arc::new(lazy_runtime_from_env(env)?);
+    let handler: AxCompiledHandler =
+        Arc::new(move |request| handle_request(&dist, runtime.as_ref(), request));
     println!("Axonyx compiled production server listening at http://{{bind}}");
     serve_compiled_axum(bind, 1024 * 1024, handler)
 }}
 
-fn handle_request(dist: &Path, request: AxHttpRequest) -> AxHttpResponse {{
+fn handle_request(
+    dist: &Path,
+    runtime: &impl AxBackendRuntime,
+    request: AxHttpRequest,
+) -> AxHttpResponse {{
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/health") {{
         return secure(AxHttpResponse::text(200, "ok"));
     }}
 
+    if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/ready") {{
+        return secure(readiness_response(runtime));
+    }}
+
     if request.target.split('?').next() == Some("/__axonyx/action") {{
-        return secure(handle_compiled_action(&request));
+        return secure(handle_compiled_action(runtime, &request));
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/data") {{
-        return secure(handle_compiled_data(&request));
+        return secure(handle_compiled_data(runtime, &request));
     }}
 
     if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
-        let response = (|| {{
-            let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
-            backend::dispatch_api_route(&runtime, &request)
-        }})();
+        let response = backend::dispatch_api_route(runtime, &request);
         return secure(match response {{
             Ok(Some(response)) => response,
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
@@ -10310,7 +12672,51 @@ fn handle_request(dist: &Path, request: AxHttpRequest) -> AxHttpResponse {{
     secure(response)
 }}
 
-fn handle_compiled_action(request: &AxHttpRequest) -> AxHttpResponse {{
+fn readiness_response(runtime: &impl AxBackendRuntime) -> AxHttpResponse {{
+    let database = if DATABASE_REQUIRED {{
+        match AxQueryExecutor::database_health(runtime) {{
+            Ok(report) => json!({{
+                "required": true,
+                "ok": true,
+                "driver": report.driver,
+                "transport": report.transport,
+                "probe": report.probe,
+                "latencyMs": report.latency_ms,
+            }}),
+            Err(_) => {{
+                return AxHttpResponse::json(503, &json!({{
+                    "ok": false,
+                    "service": "axonyx",
+                    "database": {{
+                        "required": true,
+                        "ok": false,
+                        "error": {{
+                            "code": "db.unavailable",
+                            "message": "Database readiness check failed.",
+                        }},
+                    }},
+                }}))
+                .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error"))
+                .with_no_store();
+            }}
+        }}
+    }} else {{
+        json!({{ "required": false, "ok": true }})
+    }};
+
+    AxHttpResponse::json(200, &json!({{
+        "ok": true,
+        "service": "axonyx",
+        "database": database,
+    }}))
+    .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error"))
+    .with_no_store()
+}}
+
+fn handle_compiled_action(
+    runtime: &impl AxBackendRuntime,
+    request: &AxHttpRequest,
+) -> AxHttpResponse {{
     if !request.method.eq_ignore_ascii_case("POST") {{
         return AxHttpResponse::text(405, "Method Not Allowed")
             .with_header("Allow", "POST")
@@ -10340,10 +12746,7 @@ fn handle_compiled_action(request: &AxHttpRequest) -> AxHttpResponse {{
         .map(safe_action_route)
         .unwrap_or_else(|| "/".to_string());
 
-    let dispatched = (|| {{
-        let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
-        backend::dispatch_action(&runtime, &name, request)
-    }})();
+    let dispatched = backend::dispatch_action(runtime, &name, request);
 
     match dispatched {{
         Ok(Some(mut payload)) => {{
@@ -10414,7 +12817,10 @@ fn normalize_action_payload(route: &str, payload: &mut Value) {{
     }}
 }}
 
-fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
+fn handle_compiled_data(
+    runtime: &impl AxBackendRuntime,
+    request: &AxHttpRequest,
+) -> AxHttpResponse {{
     if !request.method.eq_ignore_ascii_case("GET") {{
         return AxHttpResponse::text(405, "Method Not Allowed")
             .with_header("Allow", "GET")
@@ -10434,7 +12840,6 @@ fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
         return AxHttpResponse::text(404, "data binding not found").with_no_store();
     }};
     let dispatched = (|| {{
-        let runtime = lazy_runtime_from_env(AxEnv::from_env())?;
         let mut loader_values = BTreeMap::new();
         let mut binding_values = BTreeMap::new();
         for route_binding in &bindings {{
@@ -10442,7 +12847,7 @@ fn handle_compiled_data(request: &AxHttpRequest) -> AxHttpResponse {{
             loader_request.target = path.clone();
             let args = compiled_binding_args(route_binding, &path)?;
             let value = backend::dispatch_loader(
-                &runtime,
+                runtime,
                 route_binding.loader,
                 route_binding.pattern,
                 &loader_request,
@@ -10716,6 +13121,7 @@ fn build_static_site_from_app_root(
         root: root.to_path_buf(),
         preview_store: Mutex::new(preview_store_from_content(root)?),
         runtime_config: AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?,
+        database_required: project_uses_database_runtime(root)?,
     };
 
     for route in &static_routes {
@@ -12235,12 +14641,14 @@ fn print_api_text(report: &ApiReport) {
         return;
     }
 
-    println!("API:");
+    println!("API contract v{} {}:", report.version, report.contract_hash);
     for route in &report.routes {
         let mut details = vec![format!("file={}", route.file)];
         if let Some(returns) = &route.returns {
             details.push(format!("returns={returns}"));
         }
+        details.push(format!("requestHash={}", route.request_hash));
+        details.push(format!("responseHash={}", route.response_hash));
         if !route.responses.is_empty() {
             details.push(format!(
                 "responses={}",
@@ -12295,6 +14703,8 @@ fn print_api_schema_text(report: &ApiReport) {
 
     for route in &report.routes {
         println!("// {} {}", route.method, route.route);
+        println!("// request-hash: {}", route.request_hash);
+        println!("// response-hash: {}", route.response_hash);
         if let Some(returns) = &route.returns {
             println!("// response: {}", ax_return_schema_type(returns));
         }
@@ -12346,6 +14756,8 @@ fn api_report_openapi_value(report: &ApiReport) -> serde_json::Value {
 
     let mut document = serde_json::json!({
         "openapi": "3.1.0",
+        "x-axonyx-contract-version": report.version,
+        "x-axonyx-contract-hash": report.contract_hash,
         "info": {
             "title": "Axonyx API",
             "version": "0.1.0"
@@ -12378,6 +14790,14 @@ fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
     operation.insert(
         "operationId".to_string(),
         serde_json::Value::String(api_route_type_name(route)),
+    );
+    operation.insert(
+        "x-axonyx-request-hash".to_string(),
+        serde_json::Value::String(route.request_hash.clone()),
+    );
+    operation.insert(
+        "x-axonyx-response-hash".to_string(),
+        serde_json::Value::String(route.response_hash.clone()),
     );
 
     let parameters = openapi_parameters_for_route(route);
@@ -14031,7 +16451,11 @@ fn handle_http_request(
     }
 
     if request.method == "GET" && is_health_target(&request.target) {
-        return Ok(health_response(mode)?);
+        return health_response(mode);
+    }
+
+    if request.method == "GET" && is_readiness_target(&request.target) {
+        return readiness_response(state, mode);
     }
 
     if mode == AxServerMode::Dev && request.method == "GET" && request.target == "/__axonyx/stream"
@@ -14145,6 +16569,10 @@ fn is_health_target(target: &str) -> bool {
     target.split_once('?').map_or(target, |(path, _)| path) == "/__axonyx/health"
 }
 
+fn is_readiness_target(target: &str) -> bool {
+    target.split_once('?').map_or(target, |(path, _)| path) == "/__axonyx/ready"
+}
+
 fn health_response(mode: AxServerMode) -> Result<AxHttpResponse> {
     Ok(AxHttpResponse::json(
         200,
@@ -14153,6 +16581,105 @@ fn health_response(mode: AxServerMode) -> Result<AxHttpResponse> {
             "service": "axonyx",
             "mode": mode.label(),
             "version": env!("CARGO_PKG_VERSION"),
+        }),
+    )?
+    .with_no_store())
+}
+
+fn readiness_response(state: &DevServerState, mode: AxServerMode) -> Result<AxHttpResponse> {
+    if !state.database_required {
+        return Ok(AxHttpResponse::json(
+            200,
+            &serde_json::json!({
+                "ok": true,
+                "service": "axonyx",
+                "mode": mode.label(),
+                "database": { "required": false, "ok": true },
+            }),
+        )?
+        .with_no_store());
+    }
+
+    let env = match db_env_for_root(&state.root, None) {
+        Ok(env) => env,
+        Err(_) => {
+            return database_readiness_failure(
+                mode,
+                "runtime.error",
+                "Database configuration is invalid.",
+            )
+        }
+    };
+    let runtime = match ax_backend_runtime::lazy_runtime_from_env(env) {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            return database_readiness_failure(
+                mode,
+                "db.unavailable",
+                "Database readiness check failed.",
+            )
+        }
+    };
+    let report = match ax_backend_runtime::AxQueryExecutor::database_health(&runtime) {
+        Ok(report) => report,
+        Err(_) => {
+            return database_readiness_failure(
+                mode,
+                "db.unavailable",
+                "Database readiness check failed.",
+            )
+        }
+    };
+
+    Ok(AxHttpResponse::json(
+        200,
+        &serde_json::json!({
+            "ok": true,
+            "service": "axonyx",
+            "mode": mode.label(),
+            "database": {
+                "required": true,
+                "ok": true,
+                "driver": report.driver,
+                "transport": report.transport,
+                "probe": report.probe,
+                "latencyMs": report.latency_ms,
+            },
+        }),
+    )?
+    .with_no_store())
+}
+
+fn database_readiness_failure(
+    mode: AxServerMode,
+    code: &str,
+    message: &str,
+) -> Result<AxHttpResponse> {
+    database_readiness_error_response(
+        mode,
+        serde_json::json!({
+            "ok": false,
+            "code": code,
+            "message": message,
+        }),
+    )
+}
+
+fn database_readiness_error_response(
+    mode: AxServerMode,
+    error: serde_json::Value,
+) -> Result<AxHttpResponse> {
+    Ok(AxHttpResponse::json(
+        503,
+        &serde_json::json!({
+            "ok": false,
+            "service": "axonyx",
+            "mode": mode.label(),
+            "database": {
+                "required": true,
+                "ok": false,
+                "error": error,
+            },
         }),
     )?
     .with_no_store())
@@ -14989,6 +17516,35 @@ fn parse_bool_config_value(value: &toml::Value) -> std::result::Result<bool, Str
     }
 }
 
+fn parse_db_runtime_config_value(
+    key: &str,
+    value: &toml::Value,
+) -> std::result::Result<u64, String> {
+    let toml::Value::Integer(number) = value else {
+        return Err(format!("[db].{key} must be an integer."));
+    };
+    if *number < 0 || (*number == 0 && key != "read_retry_attempts") {
+        let requirement = if key == "read_retry_attempts" {
+            "non-negative"
+        } else {
+            "positive"
+        };
+        return Err(format!("[db].{key} must be {requirement}."));
+    }
+    if key == "read_retry_attempts"
+        && *number > i64::from(ax_backend_runtime::MAX_DB_READ_RETRY_ATTEMPTS)
+    {
+        return Err(format!(
+            "[db].read_retry_attempts must be between 0 and {}.",
+            ax_backend_runtime::MAX_DB_READ_RETRY_ATTEMPTS
+        ));
+    }
+    if key == "pool_max_size" && *number > i64::from(u32::MAX) {
+        return Err("[db].pool_max_size exceeds the supported u32 range.".to_string());
+    }
+    Ok(*number as u64)
+}
+
 fn parse_server_log_format_value(
     value: &toml::Value,
 ) -> std::result::Result<AxServerLogFormat, String> {
@@ -15178,6 +17734,16 @@ fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn project_uses_database_runtime(root: &Path) -> Result<bool> {
+    let mut sources = Vec::new();
+    collect_backend_sources(root, &mut sources)?;
+    let source_refs = sources
+        .iter()
+        .map(|(_, source)| source.as_str())
+        .collect::<Vec<_>>();
+    backend_source_refs_use_database(&source_refs)
 }
 
 fn reject_cross_site_action_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
@@ -17445,6 +20011,7 @@ mod tests {
             root: root.to_path_buf(),
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::default(),
+            database_required: project_uses_database_runtime(root).unwrap_or(false),
         }
     }
 
@@ -18075,10 +20642,12 @@ route DELETE "/api/posts/:slug"
 
     #[test]
     fn api_report_can_render_openapi_document() {
-        let report = ApiReport {
-            routes: vec![ApiRouteReport {
+        let report = finalize_api_report(
+            vec![ApiRouteReport {
                 method: "POST".to_string(),
                 route: "/api/posts/:slug".to_string(),
+                request_hash: String::new(),
+                response_hash: String::new(),
                 returns: Some("Post[]".to_string()),
                 responses: vec![ApiResponseReport {
                     status: 404,
@@ -18103,7 +20672,7 @@ route DELETE "/api/posts/:slug"
                 ],
                 hooks: Vec::new(),
             }],
-            schemas: vec![ApiSchemaReport {
+            vec![ApiSchemaReport {
                 name: "Post".to_string(),
                 literals: Vec::new(),
                 fields: vec![
@@ -18119,13 +20688,24 @@ route DELETE "/api/posts/:slug"
                     },
                 ],
             }],
-        };
+        )
+        .expect("API hashes should build");
 
         let value = api_report_openapi_value(&report);
 
         assert_eq!(value["openapi"], "3.1.0");
+        assert_eq!(value["x-axonyx-contract-version"], 1);
+        assert_eq!(value["x-axonyx-contract-hash"], report.contract_hash);
         let operation = &value["paths"]["/api/posts/{slug}"]["post"];
         assert_eq!(operation["operationId"], "PostApiPostsSlug");
+        assert_eq!(
+            operation["x-axonyx-request-hash"],
+            report.routes[0].request_hash
+        );
+        assert_eq!(
+            operation["x-axonyx-response-hash"],
+            report.routes[0].response_hash
+        );
         assert_eq!(operation["parameters"][0]["name"], "slug");
         assert_eq!(
             operation["requestBody"]["content"]["application/json"]["schema"]["required"][0],
@@ -18153,6 +20733,117 @@ route DELETE "/api/posts/:slug"
             .expect("required should be array")
             .iter()
             .all(|field| field != "summary"));
+    }
+
+    #[test]
+    fn api_contract_hashes_are_stable_and_schema_sensitive() {
+        let route = ApiRouteReport {
+            method: "GET".to_string(),
+            route: "/api/posts".to_string(),
+            request_hash: String::new(),
+            response_hash: String::new(),
+            returns: Some("Post[]".to_string()),
+            responses: vec![ApiResponseReport {
+                status: 404,
+                description: "Not Found",
+            }],
+            auth: vec![ApiAuthReport {
+                scheme: "signedSession",
+            }],
+            file: "routes/api/posts.ax".to_string(),
+            params: Vec::new(),
+            inputs: vec![ActionInputReport {
+                name: "status".to_string(),
+                ty: "string".to_string(),
+                optional: true,
+                default: Some("published".to_string()),
+            }],
+            hooks: Vec::new(),
+        };
+        let schemas = vec![
+            ApiSchemaReport {
+                name: "Post".to_string(),
+                fields: vec![
+                    ApiSchemaFieldReport {
+                        name: "title".to_string(),
+                        ty: "String".to_string(),
+                        optional: false,
+                    },
+                    ApiSchemaFieldReport {
+                        name: "author".to_string(),
+                        ty: "Map<String, Optional<Author>>".to_string(),
+                        optional: false,
+                    },
+                ],
+                literals: Vec::new(),
+            },
+            ApiSchemaReport {
+                name: "Author".to_string(),
+                fields: vec![ApiSchemaFieldReport {
+                    name: "name".to_string(),
+                    ty: "String".to_string(),
+                    optional: false,
+                }],
+                literals: Vec::new(),
+            },
+        ];
+        let first = finalize_api_report(vec![route.clone()], schemas.clone())
+            .expect("initial API hashes should build");
+
+        let mut moved_route = route.clone();
+        moved_route.file = "routes/v2/posts.ax".to_string();
+        let mut reordered_schemas = schemas.clone();
+        reordered_schemas.reverse();
+        reordered_schemas
+            .iter_mut()
+            .find(|schema| schema.name == "Post")
+            .expect("Post schema should exist")
+            .fields
+            .reverse();
+        let reordered = finalize_api_report(vec![moved_route], reordered_schemas)
+            .expect("reordered API hashes should build");
+
+        assert_eq!(first.contract_hash, reordered.contract_hash);
+        assert_eq!(
+            first.routes[0].request_hash,
+            reordered.routes[0].request_hash
+        );
+        assert_eq!(
+            first.routes[0].response_hash,
+            reordered.routes[0].response_hash
+        );
+        assert!(first.contract_hash.starts_with("sha256:"));
+
+        let mut changed_schemas = schemas.clone();
+        changed_schemas
+            .iter_mut()
+            .find(|schema| schema.name == "Author")
+            .expect("Author schema should exist")
+            .fields[0]
+            .optional = true;
+        let changed = finalize_api_report(vec![route.clone()], changed_schemas)
+            .expect("changed API hashes should build");
+
+        assert_eq!(first.routes[0].request_hash, changed.routes[0].request_hash);
+        assert_ne!(
+            first.routes[0].response_hash,
+            changed.routes[0].response_hash
+        );
+        assert_ne!(first.contract_hash, changed.contract_hash);
+
+        let mut changed_route = route;
+        changed_route.inputs[0].default = Some("draft".to_string());
+        let changed_request = finalize_api_report(vec![changed_route], schemas)
+            .expect("changed request hashes should build");
+
+        assert_ne!(
+            first.routes[0].request_hash,
+            changed_request.routes[0].request_hash
+        );
+        assert_eq!(
+            first.routes[0].response_hash,
+            changed_request.routes[0].response_hash
+        );
     }
 
     #[test]
@@ -19612,6 +22303,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "GET".to_string(),
@@ -19673,6 +22365,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "GET".to_string(),
@@ -19699,6 +22392,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "GET".to_string(),
@@ -20730,34 +23424,7 @@ page Home
     }
 
     #[test]
-    fn db_check_report_accepts_postgres_url_without_live_introspection() {
-        let root = make_temp_dir("db-check-postgres-url");
-        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
-            .expect("config should write");
-
-        let report = collect_db_check_report(
-            &root,
-            Some("postgresql://postgres:secret@db.example.supabase.co:5432/postgres"),
-        )
-        .expect("postgres config should validate");
-
-        assert!(report.ok);
-        assert_eq!(report.driver, "postgres");
-        assert_eq!(report.transport, "direct");
-        assert!(report.tables.is_empty());
-        assert!(report
-            .url
-            .as_deref()
-            .expect("url should be reported")
-            .contains("<redacted>"));
-        assert!(report.message.contains("config is valid"));
-        assert!(report.message.contains("introspection is planned next"));
-
-        fs::remove_dir_all(root).expect("temp dir should clean up");
-    }
-
-    #[test]
-    fn db_check_report_infers_postgres_driver_from_env_url() {
+    fn db_env_infers_postgres_driver_and_redacts_credentials() {
         let root = make_temp_dir("db-check-postgres-env");
         fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
             .expect("config should write");
@@ -20767,12 +23434,512 @@ page Home
         )
         .expect("env should write");
 
-        let report =
-            collect_db_check_report(&root, None).expect("postgres env config should validate");
+        let env = db_env_for_root(&root, None).expect("postgres env should load");
+        let config = env
+            .database_config()
+            .expect("postgres config should resolve");
 
-        assert!(report.ok);
-        assert_eq!(report.driver, "postgres");
-        assert_eq!(report.transport, "direct");
+        assert_eq!(
+            config.driver,
+            ax_backend_runtime::AxDatabaseDriver::Postgres
+        );
+        assert_eq!(
+            config.transport,
+            ax_backend_runtime::AxDataTransport::Direct
+        );
+        assert_eq!(
+            config.url.as_deref().map(redact_db_url),
+            Some("postgres://<redacted>@db.example.supabase.co:5432/postgres".to_string())
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn db_runtime_config_supplies_defaults_without_overriding_environment() {
+        let root = make_temp_dir("db-runtime-policy-config");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"[app]
+name = "demo"
+
+[db]
+pool_max_size = 12
+pool_timeout_ms = 900
+query_timeout_ms = 2400
+read_retry_attempts = 2
+read_retry_backoff_ms = 25
+sqlite_busy_timeout_ms = 700
+"#,
+        )
+        .expect("config should write");
+        fs::write(root.join(".env"), "AX_SECRET_DB_QUERY_TIMEOUT_MS=3600\n")
+            .expect("env should write");
+
+        let env = db_env_for_root(&root, None).expect("database env should load");
+        let config = env
+            .database_config()
+            .expect("database config should resolve");
+        assert_eq!(config.pool_max_size, 12);
+        assert_eq!(config.pool_timeout_ms, 900);
+        assert_eq!(config.policy.query_timeout_ms, 3_600);
+        assert_eq!(config.policy.read_retry_attempts, 2);
+        assert_eq!(config.policy.read_retry_backoff_ms, 25);
+        assert_eq!(config.policy.sqlite_busy_timeout_ms, 700);
+
+        let compiled =
+            compiled_database_runtime_defaults(&root).expect("compiled defaults should render");
+        assert!(compiled.contains("db_query_timeout_ms"));
+        assert!(compiled.contains("database_query_timeout_ms"));
+        assert!(compiled.contains("2400"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn config_check_rejects_unsafe_database_runtime_policy() {
+        let root = make_temp_dir("db-runtime-policy-invalid");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[db]\npool_max_size = 4294967296\nquery_timeout_ms = 0\nread_retry_attempts = 99\n",
+        )
+        .expect("config should write");
+
+        let diagnostics = check_axonyx_config(&root).expect("config check should run");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|item| item.code == "axonyx-config-db-runtime")
+                .count(),
+            3
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn postgres_schema_rows_build_stable_manifest_tables() {
+        let tables = postgres_schema_tables_from_value(
+            &serde_json::json!([
+                {
+                    "table_name": "posts",
+                    "column_name": "id",
+                    "data_type": "uuid",
+                    "nullable": false,
+                    "column_default": "gen_random_uuid()",
+                    "primary_key": true
+                },
+                {
+                    "table_name": "posts",
+                    "column_name": "summary",
+                    "data_type": "text",
+                    "nullable": true,
+                    "column_default": null,
+                    "primary_key": false
+                },
+                {
+                    "table_name": "posts",
+                    "column_name": "amount",
+                    "data_type": "numeric",
+                    "db_type_kind": "domain",
+                    "db_type_name": "money_amount",
+                    "enum_values": [],
+                    "nullable": false,
+                    "column_default": null,
+                    "primary_key": false
+                },
+                {
+                    "table_name": "posts",
+                    "column_name": "status",
+                    "data_type": "post_status",
+                    "db_type_kind": "enum",
+                    "db_type_name": "post_status",
+                    "enum_values": ["draft", "published"],
+                    "nullable": false,
+                    "column_default": "'draft'::post_status",
+                    "primary_key": false
+                },
+                {
+                    "table_name": "posts",
+                    "column_name": "history",
+                    "data_type": "post_status[]",
+                    "db_type_kind": "enum_array",
+                    "db_type_name": "post_status",
+                    "enum_values": ["draft", "published"],
+                    "nullable": false,
+                    "column_default": null,
+                    "primary_key": false
+                }
+            ]),
+            &serde_json::json!([]),
+        )
+        .expect("postgres rows should map");
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].name, "posts");
+        assert_eq!(tables[0].columns[0].name, "id");
+        assert_eq!(tables[0].columns[0].ty, "uuid");
+        assert!(tables[0].columns[0].primary_key);
+        assert!(tables[0].columns[1].nullable);
+        assert_eq!(tables[0].columns[2].ax_type, "Decimal");
+        assert_eq!(
+            tables[0].columns[2].db_type_name.as_deref(),
+            Some("money_amount")
+        );
+        assert_eq!(tables[0].columns[3].ax_type, "PostStatus");
+        assert_eq!(tables[0].columns[4].ax_type, "List<PostStatus>");
+
+        let schema = finalize_db_schema_manifest(DbSchemaManifest {
+            version: 3,
+            driver: "postgres".to_string(),
+            transport: "direct".to_string(),
+            url: None,
+            schema_hash: String::new(),
+            types_path: default_db_types_path(),
+            tables,
+        });
+        validate_db_schema_types(&schema).expect("Postgres scalar contracts should validate");
+        let generated = render_db_schema_types(&schema);
+        assert!(generated.contains("export type PostStatus = \"draft\" | \"published\""));
+        assert!(generated.contains("  amount: Decimal"));
+        assert!(generated.contains("  history: List<PostStatus>"));
+    }
+
+    #[test]
+    fn postgres_foreign_keys_build_typed_relation_contracts() {
+        let columns = serde_json::json!([
+            {
+                "table_name": "authors",
+                "column_name": "tenant_id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": null,
+                "primary_key": true
+            },
+            {
+                "table_name": "authors",
+                "column_name": "id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": null,
+                "primary_key": true
+            },
+            {
+                "table_name": "posts",
+                "column_name": "tenant_id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": null,
+                "primary_key": false
+            },
+            {
+                "table_name": "posts",
+                "column_name": "author_id",
+                "data_type": "uuid",
+                "nullable": false,
+                "column_default": null,
+                "primary_key": false
+            }
+        ]);
+        let relations = serde_json::json!([{
+            "relation_name": "posts_author_fk",
+            "table_name": "posts",
+            "target_schema": "public",
+            "target_table": "authors",
+            "columns": ["tenant_id", "author_id"],
+            "target_columns": ["tenant_id", "id"],
+            "on_update": "cascade",
+            "on_delete": "restrict"
+        }]);
+
+        let tables = postgres_schema_tables_from_value(&columns, &relations)
+            .expect("Postgres relation rows should map");
+        let posts = tables
+            .iter()
+            .find(|table| table.name == "posts")
+            .expect("posts table should exist");
+        assert_eq!(
+            posts.relations,
+            vec![DbSchemaRelation {
+                name: "posts_author_fk".to_string(),
+                columns: vec!["tenant_id".to_string(), "author_id".to_string()],
+                target_schema: "public".to_string(),
+                target_table: "authors".to_string(),
+                target_columns: vec!["tenant_id".to_string(), "id".to_string()],
+                on_update: "cascade".to_string(),
+                on_delete: "restrict".to_string(),
+            }]
+        );
+
+        let schema = finalize_db_schema_manifest(DbSchemaManifest {
+            version: 3,
+            driver: "postgres".to_string(),
+            transport: "direct".to_string(),
+            url: None,
+            schema_hash: String::new(),
+            types_path: default_db_types_path(),
+            tables,
+        });
+        validate_db_schema_types(&schema).expect("foreign-key contracts should validate");
+    }
+
+    #[test]
+    fn pulled_foreign_key_contract_validates_typed_joins() {
+        let root = make_temp_dir("db-typed-joins");
+        fs::create_dir_all(root.join("app/posts")).expect("app directory should exist");
+        fs::create_dir_all(root.join(".axonyx/db")).expect("schema directory should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env DATABASE_URL: Secret<String>\n",
+        )
+        .expect("backend contract should write");
+        let columns = serde_json::json!([
+            { "table_name": "authors", "column_name": "tenant_id", "data_type": "uuid", "nullable": false, "column_default": null, "primary_key": true },
+            { "table_name": "authors", "column_name": "id", "data_type": "uuid", "nullable": false, "column_default": null, "primary_key": true },
+            { "table_name": "authors", "column_name": "name", "data_type": "text", "nullable": false, "column_default": null, "primary_key": false },
+            { "table_name": "posts", "column_name": "tenant_id", "data_type": "uuid", "nullable": false, "column_default": null, "primary_key": false },
+            { "table_name": "posts", "column_name": "author_id", "data_type": "uuid", "nullable": false, "column_default": null, "primary_key": false },
+            { "table_name": "posts", "column_name": "status", "data_type": "text", "nullable": false, "column_default": null, "primary_key": false }
+        ]);
+        let relations = serde_json::json!([{
+            "relation_name": "posts_author_fk",
+            "table_name": "posts",
+            "target_schema": "public",
+            "target_table": "authors",
+            "columns": ["tenant_id", "author_id"],
+            "target_columns": ["tenant_id", "id"],
+            "on_update": "no_action",
+            "on_delete": "restrict"
+        }]);
+        let schema = finalize_db_schema_manifest(DbSchemaManifest {
+            version: 3,
+            driver: "postgres".to_string(),
+            transport: "direct".to_string(),
+            url: None,
+            schema_hash: String::new(),
+            types_path: default_db_types_path(),
+            tables: postgres_schema_tables_from_value(&columns, &relations)
+                .expect("relation fixture should map"),
+        });
+        fs::write(
+            root.join(".axonyx/db/schema.json"),
+            serde_json::to_string_pretty(&schema).expect("schema should serialize"),
+        )
+        .expect("schema should write");
+        let path = root.join("app/posts/loader.ax");
+
+        let valid = r#"
+query loadPosts()
+  data posts = db.posts.join(db.authors, { author_id: id, tenant_id }).where({ "authors.name": "Ada" }).all()
+  return posts
+"#;
+        let diagnostics = check_ax_source_with_root(&path, valid, Some(&root));
+        assert!(!diagnostics
+            .iter()
+            .any(|item| item.code.starts_with("axonyx-db")));
+
+        let invalid = r#"
+query loadPosts()
+  data posts = db.posts.join(db.authors, { tenant_id: id, author_id: tenant_id }).all()
+  return posts
+"#;
+        let diagnostics = check_ax_source_with_root(&path, invalid, Some(&root));
+        assert!(diagnostics.iter().any(|item| {
+            item.code == "axonyx-db-relation"
+                && item
+                    .message
+                    .contains("does not match a pulled foreign-key contract")
+        }));
+
+        let invalid_qualifier = r#"
+query loadPosts()
+  data posts = db.posts.join(db.authors, { tenant_id, author_id: id }).where({ "teams.name": "Ada" }).all()
+  return posts
+"#;
+        let diagnostics = check_ax_source_with_root(&path, invalid_qualifier, Some(&root));
+        assert!(diagnostics
+            .iter()
+            .any(|item| item.code == "axonyx-db-query-qualifier"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn inferred_database_resources_require_schema_before_typed_join() {
+        let root = make_temp_dir("db-typed-join-without-schema");
+        fs::create_dir_all(root.join("app/posts")).expect("app directory should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env DATABASE_URL: Secret<String>\n",
+        )
+        .expect("backend contract should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+type Post {
+  author_id: String
+}
+
+type Author {
+  id: String
+}
+
+page Home() {
+  return ASX { <Copy>Home</Copy> }
+}
+"#,
+        )
+        .expect("type contracts should write");
+        let path = root.join("app/posts/loader.ax");
+        let source = r#"
+query loadPosts()
+  data posts = db.posts.join(db.authors, { author_id: id }).all()
+  return posts
+"#;
+
+        let diagnostics = check_ax_source_with_root(&path, source, Some(&root));
+
+        assert!(
+            diagnostics.iter().any(|item| {
+                item.code == "axonyx-db-relation" && item.message.contains("run `cargo ax db pull`")
+            }),
+            "{diagnostics:#?}"
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn postgres_db_check_and_pull_run_when_test_url_is_configured() {
+        let Ok(url) = std::env::var("AXONYX_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let root = make_temp_dir("db-postgres-live");
+        let suffix = std::process::id();
+        let table_name = format!("axonyx_schema_test_{suffix}");
+        let parent_table = format!("axonyx_schema_authors_{suffix}");
+        let relation_name = format!("axonyx_schema_author_fk_{suffix}");
+        let status_type = format!("axonyx_schema_status_{suffix}");
+        let price_domain = format!("axonyx_schema_price_{suffix}");
+        let migration = ax_backend_runtime::AxMigration {
+            version: format!("99999997_{suffix}"),
+            name: "postgres_scalar_schema".to_string(),
+            checksum: "e".repeat(64),
+            up_sql: format!(
+                "create type \"{status_type}\" as enum ('draft', 'published');
+                 create domain \"{price_domain}\" as numeric(38, 12) check (value >= 0);
+                 create table \"{parent_table}\" (
+                   tenant_id uuid not null,
+                   id uuid not null,
+                   primary key (tenant_id, id)
+                 );
+                 create table \"{table_name}\" (
+                   id uuid primary key,
+                   tenant_id uuid not null,
+                   author_id uuid not null,
+                   amount numeric(38, 12) not null,
+                   price \"{price_domain}\" not null,
+                   status \"{status_type}\" not null,
+                   history \"{status_type}\"[] not null,
+                   tags text[] not null,
+                   published_at timestamptz,
+                   metadata jsonb,
+                   constraint \"{relation_name}\"
+                     foreign key (tenant_id, author_id)
+                     references \"{parent_table}\" (tenant_id, id)
+                     on update cascade
+                     on delete restrict
+                 );"
+            ),
+            down_sql: format!(
+                "drop table \"{table_name}\";
+                 drop table \"{parent_table}\";
+                 drop domain \"{price_domain}\";
+                 drop type \"{status_type}\";"
+            ),
+        };
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+
+        let check =
+            collect_db_check_report(&root, Some(&url)).expect("live postgres check should succeed");
+        assert!(check.ok);
+        assert_eq!(check.driver, "postgres");
+        assert!(check.message.contains("reachable"));
+        let reported_url = check.url.unwrap_or_default();
+        assert!(!reported_url.contains("secret"));
+        if url.contains('@') {
+            assert!(reported_url.contains("<redacted>"));
+        }
+
+        let runtime = ax_backend_runtime::runtime_from_env(
+            ax_backend_runtime::AxEnv::new()
+                .with_secret("db_dialect", "postgres")
+                .with_secret("db_url", &url),
+        )
+        .expect("Postgres schema test runtime should initialize");
+        ax_backend_runtime::AxMigrationExecutor::apply_migration(&runtime, &migration)
+            .expect("Postgres scalar fixture should apply");
+
+        let result = (|| -> Result<()> {
+            let pull = collect_db_pull_report(
+                &root,
+                Some(&url),
+                Path::new(".axonyx/db/postgres-schema.json"),
+                Path::new("app/generated/postgres-db.ax"),
+            )?;
+            assert_eq!(pull.schema.driver, "postgres");
+            assert_eq!(pull.schema.version, 3);
+            assert!(root.join(".axonyx/db/postgres-schema.json").exists());
+
+            let table = pull
+                .schema
+                .tables
+                .iter()
+                .find(|table| table.name == table_name)
+                .context("pulled schema should contain the scalar fixture")?;
+            let column = |name: &str| {
+                table
+                    .columns
+                    .iter()
+                    .find(|column| column.name == name)
+                    .unwrap_or_else(|| panic!("fixture should expose column `{name}`"))
+            };
+            assert_eq!(column("amount").ax_type, "Decimal");
+            assert_eq!(column("price").ax_type, "Decimal");
+            assert_eq!(column("price").db_type_kind.as_deref(), Some("domain"));
+            assert_eq!(
+                column("price").db_type_name.as_deref(),
+                Some(price_domain.as_str())
+            );
+            let enum_contract = sanitize_type_name(&status_type);
+            assert_eq!(column("status").ax_type, enum_contract);
+            assert_eq!(column("status").enum_values, ["draft", "published"]);
+            assert_eq!(column("history").ax_type, format!("List<{enum_contract}>"));
+            assert_eq!(column("tags").ax_type, "List<String>");
+            assert_eq!(column("published_at").ax_type, "DateTime");
+            assert_eq!(column("metadata").ax_type, "Json");
+            assert_eq!(table.relations.len(), 1);
+            let relation = &table.relations[0];
+            assert_eq!(relation.name, relation_name);
+            assert_eq!(relation.columns, ["tenant_id", "author_id"]);
+            assert_eq!(relation.target_schema, "public");
+            assert_eq!(relation.target_table, parent_table);
+            assert_eq!(relation.target_columns, ["tenant_id", "id"]);
+            assert_eq!(relation.on_update, "cascade");
+            assert_eq!(relation.on_delete, "restrict");
+
+            let generated = fs::read_to_string(root.join("app/generated/postgres-db.ax"))?;
+            assert!(generated.contains(&format!(
+                "export type {enum_contract} = \"draft\" | \"published\""
+            )));
+            assert!(generated.contains("amount: Decimal"));
+            Ok(())
+        })();
+
+        ax_backend_runtime::AxMigrationExecutor::rollback_migration(&runtime, &migration)
+            .expect("Postgres scalar fixture should roll back");
+        result.expect("live postgres pull should succeed");
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -20801,15 +23968,19 @@ page Home
             &root,
             Some(&db_path.to_string_lossy()),
             Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
         )
         .expect("db pull should write schema");
 
         let schema_path = root.join(".axonyx/db/schema.json");
         assert!(report.ok);
-        assert_eq!(report.schema.version, 1);
+        assert_eq!(report.schema.version, 3);
         assert_eq!(report.schema.driver, "sqlite");
+        assert!(report.schema.schema_hash.starts_with("sha256:"));
         assert_eq!(report.schema.tables.len(), 1);
         assert_eq!(report.schema.tables[0].name, "posts");
+        assert_eq!(report.schema.tables[0].kind, "table");
+        assert_eq!(report.schema.tables[0].record, "PostsRow");
         assert!(report.schema.tables[0]
             .columns
             .iter()
@@ -20818,7 +23989,500 @@ page Home
         let written = fs::read_to_string(schema_path).expect("schema should read");
         assert!(written.contains("\"posts\""));
         assert!(written.contains("\"published\""));
+        let types = fs::read_to_string(root.join("app/generated/db.ax"))
+            .expect("generated database types should read");
+        assert!(types.contains("export type PostsRow"));
+        assert!(types.contains("export type PostsCreateInput"));
+        assert!(types.contains("export type PostsUpdateInput"));
+        assert!(types.contains("id: Int"));
+        assert!(types.contains("title: String"));
+        assert!(types.contains("summary: Optional<String>"));
+        assert!(types.contains("published: Optional<Int>"));
+        let generated = parse_backend_ax(&types).expect("generated database types should parse");
+        assert_eq!(generated.types.len(), 3);
 
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn db_pull_tracks_custom_generated_type_path_in_manifest() {
+        let root = make_temp_dir("db-pull-custom-types-path");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute("create table posts (id integer primary key)", [])
+            .expect("table should create");
+        drop(connection);
+
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/types/database.ax"),
+        )
+        .expect("db pull should succeed");
+
+        let schema = read_db_schema_manifest(&root)
+            .expect("manifest should read")
+            .expect("manifest should exist");
+        assert_eq!(schema.types_path, "app/types/database.ax");
+        assert!(root.join("app/types/database.ax").exists());
+        assert!(check_generated_database_contract(&root)
+            .expect("generated contract should check")
+            .is_empty());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn pulled_database_schema_drives_resource_and_field_diagnostics() {
+        let root = make_temp_dir("db-pull-typed-resources");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env DATABASE_URL: Secret<String>\n",
+        )
+        .expect("backend contract should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute_batch(
+                "create table posts (id integer primary key, title text not null, status text);\n\
+                 create view published_posts as select id, title from posts where status = 'published';",
+            )
+            .expect("schema should create");
+        drop(connection);
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
+        )
+        .expect("db pull should succeed");
+        fs::write(
+            root.join("app/loader.ax"),
+            r#"
+loader Posts -> List<PostsRow>
+  data posts = db.posts.where({ statuz: "published" }).order({ created: "desc" }).all()
+  return posts
+"#,
+        )
+        .expect("loader should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action CreatePost
+  input:
+    title: string
+  db.posts.insert({ titel: input.title })
+  return ok()
+
+action WriteView
+  db.published_posts.insert({ title: "No" })
+  return ok()
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        let messages = diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code, diagnostic.message.as_str()))
+            .collect::<Vec<_>>();
+        assert!(messages
+            .iter()
+            .any(|(code, message)| { *code == "axonyx-db-field" && message.contains("statuz") }));
+        assert!(messages
+            .iter()
+            .any(|(code, message)| { *code == "axonyx-db-field" && message.contains("created") }));
+        assert!(messages
+            .iter()
+            .any(|(code, message)| { *code == "axonyx-db-field" && message.contains("titel") }));
+        assert!(messages
+            .iter()
+            .any(|(code, _)| *code == "axonyx-db-read-only"));
+        assert!(messages
+            .iter()
+            .all(|(code, _)| *code != "axonyx-return-contract-unknown-type"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn pulled_database_schema_checks_mutation_value_types_and_required_fields() {
+        let root = make_temp_dir("db-pull-typed-mutations");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/backend.ax"),
+            "backend\n  env DATABASE_URL: Secret<String>\n",
+        )
+        .expect("backend contract should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute(
+                "create table posts (
+                    id integer primary key,
+                    title text not null,
+                    views integer not null default 0,
+                    rating real
+                )",
+                [],
+            )
+            .expect("schema should create");
+        drop(connection);
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
+        )
+        .expect("db pull should succeed");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action CreatePost
+  input:
+    title: string
+    views: string
+  db.posts.insert({ views: input.views, rating: "high" })
+  return ok()
+
+action UpdatePost
+  input:
+    title: string
+  db.posts.where({ id: "first" }).update({ title: 42 })
+  return ok()
+
+action ValidPost
+  input:
+    title: string
+    views: int
+  db.posts.insert({ title: input.title, views: input.views, rating: null })
+  return ok()
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-required-field" && diagnostic.message.contains("`title`")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-value-type" && diagnostic.message.contains("input.views")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-value-type" && diagnostic.message.contains("rating")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-value-type" && diagnostic.message.contains("id")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-db-value-type" && diagnostic.message.contains("title")
+        }));
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "axonyx-db-value-type")
+                .count(),
+            4
+        );
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "axonyx-db-required-field")
+                .count(),
+            1
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn database_sql_types_map_to_existing_axonyx_types() {
+        assert_eq!(database_ax_type("sqlite", "INTEGER"), "Int");
+        assert_eq!(database_ax_type("sqlite", "VARCHAR(255)"), "String");
+        assert_eq!(database_ax_type("sqlite", "BLOB"), "Bytes");
+        assert_eq!(database_ax_type("postgres", "boolean"), "Bool");
+        assert_eq!(database_ax_type("postgres", "uuid"), "Uuid");
+        assert_eq!(database_ax_type("postgres", "jsonb"), "Json");
+        assert_eq!(database_ax_type("postgres", "numeric"), "Decimal");
+        assert_eq!(database_ax_type("postgres", "numeric[]"), "List<Decimal>");
+        assert_eq!(database_ax_type("postgres", "text[]"), "List<String>");
+    }
+
+    #[test]
+    fn database_check_reports_schema_drift_after_database_change() {
+        let root = make_temp_dir("db-schema-drift");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let db_path = root.join("app.db");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute("create table posts (id integer primary key)", [])
+            .expect("table should create");
+        drop(connection);
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
+        )
+        .expect("db pull should succeed");
+
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should reopen");
+        connection
+            .execute("alter table posts add column title text", [])
+            .expect("schema should change");
+        drop(connection);
+
+        let report = collect_db_check_report(&root, Some(&db_path.to_string_lossy()))
+            .expect("db check should run");
+        assert!(!report.ok);
+        assert!(report.schema_drift);
+        assert_ne!(report.schema_hash, report.manifest_hash);
+        assert!(report.message.contains("cargo ax db pull"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn database_check_reports_driver_drift() {
+        let root = make_temp_dir("db-driver-drift");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let db_path = root.join("app.db");
+        rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        collect_db_pull_report(
+            &root,
+            Some(&db_path.to_string_lossy()),
+            Path::new(".axonyx/db/schema.json"),
+            Path::new("app/generated/db.ax"),
+        )
+        .expect("db pull should succeed");
+
+        let manifest_path = root.join(".axonyx/db/schema.json");
+        let mut manifest = read_db_schema_manifest(&root)
+            .expect("manifest should read")
+            .expect("manifest should exist");
+        manifest.driver = "postgres".to_string();
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).expect("manifest should serialize"),
+        )
+        .expect("manifest should write");
+
+        let report = collect_db_check_report(&root, Some(&db_path.to_string_lossy()))
+            .expect("db check should run");
+        assert!(!report.ok);
+        assert!(report.schema_drift);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn migration_create_uses_stable_timestamp_sequence_and_canonical_name() {
+        let root = make_temp_dir("migration-create");
+        let directory = root.join("db/migrations");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-01T12:34:56Z")
+            .expect("timestamp should parse")
+            .with_timezone(&Utc);
+
+        let first = create_migration_files(&directory, "Create Posts", now)
+            .expect("first migration should create");
+        let second = create_migration_files(&directory, "add-post-status", now)
+            .expect("second migration should create");
+
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some("20260901123456_001_create_posts")
+        );
+        assert_eq!(
+            second.file_name().and_then(|name| name.to_str()),
+            Some("20260901123456_002_add_post_status")
+        );
+        assert!(first.join("up.sql").exists());
+        assert!(first.join("down.sql").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn migration_discovery_normalizes_line_endings_for_checksums() {
+        let root = make_temp_dir("migration-checksum-line-endings");
+        let directory = root.join("db/migrations/20260901123456_001_create_posts");
+        fs::create_dir_all(&directory).expect("migration directory should create");
+        fs::write(
+            directory.join("up.sql"),
+            "create table posts (\r\n  id integer primary key\r\n);\r\n",
+        )
+        .expect("up migration should write");
+        fs::write(directory.join("down.sql"), "drop table posts;\r\n")
+            .expect("down migration should write");
+
+        let migrations = discover_migrations(&root.join("db/migrations"))
+            .expect("migration should be discovered");
+        let expected = migration_checksum(
+            "create table posts (\n  id integer primary key\n);\n",
+            "drop table posts;\n",
+        );
+
+        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations[0].migration.version, "20260901123456_001");
+        assert_eq!(migrations[0].migration.name, "create_posts");
+        assert_eq!(migrations[0].migration.checksum, expected);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn migration_discovery_rejects_unfinished_and_malformed_directories() {
+        let root = make_temp_dir("migration-invalid-files");
+        let unfinished = root.join("db/migrations/20260901123456_001_create_posts");
+        fs::create_dir_all(&unfinished).expect("migration directory should create");
+        fs::write(unfinished.join("up.sql"), "-- TODO\n").expect("up should write");
+        fs::write(unfinished.join("down.sql"), "-- TODO\n").expect("down should write");
+
+        let error = discover_migrations(&root.join("db/migrations"))
+            .expect_err("comment-only migration should fail");
+        assert!(error.to_string().contains("requires executable SQL"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn production_migrations_require_explicit_confirmation() {
+        assert!(ensure_database_change_confirmed("prod", false, false).is_err());
+        assert!(ensure_database_change_confirmed("production", false, false).is_err());
+        assert!(ensure_database_change_confirmed("prod", true, false).is_ok());
+        assert!(ensure_database_change_confirmed("prod", false, true).is_ok());
+        assert!(ensure_database_change_confirmed("local", false, false).is_ok());
+        assert!(ensure_database_change_confirmed("../../prod", true, false).is_err());
+    }
+
+    #[test]
+    fn database_environment_profiles_load_the_matching_env_file() {
+        let _guard = lock_test_env();
+        let root = make_temp_dir("migration-env-profile");
+        fs::write(
+            root.join(".env.local"),
+            "AX_PUBLIC_MIGRATION_PROFILE_TEST=local\n",
+        )
+        .expect("local env should write");
+        fs::write(
+            root.join(".env.prod"),
+            "AX_PUBLIC_MIGRATION_PROFILE_TEST=production\n",
+        )
+        .expect("production env should write");
+
+        let local =
+            db_env_for_root_profile(&root, None, "local").expect("local environment should load");
+        let production = db_env_for_root_profile(&root, None, "PROD")
+            .expect("production environment should load");
+
+        assert_eq!(
+            local
+                .public
+                .get("migration_profile_test")
+                .map(String::as_str),
+            Some("local")
+        );
+        assert_eq!(
+            production
+                .public
+                .get("migration_profile_test")
+                .map(String::as_str),
+            Some("production")
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn sqlite_migration_helpers_complete_create_status_apply_and_rollback_flow() {
+        let root = make_temp_dir("migration-sqlite-flow");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"migration-test\"\n\n[db]\nmigrations = \"db/migrations\"\n",
+        )
+        .expect("config should write");
+        let db_path = root.join("migration-test.db");
+        fs::write(
+            root.join(".env.local"),
+            format!(
+                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\n",
+                db_path.display()
+            ),
+        )
+        .expect("database env should write");
+        let migration_dir = root.join("db/migrations/20260901123456_001_create_posts");
+        fs::create_dir_all(&migration_dir).expect("migration directory should create");
+        fs::write(
+            migration_dir.join("up.sql"),
+            "create table posts (id integer primary key, title text not null);\n",
+        )
+        .expect("up migration should write");
+        fs::write(migration_dir.join("down.sql"), "drop table posts;\n")
+            .expect("down migration should write");
+
+        let directory = migrations_directory(&root, None).expect("directory should resolve");
+        let files = discover_migrations(&directory).expect("migration should load");
+        let (config, runtime) =
+            migration_runtime(&root, "local", None).expect("migration runtime should initialize");
+        let empty_history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+            .expect("empty history should load");
+        assert!(empty_history.is_empty());
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        let tracking_tables: i64 = connection
+            .query_row(
+                "select count(*) from sqlite_master where type = 'table' and name = '_axonyx_migrations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("tracking table count should load");
+        assert_eq!(tracking_tables, 0, "status must not mutate the database");
+        drop(connection);
+
+        let pending = pending_migrations(&files, &empty_history).expect("pending should resolve");
+        assert_eq!(pending.len(), 1);
+        ax_backend_runtime::AxMigrationExecutor::apply_migrations(
+            &runtime,
+            &[pending[0].migration.clone()],
+        )
+        .expect("migration should apply");
+        let history = ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+            .expect("history should load");
+        let status = migration_status_report(&config, "local", &directory, &files, &history)
+            .expect("status should build");
+        assert_eq!(status.applied, 1);
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.entries[0].status, "applied");
+
+        ax_backend_runtime::AxMigrationExecutor::rollback_migration(&runtime, &files[0].migration)
+            .expect("migration should roll back");
+        assert!(
+            ax_backend_runtime::AxMigrationExecutor::migration_history(&runtime)
+                .expect("history should reload")
+                .is_empty()
+        );
+        let connection = rusqlite::Connection::open(db_path).expect("sqlite should reopen");
+        let post_tables: i64 = connection
+            .query_row(
+                "select count(*) from sqlite_master where type = 'table' and name = 'posts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("posts table count should load");
+        assert_eq!(post_tables, 0);
+
+        drop(connection);
+        drop(runtime);
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
@@ -20899,6 +24563,8 @@ page Home
                 document_json: "{\"page\":\"posts\"}".to_string(),
                 import_sources: Vec::new(),
             }],
+            "",
+            true,
         );
 
         assert!(source.contains("backend::dispatch_api_route"));
@@ -20912,6 +24578,13 @@ page Home
         assert!(source.contains("compiled_binding_args"));
         assert!(source.contains("compiled_loader_call_key"));
         assert!(source.contains("render_compiled_page_fragment"));
+        assert!(source.contains("let mut env = AxEnv::from_env()"));
+        assert!(source.contains("let runtime = Arc::new(lazy_runtime_from_env"));
+        assert_eq!(source.matches("lazy_runtime_from_env(env)").count(), 1);
+        assert!(source.contains("handle_request(&dist, runtime.as_ref(), request)"));
+        assert!(source.contains("const DATABASE_REQUIRED: bool = true"));
+        assert!(source.contains("/__axonyx/ready"));
+        assert!(source.contains("AxQueryExecutor::database_health(runtime)"));
         assert!(source.contains("cross_site_action_request"));
         assert!(source.contains("safe_action_route"));
         assert!(source.contains("path.starts_with(\"//\")"));
@@ -21018,6 +24691,74 @@ return ASX { <Copy>{posts}</Copy> }
         assert_eq!(args.format, CheckFormat::Json);
         assert_eq!(args.url.as_deref(), Some("sqlite://app.db"));
         assert_eq!(args.out, PathBuf::from(".axonyx/db/schema.json"));
+        assert_eq!(args.types_out, PathBuf::from("app/generated/db.ax"));
+    }
+
+    #[test]
+    fn parses_database_migration_commands() {
+        let create = Cli::try_parse_from([
+            "cargo-ax",
+            "db",
+            "migration",
+            "create",
+            "create_posts",
+            "--dir",
+            "database/migrations",
+        ])
+        .expect("migration create command should parse");
+        let Commands::Db(args) = create.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Migration(args) = args.command else {
+            panic!("expected migration command");
+        };
+        let DbMigrationCommands::Create(args) = args.command;
+        assert_eq!(args.name, "create_posts");
+        assert_eq!(args.dir, Some(PathBuf::from("database/migrations")));
+
+        let migrate =
+            Cli::try_parse_from(["cargo-ax", "db", "migrate", "--env", "prod", "--dry-run"])
+                .expect("migrate command should parse");
+        let Commands::Db(args) = migrate.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Migrate(args) = args.command else {
+            panic!("expected migrate command");
+        };
+        assert_eq!(args.env, "prod");
+        assert!(args.dry_run);
+        assert!(!args.confirm);
+
+        let status = Cli::try_parse_from([
+            "cargo-ax", "db", "status", "--env", "staging", "--format", "json",
+        ])
+        .expect("status command should parse");
+        let Commands::Db(args) = status.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Status(args) = args.command else {
+            panic!("expected status command");
+        };
+        assert_eq!(args.env, "staging");
+        assert_eq!(args.format, CheckFormat::Json);
+
+        let rollback = Cli::try_parse_from([
+            "cargo-ax",
+            "db",
+            "rollback",
+            "--env",
+            "production",
+            "--confirm",
+        ])
+        .expect("rollback command should parse");
+        let Commands::Db(args) = rollback.command else {
+            panic!("expected db command");
+        };
+        let DbCommands::Rollback(args) = args.command else {
+            panic!("expected rollback command");
+        };
+        assert_eq!(args.env, "production");
+        assert!(args.confirm);
     }
 
     #[test]
@@ -22028,6 +25769,32 @@ axonyx-runtime = "0.1.14"
     }
 
     #[test]
+    fn doctor_reports_effective_database_runtime_policy() {
+        let root = make_temp_dir("doctor-database-runtime-policy");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[db]\nquery_timeout_ms = 2400\nread_retry_attempts = 2\n",
+        )
+        .expect("config should write");
+
+        let check = doctor_database_runtime_policy_check(&root);
+        assert_eq!(check.severity, DoctorSeverity::Ok);
+        assert!(check.message.contains("2400 ms query timeout"));
+        assert!(check.message.contains("2 read retries"));
+
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[db]\nread_retry_attempts = 12\n",
+        )
+        .expect("config should write");
+        let check = doctor_database_runtime_policy_check(&root);
+        assert_eq!(check.severity, DoctorSeverity::Error);
+        assert!(check.message.contains("read_retry_attempts"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn doctor_reports_state_manifest_status() {
         let root = make_temp_dir("doctor-state-manifest");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -22508,7 +26275,7 @@ axonyx-runtime = "0.1.14"
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-health"
                 && check.severity == DoctorSeverity::Ok
-                && check.hint == Some("Health check path: /__axonyx/health")
+                && check.hint == Some("Health check path: /__axonyx/ready")
         }));
         assert!(checks.iter().any(|check| {
             check.code == "deploy-render-melt" && check.message.contains("1 page route")
@@ -22849,6 +26616,7 @@ axonyx-runtime = "0.1.0"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "PUT".to_string(),
@@ -22892,6 +26660,116 @@ axonyx-runtime = "0.1.0"
         assert_eq!(body["ok"], true);
         assert_eq!(body["service"], "axonyx");
         assert_eq!(body["mode"], "start");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn readiness_endpoint_skips_database_for_static_apps() {
+        let root = make_temp_dir("readiness-static");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/__axonyx/ready?probe=1".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+        let status = response.status;
+        let cache_control = response.header_value("Cache-Control").map(str::to_string);
+        let body = serde_json::from_slice::<serde_json::Value>(&response.body.into_bytes())
+            .expect("readiness response should be json");
+
+        assert_eq!(status, 200);
+        assert_eq!(cache_control.as_deref(), Some("no-store"));
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["database"]["required"], false);
+        assert_eq!(body["database"]["ok"], true);
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn readiness_endpoint_probes_required_sqlite_without_exposing_url() {
+        let root = make_temp_dir("readiness-sqlite");
+        fs::create_dir_all(root.join("routes").join("api")).expect("api directory should create");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("routes").join("api").join("posts.ax"),
+            "route GET \"/api/posts\"\n  data posts = db.posts.all()\n  return posts\n",
+        )
+        .expect("database route should write");
+        let db_path = root.join("ready.sqlite");
+        fs::write(
+            root.join(".env"),
+            format!(
+                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\n",
+                db_path.display()
+            ),
+        )
+        .expect("database env should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/__axonyx/ready".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+        let status = response.status;
+        let body_bytes = response.body.into_bytes();
+        let body = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+            .expect("readiness response should be json");
+
+        assert_eq!(status, 200);
+        assert_eq!(body["database"]["required"], true);
+        assert_eq!(body["database"]["ok"], true);
+        assert_eq!(body["database"]["driver"], "sqlite");
+        assert_eq!(body["database"]["probe"], "query");
+        assert!(!String::from_utf8_lossy(&body_bytes).contains(&db_path.display().to_string()));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn readiness_endpoint_returns_safe_503_when_required_database_is_unavailable() {
+        let root = make_temp_dir("readiness-unavailable");
+        fs::create_dir_all(root.join("routes").join("api")).expect("api directory should create");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("routes").join("api").join("posts.ax"),
+            "route GET \"/api/posts\"\n  data posts = db.posts.all()\n  return posts\n",
+        )
+        .expect("database route should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/__axonyx/ready".to_string(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+
+        let response =
+            handle_http_request(&state, AxServerMode::Start, request).expect("request should run");
+        let status = response.status;
+        let body_bytes = response.body.into_bytes();
+        let body = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+            .expect("readiness response should be json");
+
+        assert_eq!(status, 503);
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["database"]["required"], true);
+        assert_eq!(body["database"]["ok"], false);
+        assert_eq!(body["database"]["error"]["code"], "db.unavailable");
+        assert!(!String::from_utf8_lossy(&body_bytes).contains("AX_SECRET_DB_URL"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -22963,6 +26841,7 @@ axonyx-runtime = "0.1.0"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            database_required: false,
         };
         let request = AxHttpRequest {
             method: "GET".to_string(),
@@ -23395,6 +27274,63 @@ action CreatePost
             )
             .expect("inserted post should be queryable");
         assert_eq!(count, 1);
+
+        drop(connection);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn production_action_transaction_rolls_back_all_database_writes() {
+        let root = make_temp_dir("production-action-transaction-rollback");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/page.asx"),
+            "page Home() { return ASX { <Copy>Home</Copy> } }\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action createPost(title: String) {
+  transaction {
+    db.posts.insert({ title: input.title, excerpt: "Must roll back", slug: "transaction-rollback", status: "draft", created_at: "2026-09-01" })
+    db.audit.insert({ event: "existing" })
+  }
+  return ok()
+}
+"#,
+        )
+        .expect("actions should write");
+        seed_test_sqlite_posts(&root);
+        let db_path = root.join("posts.sqlite");
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should open");
+        connection
+            .execute_batch(
+                "create table audit (id integer primary key, event text not null unique);\
+                 insert into audit (id, event) values (1, 'existing');",
+            )
+            .expect("audit table should seed");
+        drop(connection);
+
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=createPost")
+            .with_header("Content-Type", "application/x-www-form-urlencoded")
+            .with_body(b"title=Atomic+post".to_vec());
+
+        handle_http_request(&state, AxServerMode::Start, request)
+            .expect_err("duplicate audit event should fail the action transaction");
+
+        let connection = rusqlite::Connection::open(&db_path).expect("sqlite should reopen");
+        let count: i64 = connection
+            .query_row(
+                "select count(*) from posts where slug = 'transaction-rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rolled-back post count should be readable");
+        assert_eq!(count, 0);
 
         drop(connection);
         fs::remove_dir_all(root).expect("temp dir should clean up");
@@ -26687,6 +30623,54 @@ type Post {
 action BadDb
   data value = db.trables.all()
   return value
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "axonyx-db-resource");
+        assert_eq!(diagnostics[0].message, "unknown db resource `trables`");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_reports_unknown_database_resource_inside_transaction() {
+        let root = make_temp_dir("unknown-transaction-database-resource");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("app/backend.ax"),
+            r#"
+backend
+  env DATABASE_URL: Secret<String>
+"#,
+        )
+        .expect("backend root should write");
+        fs::write(
+            root.join("app/page.ax"),
+            r#"
+page Schema
+
+type Post {
+  title: String
+}
+
+<Copy>Schema</Copy>
+"#,
+        )
+        .expect("schema page should write");
+        fs::write(
+            root.join("app/actions.ax"),
+            r#"
+action createPost(title: string) {
+  transaction {
+    db.posts.insert({ title: input.title })
+    db.trables.insert({ title: input.title })
+  }
+  return ok()
+}
 "#,
         )
         .expect("actions should write");

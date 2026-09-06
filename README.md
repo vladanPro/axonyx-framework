@@ -26,6 +26,7 @@ state signals.
 - first state bridge contracts through stable `SignalId`, `data-ax-signal`, and typed patch events
 - first Melt state manifest for `.ax` `state` declarations
 - reusable Foundry UI imports through `@axonyx/ui/...`
+- atomic SQLite/Postgres migrations through `cargo ax db ...`
 - generated apps consuming published crates from crates.io
 
 ## Packages
@@ -39,8 +40,8 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.1.14"
-axonyx-ui = "0.0.48"
+axonyx-runtime = "0.3.0"
+axonyx-ui = "0.0.71"
 ```
 
 ## Quick Start
@@ -87,7 +88,7 @@ cargo ax doctor --deploy render
 
 The Render check recommends the same Tokio-backed start command so local smoke
 and hosted deploys exercise the same server path. It also reports the
-recommended health-check path: `/__axonyx/health`.
+recommended health-check path: `/__axonyx/ready`.
 
 Production preview exposes a stable health probe for hosted platforms and load
 balancers:
@@ -95,6 +96,19 @@ balancers:
 ```text
 GET /__axonyx/health
 ```
+
+That endpoint is a cheap process liveness probe. Deployments should use the
+separate readiness endpoint when traffic must wait for required database
+connectivity:
+
+```text
+GET /__axonyx/ready
+```
+
+The Melt marks database-free applications as ready without requiring database
+configuration. Database-backed applications run one non-retried SQLite or
+Postgres probe and return `503` with a redacted error when the dependency is
+unavailable.
 
 Request reads default to a short production-safe timeout and can be tuned per
 app:
@@ -126,6 +140,20 @@ Check and build:
 cargo ax doctor --deny-warnings
 cargo ax build --clean
 ```
+
+For full-stack apps, create and run ordered database migrations through the
+same configured runtime adapter used by loaders, actions, and API routes:
+
+```bash
+cargo ax db migration create create_posts
+cargo ax db status
+cargo ax db migrate --dry-run
+cargo ax db migrate
+```
+
+Production changes require `--env prod --confirm`. See
+[Backend authoring](./docs/backend-authoring.md#database-migrations) for the
+directory, checksum, rollback, and environment contracts.
 
 Available templates today:
 

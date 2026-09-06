@@ -114,13 +114,17 @@ CI preflight that verifies the graph can be collected without diagnostics.
 `cargo ax content` reads `[content.collections]` from `Axonyx.toml` and prints the current Melt-time content manifest.
 `cargo ax build` uses the Melt graph as its diagnostics preflight, writes the content manifest to `dist/_ax/content/manifest.json` when collections are configured, writes `dist/_ax/state/manifest.json` and `dist/_ax/state/snapshot.json` when state signals exist, and always writes the Melt graph to `dist/_ax/melt/graph.json`.
 
-`cargo ax db check` validates the active database environment contract. SQLite
-checks include live table discovery; Postgres/Supabase checks currently validate
-the config and redact the URL while live introspection is being shaped.
+`cargo ax db check` validates the active database environment contract and
+introspects live SQLite or Postgres/Supabase resources. When a pulled manifest
+exists, it also fails on schema drift and tells you to pull again.
 
-`cargo ax db pull` writes the current SQLite schema snapshot to
-`.axonyx/db/schema.json` by default. Rerun it after changing the database so
-future checks, generated types, and editor tooling can use the latest schema.
+`cargo ax db pull` writes a versioned schema snapshot to
+`.axonyx/db/schema.json` and generated Axonyx row contracts to
+`app/generated/db.ax`. `cargo ax check` then validates database resource names,
+query/order fields, mutation fields and values, required insert fields, and
+read-only views against that manifest. Generated table contracts include
+`*Row`, `*CreateInput`, and `*UpdateInput` types. Rerun the pull after changing
+the database.
 
 `cargo ax routes` prints page/API routes and the current server
 `stream_pages` setting. JSON output is a report object with `stream_pages` and
@@ -162,7 +166,7 @@ foundation for live state patch streams, CMS events, and build/runtime signals.
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.2.1"
+axonyx-runtime = "0.3.0"
 axonyx-ui = "0.0.71"
 ```
 
