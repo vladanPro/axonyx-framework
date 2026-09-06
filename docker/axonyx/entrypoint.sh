@@ -9,8 +9,8 @@ Axonyx demo is running.
 
 Open: http://localhost:${PORT}
 Template: docs
-CLI: cargo-axonyx ${CARGO_AXONYX_VERSION:-0.2.16}
-Runtime: axonyx-runtime ${AXONYX_RUNTIME_VERSION:-0.2.1}
+CLI: cargo-axonyx ${CARGO_AXONYX_VERSION:-0.3.0}
+Runtime: axonyx-runtime ${AXONYX_RUNTIME_VERSION:-0.3.0}
 
 EOF
 

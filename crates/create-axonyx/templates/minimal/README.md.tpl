@@ -139,7 +139,10 @@ Suggested first edit:
 
 ## Env
 
-Copy `.env.example` to `.env` and set your runtime values.
+The generated, git-ignored `.env` uses the in-memory adapter so the first
+`cargo ax run dev` works without external infrastructure. Copy the PostgreSQL
+settings from `.env.example` into `.env` when you are ready to use a persistent
+database.
 
 Axonyx backend env convention:
 

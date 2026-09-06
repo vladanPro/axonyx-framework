@@ -40,7 +40,7 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.2.1"
+axonyx-runtime = "0.3.0"
 axonyx-ui = "0.0.71"
 ```
 
