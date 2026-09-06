@@ -1,0 +1,17 @@
+[package]
+name = "axonyx-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+description = "Persistent language server for Axonyx .asx and .ax source files"
+readme = "../../README.md"
+keywords = ["axonyx", "lsp", "language-server", "editor", "rust"]
+categories = ["development-tools", "compilers"]
+
+[dependencies]
+serde_json.workspace = true
+axonyx-core.workspace = true

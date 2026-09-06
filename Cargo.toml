@@ -2,6 +2,7 @@
 members = [
   "crates/create-axonyx",
   "crates/cargo-axonyx",
+  "crates/axonyx-lsp",
 ]
 exclude = [
   "vendor/axonyx-runtime",

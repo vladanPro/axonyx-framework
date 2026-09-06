@@ -31,10 +31,11 @@ state signals.
 
 ## Packages
 
-This repository contains the public CLI packages:
+This repository contains the public tooling packages:
 
 - `create-axonyx` - project scaffolding CLI, similar in spirit to `create-next-app`
 - `cargo-axonyx` - Cargo helper CLI exposed as `cargo ax ...`
+- `axonyx-lsp` - persistent language server for editor diagnostics and formatting
 
 Generated apps consume the runtime and UI packages through crates.io by default:
 
@@ -52,6 +53,10 @@ Install the public CLI tools:
 cargo install create-axonyx
 cargo install cargo-axonyx
 ```
+
+Framework contributors can install the unreleased language server locally with
+`cargo install --path crates/axonyx-lsp`. The VS Code adapter will own this
+setup after the LSP package is released.
 
 Create and run a site:
 
@@ -584,7 +589,7 @@ Today, `cargo ax add ui` and the `site` / `docs` templates use the published `ax
 
 Generated apps can target:
 
-- the published crates.io package, `axonyx-runtime = "0.1.14"`
+- the published crates.io package, `axonyx-runtime = "0.3.0"`
 - a local Cargo `path` dependency into a checked-out runtime workspace
 - the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
 
@@ -706,6 +711,7 @@ Drafts and lower-level architecture notes should live in `docs/`, not in the top
 
 ```text
 crates/
+  axonyx-lsp/
   cargo-axonyx/
   create-axonyx/
 vendor/
