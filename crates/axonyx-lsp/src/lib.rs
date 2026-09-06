@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use axonyx_core::ax_formatter_prelude::format_ax_source;
-use axonyx_core::ax_language_service_prelude::{diagnose_ax_source, diagnose_ax_workspace_imports};
+use axonyx_core::ax_language_service_prelude::{
+    ax_source_imports, classify_ax_source, diagnose_ax_source, diagnose_ax_workspace_imports,
+    resolve_ax_import_path, AxSourceKind,
+};
 use serde_json::{json, Value};
 
 const JSON_RPC_VERSION: &str = "2.0";
@@ -82,7 +85,8 @@ fn handle_message<W: Write>(
                                 "openClose": true,
                                 "change": 1
                             },
-                            "documentFormattingProvider": true
+                            "documentFormattingProvider": true,
+                            "definitionProvider": true
                         },
                         "serverInfo": {
                             "name": "axonyx-lsp",
@@ -174,6 +178,15 @@ fn handle_message<W: Write>(
                 write_response(writer, id, Value::Array(edits))?;
             }
         }
+        Some("textDocument/definition") => {
+            if let Some(id) = id {
+                write_response(
+                    writer,
+                    id,
+                    import_definition(state, &message).unwrap_or(Value::Null),
+                )?;
+            }
+        }
         Some(method) if id.is_some() => {
             write_error(
                 writer,
@@ -236,6 +249,77 @@ fn publish_diagnostics<W: Write>(
         "textDocument/publishDiagnostics",
         json!({ "uri": uri, "version": version, "diagnostics": diagnostics }),
     )
+}
+
+fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
+    let uri = message.pointer("/params/textDocument/uri")?.as_str()?;
+    let line = message.pointer("/params/position/line")?.as_u64()? as usize;
+    let character = message.pointer("/params/position/character")?.as_u64()? as usize;
+    let document = state.documents.get(uri)?;
+    let importing_path = file_uri_to_path(uri)?;
+    let root = state.workspace_root.as_ref()?;
+    let source_line = normalized_line(&document.text, line)?;
+    if character > source_line.encode_utf16().count() {
+        return None;
+    }
+
+    let import = ax_source_imports(&importing_path.to_string_lossy(), &document.text)
+        .into_iter()
+        .find(|import| import.line.saturating_sub(1) == line)?;
+    if !cursor_is_on_import_source(source_line, &import.source, character) {
+        return None;
+    }
+    let kind = classify_ax_source(&importing_path.to_string_lossy(), &document.text);
+    if kind == AxSourceKind::Page
+        && (import.source.starts_with("./") || import.source.starts_with("../"))
+    {
+        return None;
+    }
+
+    let target = resolve_ax_import_path(
+        root,
+        &importing_path,
+        kind,
+        &import.source,
+        &state.package_roots,
+    )?;
+    if !target.is_file() {
+        return None;
+    }
+
+    Some(json!({
+        "uri": path_to_file_uri(&target),
+        "range": {
+            "start": { "line": 0, "character": 0 },
+            "end": { "line": 0, "character": 0 }
+        }
+    }))
+}
+
+fn cursor_is_on_import_source(line: &str, import_source: &str, character: usize) -> bool {
+    let Some(source_start) = line.find(import_source) else {
+        return false;
+    };
+    let source_end = source_start + import_source.len();
+    let quoted_start = source_start
+        .checked_sub(1)
+        .filter(|index| matches!(line.as_bytes().get(*index), Some(b'\"' | b'\'')))
+        .unwrap_or(source_start);
+    let quoted_end = if matches!(line.as_bytes().get(source_end), Some(b'\"' | b'\'')) {
+        source_end + 1
+    } else {
+        source_end
+    };
+    let start = line[..quoted_start].encode_utf16().count();
+    let end = line[..quoted_end].encode_utf16().count();
+    (start..=end).contains(&character)
+}
+
+fn normalized_line(source: &str, target_line: usize) -> Option<&str> {
+    source
+        .split('\n')
+        .nth(target_line)
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
 }
 
 fn discover_axonyx_package_roots(root: &Path) -> BTreeMap<String, PathBuf> {
@@ -302,6 +386,29 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     };
 
     Some(PathBuf::from(decoded))
+}
+
+fn path_to_file_uri(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let prefix = if normalized.starts_with('/') {
+        "file://"
+    } else {
+        "file:///"
+    };
+    format!("{prefix}{}", percent_encode_path(&normalized))
+}
+
+fn percent_encode_path(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'~' | b'/' | b':')
+        {
+            encoded.push(char::from(*byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn percent_decode(value: &str) -> Option<String> {
@@ -515,6 +622,10 @@ mod tests {
             true
         );
         assert_eq!(
+            messages[0]["result"]["capabilities"]["definitionProvider"],
+            true
+        );
+        assert_eq!(
             messages[1],
             json!({ "jsonrpc": "2.0", "id": 2, "result": null })
         );
@@ -697,5 +808,99 @@ mod tests {
 
         assert_eq!(roots.get("@axonyx/ui"), Some(&package_root.join("src")));
         fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn returns_import_target_location_for_app_alias() {
+        let root = temp_workspace("definition");
+        let page = root.join("app/page.asx");
+        let component = root.join("app/components/Card.asx");
+        fs::write(&component, "component Card { render ASX { <article /> } }")
+            .expect("component should be written");
+        let root_uri = file_uri(&root);
+        let page_uri = file_uri(&page);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": "import { Card } from \"@/components/Card\"\n\npage Home() { return ASX { <Card /> } }"
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 0, "character": 28 }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        assert_eq!(messages[2]["id"], 2);
+        assert_eq!(messages[2]["result"]["uri"], path_to_file_uri(&component));
+        assert_eq!(
+            messages[2]["result"]["range"]["start"],
+            json!({ "line": 0, "character": 0 })
+        );
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn returns_null_definition_for_missing_import() {
+        let root = temp_workspace("missing-definition");
+        let page = root.join("app/page.asx");
+        let root_uri = file_uri(&root);
+        let page_uri = file_uri(&page);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": "import { Missing } from \"@/components/Missing\"\n\npage Home() { return ASX { <Missing /> } }"
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/definition",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 0, "character": 30 }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        assert_eq!(
+            messages[2],
+            json!({ "jsonrpc": "2.0", "id": 2, "result": null })
+        );
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn file_uri_round_trip_preserves_spaces_and_unicode() {
+        let path = std::env::temp_dir().join("Axonyx UI").join("Čelik.asx");
+        let uri = path_to_file_uri(&path);
+
+        assert_eq!(file_uri_to_path(&uri), Some(path));
+        assert!(uri.contains("%20"));
+    }
+
+    #[test]
+    fn import_definition_cursor_is_limited_to_the_source_literal() {
+        let line = "import { Card } from \"@/components/Card\"";
+
+        assert!(!cursor_is_on_import_source(line, "@/components/Card", 2));
+        assert!(cursor_is_on_import_source(line, "@/components/Card", 28));
     }
 }
