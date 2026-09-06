@@ -323,6 +323,7 @@ cargo ax g component ThemeSwitcher
 cargo ax g island CommandPalette
 cargo ax g page settings/profile
 cargo ax contracts
+cargo ax api --openapi
 cargo ax schema pull ./sample-posts.json --name Post
 cargo ax actions
 cargo ax content
@@ -340,6 +341,12 @@ projects can preview and apply the mechanical migration with:
 cargo ax migrate asx --dry-run
 cargo ax migrate asx
 ```
+
+`cargo ax api --openapi` writes `public/openapi.json` by default. Override the
+path with `--out contracts/api.json`, use `--out -` for stdout, or set
+`[api].openapi_output` in `Axonyx.toml`. The generated document title defaults
+to `<app name> API` and its version follows the Cargo package version; both can
+be overridden with `[api].title` and `[api].version`.
 
 `cargo ax schema pull` accepts sample JSON as a draft, but it can also read a typed
 envelope from an endpoint or file. When the source includes `schema`, Axonyx uses

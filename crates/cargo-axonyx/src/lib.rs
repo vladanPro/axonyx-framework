@@ -162,11 +162,11 @@ struct ApiArgs {
     #[arg(long)]
     schema: bool,
 
-    /// Render API contracts as an OpenAPI-compatible JSON document.
+    /// Render API contracts to public/openapi.json or the configured output.
     #[arg(long)]
     openapi: bool,
 
-    /// Write the rendered API output to a file instead of stdout.
+    /// Override the OpenAPI output path. Use `-` to write to stdout.
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -6342,8 +6342,13 @@ fn api_command(args: ApiArgs) -> Result<()> {
     }
 
     if args.openapi {
-        let output = serde_json::to_string_pretty(&api_report_openapi_value(&report))?;
-        write_or_print_api_output(args.out.as_deref(), &output)?;
+        let mut document = api_report_openapi_value(&report);
+        let (title, version) = openapi_document_info(&root);
+        document["info"]["title"] = serde_json::Value::String(title);
+        document["info"]["version"] = serde_json::Value::String(version);
+        let output = serde_json::to_string_pretty(&document)?;
+        let out = resolve_openapi_output(&root, args.out.as_deref())?;
+        write_or_print_api_output(out.as_deref(), &output)?;
         return Ok(());
     }
 
@@ -6367,6 +6372,62 @@ fn api_command(args: ApiArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+const DEFAULT_OPENAPI_OUTPUT: &str = "public/openapi.json";
+
+fn resolve_openapi_output(root: &Path, cli_out: Option<&Path>) -> Result<Option<PathBuf>> {
+    if let Some(out) = cli_out {
+        return resolve_openapi_output_path(root, out, "--out");
+    }
+
+    match axonyx_config_value(root, "api", "openapi_output") {
+        Some(toml::Value::String(out)) => {
+            resolve_openapi_output_path(root, Path::new(&out), "[api].openapi_output")
+        }
+        Some(_) => bail!("[api].openapi_output must be a path string or `-`"),
+        None => Ok(Some(root.join(DEFAULT_OPENAPI_OUTPUT))),
+    }
+}
+
+fn resolve_openapi_output_path(root: &Path, out: &Path, source: &str) -> Result<Option<PathBuf>> {
+    if out == Path::new("-") {
+        return Ok(None);
+    }
+    if out.as_os_str().is_empty() {
+        bail!("{source} cannot be empty");
+    }
+
+    Ok(Some(if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        root.join(out)
+    }))
+}
+
+fn openapi_document_info(root: &Path) -> (String, String) {
+    let app_name = axonyx_config_string(root, "app", "name")
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "Axonyx".to_string());
+    let title = axonyx_config_string(root, "api", "title")
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| format!("{app_name} API"));
+    let version = axonyx_config_string(root, "api", "version")
+        .filter(|version| !version.trim().is_empty())
+        .or_else(|| cargo_package_value(root, "version"))
+        .unwrap_or_else(|| "0.1.0".to_string());
+    (title, version)
+}
+
+fn cargo_package_value(root: &Path, key: &str) -> Option<String> {
+    let source = fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    source
+        .parse::<toml::Value>()
+        .ok()?
+        .get("package")?
+        .get(key)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn write_or_print_api_output(out: Option<&Path>, output: &str) -> Result<()> {
@@ -21006,6 +21067,68 @@ route GET "/api/posts" -> Post[]
 
         let written = fs::read_to_string(&out).expect("openapi output should exist");
         assert_eq!(written, "{\"openapi\":\"3.1.0\"}\n");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn openapi_output_defaults_to_public_file_and_supports_stdout() {
+        let root = make_temp_dir("openapi-output-default");
+
+        assert_eq!(
+            resolve_openapi_output(&root, None).expect("default output should resolve"),
+            Some(root.join("public/openapi.json"))
+        );
+        assert_eq!(
+            resolve_openapi_output(&root, Some(Path::new("-")))
+                .expect("stdout output should resolve"),
+            None
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn openapi_output_and_info_can_be_configured() {
+        let root = make_temp_dir("openapi-output-config");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"forge\"\n\n[api]\nopenapi_output = \"contracts/api.json\"\ntitle = \"Forge Public API\"\nversion = \"2026.1\"\n",
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"forge\"\nversion = \"9.9.9\"\n",
+        )
+        .expect("cargo manifest should write");
+
+        assert_eq!(
+            resolve_openapi_output(&root, None).expect("configured output should resolve"),
+            Some(root.join("contracts/api.json"))
+        );
+        assert_eq!(
+            openapi_document_info(&root),
+            ("Forge Public API".to_string(), "2026.1".to_string())
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn openapi_info_uses_app_name_and_cargo_version_by_default() {
+        let root = make_temp_dir("openapi-info-default");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"forge\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"forge\"\nversion = \"2.4.1\"\n",
+        )
+        .expect("cargo manifest should write");
+
+        assert_eq!(
+            openapi_document_info(&root),
+            ("forge API".to_string(), "2.4.1".to_string())
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
