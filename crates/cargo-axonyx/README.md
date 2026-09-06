@@ -166,7 +166,7 @@ foundation for live state patch streams, CMS events, and build/runtime signals.
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.2.1"
+axonyx-runtime = "0.3.0"
 axonyx-ui = "0.0.71"
 ```
 

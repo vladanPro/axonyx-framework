@@ -10,7 +10,7 @@ use clap::{Parser, ValueEnum};
 
 const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runtime";
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
-const DEFAULT_RUNTIME_VERSION: &str = "0.2.1";
+const DEFAULT_RUNTIME_VERSION: &str = "0.3.0";
 const DEFAULT_UI_PACKAGE: &str = "axonyx-ui";
 const DEFAULT_UI_VERSION: &str = "0.0.71";
 
@@ -756,7 +756,7 @@ mod tests {
         let cargo_toml =
             fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
         assert!(
-            cargo_toml.contains("axonyx-runtime = { version = \"0.2.1\", features = [\"axum\"] }")
+            cargo_toml.contains("axonyx-runtime = { version = \"0.3.0\", features = [\"axum\"] }")
         );
         assert!(cargo_toml.contains("axonyx-ui = \"0.0.71\""));
 
@@ -805,6 +805,13 @@ mod tests {
         assert!(loader.contains("query loadPosts() -> Post[]"));
         assert!(page.contains("data posts: List<Post> = loadPosts()"));
         assert!(!page.contains("type Post {"));
+        let env = fs::read_to_string(target_dir.join(".env"))
+            .expect("minimal development env should read");
+        assert!(env.contains("AX_SECRET_DB_DIALECT=memory"));
+        assert!(!env.contains("AX_SECRET_DB_URL="));
+        let gitignore = fs::read_to_string(target_dir.join(".gitignore"))
+            .expect("minimal gitignore should read");
+        assert!(gitignore.lines().any(|line| line == ".env"));
         let config =
             fs::read_to_string(target_dir.join("Axonyx.toml")).expect("minimal config should read");
         assert!(config.contains("[db]"));
