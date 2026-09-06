@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use axonyx_core::ax_formatter_prelude::format_ax_source;
-use axonyx_core::ax_language_service_prelude::diagnose_ax_source;
+use axonyx_core::ax_language_service_prelude::{diagnose_ax_source, diagnose_ax_workspace_imports};
 use serde_json::{json, Value};
 
 const JSON_RPC_VERSION: &str = "2.0";
@@ -10,6 +13,8 @@ const JSON_RPC_VERSION: &str = "2.0";
 #[derive(Default)]
 struct ServerState {
     documents: HashMap<String, OpenDocument>,
+    workspace_root: Option<PathBuf>,
+    package_roots: BTreeMap<String, PathBuf>,
     shutdown_requested: bool,
 }
 
@@ -51,6 +56,21 @@ fn handle_message<W: Write>(
 
     match method {
         Some("initialize") => {
+            state.workspace_root = message
+                .pointer("/params/rootUri")
+                .and_then(Value::as_str)
+                .and_then(file_uri_to_path)
+                .or_else(|| {
+                    message
+                        .pointer("/params/rootPath")
+                        .and_then(Value::as_str)
+                        .map(PathBuf::from)
+                });
+            state.package_roots = state
+                .workspace_root
+                .as_deref()
+                .map(discover_axonyx_package_roots)
+                .unwrap_or_default();
             if let Some(id) = id {
                 write_response(
                     writer,
@@ -97,7 +117,7 @@ fn handle_message<W: Write>(
                             version,
                         },
                     );
-                    publish_diagnostics(writer, uri, text, version)?;
+                    publish_diagnostics(state, writer, uri, text, version)?;
                 }
             }
         }
@@ -126,7 +146,7 @@ fn handle_message<W: Write>(
                             version,
                         },
                     );
-                    publish_diagnostics(writer, uri, text, version)?;
+                    publish_diagnostics(state, writer, uri, text, version)?;
                 }
             }
         }
@@ -169,12 +189,25 @@ fn handle_message<W: Write>(
 }
 
 fn publish_diagnostics<W: Write>(
+    state: &ServerState,
     writer: &mut W,
     uri: &str,
     source: &str,
     version: Option<i64>,
 ) -> io::Result<()> {
-    let diagnostics = diagnose_ax_source(uri, source)
+    let mut source_diagnostics = diagnose_ax_source(uri, source);
+    if source_diagnostics.is_empty() {
+        if let (Some(root), Some(path)) = (&state.workspace_root, file_uri_to_path(uri)) {
+            source_diagnostics.extend(diagnose_ax_workspace_imports(
+                root,
+                &path,
+                source,
+                &state.package_roots,
+            ));
+        }
+    }
+
+    let diagnostics = source_diagnostics
         .into_iter()
         .map(|diagnostic| {
             let line = diagnostic.line.saturating_sub(1);
@@ -203,6 +236,99 @@ fn publish_diagnostics<W: Write>(
         "textDocument/publishDiagnostics",
         json!({ "uri": uri, "version": version, "diagnostics": diagnostics }),
     )
+}
+
+fn discover_axonyx_package_roots(root: &Path) -> BTreeMap<String, PathBuf> {
+    let manifest_path = root.join("Cargo.toml");
+    if !manifest_path.is_file() {
+        return BTreeMap::new();
+    }
+
+    let Ok(output) = Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--offline")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .current_dir(root)
+        .output()
+    else {
+        return BTreeMap::new();
+    };
+    if !output.status.success() {
+        return BTreeMap::new();
+    }
+
+    let Ok(metadata) = serde_json::from_slice::<Value>(&output.stdout) else {
+        return BTreeMap::new();
+    };
+    metadata
+        .get("packages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(package_ax_root)
+        .collect()
+}
+
+fn package_ax_root(package: &Value) -> Option<(String, PathBuf)> {
+    let manifest = PathBuf::from(package.get("manifest_path")?.as_str()?);
+    let package_root = manifest.parent()?;
+    let package_config = fs::read_to_string(package_root.join("Axonyx.package.toml")).ok()?;
+    let config = package_config.parse::<toml::Value>().ok()?;
+    let namespace = config
+        .get("package")?
+        .get("namespace")?
+        .as_str()?
+        .to_string();
+    let relative = config
+        .get("exports")
+        .and_then(|exports| exports.get("ax_root"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("src/ax");
+    Some((namespace, package_root.join(relative)))
+}
+
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let encoded = uri.strip_prefix("file://")?;
+    let decoded = percent_decode(encoded)?;
+
+    #[cfg(windows)]
+    let decoded = if decoded.starts_with('/') && decoded.as_bytes().get(2).copied() == Some(b':') {
+        &decoded[1..]
+    } else {
+        decoded.as_str()
+    };
+
+    Some(PathBuf::from(decoded))
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn utf16_line_length(source: &str, target_line: usize) -> Option<usize> {
@@ -321,7 +447,9 @@ fn write_message<W: Write>(writer: &mut W, message: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::{BufReader, Cursor};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
@@ -344,6 +472,28 @@ mod tests {
             messages.push(message);
         }
         messages
+    }
+
+    fn temp_workspace(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be available")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("axonyx-lsp-{name}-{nonce}"));
+        fs::create_dir_all(root.join("app/components")).expect("workspace should be created");
+        root
+    }
+
+    fn file_uri(path: &Path) -> String {
+        let path = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace(' ', "%20");
+        if path.starts_with('/') {
+            format!("file://{path}")
+        } else {
+            format!("file:///{path}")
+        }
     }
 
     #[test]
@@ -446,5 +596,106 @@ mod tests {
         ]);
 
         assert_eq!(messages[0]["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn publishes_workspace_import_diagnostics_and_clears_them_after_change() {
+        let root = temp_workspace("imports");
+        let page = root.join("app/page.asx");
+        fs::write(
+            root.join("app/components/Card.asx"),
+            "component Card { render ASX { <article /> } }",
+        )
+        .expect("component should be written");
+        let root_uri = file_uri(&root);
+        let page_uri = file_uri(&page);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": "import { Missing } from \"@/components/Missing\"\n\npage Home() { return ASX { <Missing /> } }"
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": { "uri": page_uri, "version": 2 },
+                    "contentChanges": [{
+                        "text": "import { Card } from \"@/components/Card\"\n\npage Home() { return ASX { <Card /> } }"
+                    }]
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        assert_eq!(
+            messages[1]["params"]["diagnostics"][0]["code"],
+            "axonyx-import"
+        );
+        assert_eq!(
+            messages[1]["params"]["diagnostics"][0]["range"]["start"]["line"],
+            0
+        );
+        assert_eq!(messages[2]["params"]["diagnostics"], json!([]));
+
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn reads_axonyx_package_namespace_and_ax_root() {
+        let root = temp_workspace("package-root");
+        let package_root = root.join("ui-package");
+        fs::create_dir_all(package_root.join("components"))
+            .expect("package files should be created");
+        fs::write(
+            package_root.join("Axonyx.package.toml"),
+            "[package]\nnamespace = \"@axonyx/ui\"\n\n[exports]\nax_root = \"components\"\n",
+        )
+        .expect("package config should be written");
+        let manifest = package_root.join("Cargo.toml");
+        let package = json!({ "manifest_path": manifest.to_string_lossy() });
+
+        assert_eq!(
+            package_ax_root(&package),
+            Some(("@axonyx/ui".to_string(), package_root.join("components")))
+        );
+
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn discovers_path_dependency_package_roots_from_cargo_metadata() {
+        let root = temp_workspace("package-metadata");
+        let package_root = root.join("packages/axonyx-ui");
+        fs::create_dir_all(package_root.join("src/foundry"))
+            .expect("package files should be created");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"lsp-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\naxonyx-ui = { path = \"packages/axonyx-ui\" }\n",
+        )
+        .expect("app manifest should be written");
+        fs::create_dir_all(root.join("src")).expect("app source directory should be created");
+        fs::write(root.join("src/main.rs"), "fn main() {}").expect("app source should be written");
+        fs::write(
+            package_root.join("Cargo.toml"),
+            "[package]\nname = \"axonyx-ui\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("package manifest should be written");
+        fs::write(package_root.join("src/lib.rs"), "").expect("package source should be written");
+        fs::write(
+            package_root.join("Axonyx.package.toml"),
+            "[package]\nnamespace = \"@axonyx/ui\"\n\n[exports]\nax_root = \"src\"\n",
+        )
+        .expect("package config should be written");
+
+        let roots = discover_axonyx_package_roots(&root);
+
+        assert_eq!(roots.get("@axonyx/ui"), Some(&package_root.join("src")));
+        fs::remove_dir_all(root).expect("workspace should be removed");
     }
 }
