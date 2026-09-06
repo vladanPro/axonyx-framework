@@ -26,6 +26,7 @@ use axonyx_core::ax_backend_lowering_prelude::{
     AxStepPlan, AxTransactionOperationPlan, AxValuePlan,
 };
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
+use axonyx_core::ax_formatter_prelude::format_ax_source;
 use axonyx_core::ax_lowering_prelude::AxValue;
 use axonyx_core::ax_parser_auto_prelude::{
     convert_ax_v2_file, parse_ax_auto, AxAutoParseError, AxConvertV2Error,
@@ -103,7 +104,7 @@ static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String
     name = "ax",
     version = AXONYX_CLI_VERSION,
     about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.",
-    long_about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.\n\nCommon commands:\n  cargo ax run dev      Start the local development server\n  cargo ax build --clean Build a production-ready static/server bundle\n  cargo ax check        Run .ax diagnostics before build/deploy\n  cargo ax g component Alert Generate a reusable app component\n  cargo ax doctor       Inspect app, runtime, UI, server, and deploy readiness"
+    long_about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.\n\nCommon commands:\n  cargo ax run dev      Start the local development server\n  cargo ax build --clean Build a production-ready static/server bundle\n  cargo ax check        Run .ax diagnostics before build/deploy\n  cargo ax fmt --check  Verify compiler-owned source formatting\n  cargo ax g component Alert Generate a reusable app component\n  cargo ax doctor       Inspect app, runtime, UI, server, and deploy readiness"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -132,6 +133,8 @@ enum Commands {
     Dev(DevArgs),
     #[command(about = "Inspect app, runtime, UI, server, state, and deploy readiness.")]
     Doctor(DoctorArgs),
+    #[command(about = "Format .asx and .ax source files with the compiler-owned formatter.")]
+    Fmt(FmtArgs),
     #[command(about = "Print the Melt graph for framework internals.")]
     Graph(GraphArgs),
     #[command(
@@ -355,6 +358,25 @@ struct CheckArgs {
     /// Output format for diagnostics.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
+}
+
+#[derive(Debug, Parser)]
+struct FmtArgs {
+    /// Format one .asx or .ax file instead of project sources.
+    #[arg(long)]
+    file: Option<PathBuf>,
+
+    /// Read Axonyx source from stdin and write formatted source to stdout.
+    #[arg(long, conflicts_with_all = ["file", "stdout"])]
+    stdin: bool,
+
+    /// Print one formatted file to stdout without changing it.
+    #[arg(long, requires = "file", conflicts_with = "check")]
+    stdout: bool,
+
+    /// Check formatting without changing files.
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1642,6 +1664,7 @@ fn run() -> Result<()> {
         Commands::Db(args) => db_command(args),
         Commands::Dev(args) => run_dev_server(args),
         Commands::Doctor(args) => doctor_command(args),
+        Commands::Fmt(args) => fmt_command(args),
         Commands::Graph(args) => graph_command(args),
         Commands::Generate(args) => generate_command(args),
         Commands::Melt(args) => melt_command(args),
@@ -2157,6 +2180,130 @@ fn check_command(args: CheckArgs) -> Result<()> {
     } else {
         std::process::exit(1);
     }
+}
+
+fn fmt_command(args: FmtArgs) -> Result<()> {
+    if args.stdin {
+        let mut source = String::new();
+        std::io::stdin()
+            .read_to_string(&mut source)
+            .context("failed to read Axonyx source from stdin")?;
+        let formatted = format_ax_source(&source);
+        if args.check {
+            if source == formatted {
+                return Ok(());
+            }
+            bail!("Axonyx formatting check failed for stdin");
+        }
+        print!("{formatted}");
+        return Ok(());
+    }
+
+    if let Some(file) = args.file {
+        let path = resolve_fmt_file(&file)?;
+        let source = read_fmt_source(&path)?;
+        let formatted = format_ax_file_source(&source);
+        if args.stdout {
+            print!("{formatted}");
+            return Ok(());
+        }
+        return finish_fmt_files(vec![(path, source, formatted)], args.check);
+    }
+
+    let root = app_root()?;
+    let mut paths = Vec::new();
+    for relative in ["app", "routes", "features", "jobs"] {
+        collect_ax_files(&root.join(relative), &mut paths)?;
+    }
+    paths.sort();
+    paths.dedup();
+
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = read_fmt_source(&path)?;
+        let formatted = format_ax_file_source(&source);
+        files.push((path, source, formatted));
+    }
+    finish_fmt_files(files, args.check)
+}
+
+fn resolve_fmt_file(file: &Path) -> Result<PathBuf> {
+    let path = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve current directory")?
+            .join(file)
+    };
+    if !path.is_file() {
+        bail!("Axonyx source file '{}' does not exist", path.display());
+    }
+    if !is_axonyx_source_file(&path) {
+        bail!(
+            "Axonyx formatter expects a .asx or .ax file, got '{}'",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn read_fmt_source(path: &Path) -> Result<String> {
+    fs::read_to_string(path)
+        .with_context(|| format!("failed to read Axonyx source '{}'", path.display()))
+}
+
+fn format_ax_file_source(source: &str) -> String {
+    let formatted = format_ax_source(source);
+    if source.contains("\r\n") {
+        formatted.replace('\n', "\r\n")
+    } else {
+        formatted
+    }
+}
+
+fn display_fmt_path(path: &Path) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn finish_fmt_files(files: Vec<(PathBuf, String, String)>, check: bool) -> Result<()> {
+    let changed = files
+        .iter()
+        .filter(|(_, source, formatted)| source != formatted)
+        .map(|(path, _, _)| path.clone())
+        .collect::<Vec<_>>();
+
+    if check {
+        if changed.is_empty() {
+            println!("Axonyx formatting check passed.");
+            return Ok(());
+        }
+        let list = changed
+            .iter()
+            .map(|path| format!("  {}", display_fmt_path(path)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!("Axonyx formatting check failed:\n{list}");
+    }
+
+    for (path, source, formatted) in files {
+        if source == formatted {
+            continue;
+        }
+        fs::write(&path, formatted)
+            .with_context(|| format!("failed to write formatted source '{}'", path.display()))?;
+    }
+
+    if changed.is_empty() {
+        println!("Axonyx sources are already formatted.");
+    } else {
+        println!("Formatted {} Axonyx source file(s).", changed.len());
+    }
+    Ok(())
 }
 
 fn db_command(args: DbArgs) -> Result<()> {
@@ -25102,6 +25249,66 @@ return ASX { <Copy>{posts}</Copy> }
         };
         assert_eq!(args.format, CheckFormat::Json);
         assert_eq!(args.url.as_deref(), Some("sqlite://app.db"));
+    }
+
+    #[test]
+    fn parses_fmt_file_and_stdin_commands() {
+        let file = Cli::try_parse_from(["cargo-ax", "fmt", "--file", "app/page.asx", "--check"])
+            .expect("fmt file command should parse");
+        let Commands::Fmt(file) = file.command else {
+            panic!("expected fmt command");
+        };
+        assert_eq!(file.file, Some(PathBuf::from("app/page.asx")));
+        assert!(file.check);
+        assert!(!file.stdin);
+        assert!(!file.stdout);
+
+        let stdin = Cli::try_parse_from(["cargo-ax", "fmt", "--stdin"])
+            .expect("fmt stdin command should parse");
+        let Commands::Fmt(stdin) = stdin.command else {
+            panic!("expected fmt command");
+        };
+        assert!(stdin.stdin);
+        assert!(stdin.file.is_none());
+    }
+
+    #[test]
+    fn formats_file_and_detects_format_drift() {
+        let root = make_temp_dir("fmt-file");
+        let path = root.join("page.asx");
+        let source = "page Home() {\nreturn ASX { <Copy>Ready</Copy> }\n}\n";
+        fs::write(&path, source).expect("source should write");
+
+        let formatted = format_ax_source(source);
+        let error = finish_fmt_files(
+            vec![(path.clone(), source.to_string(), formatted.clone())],
+            true,
+        )
+        .expect_err("check mode should report drift");
+        assert!(error.to_string().contains("formatting check failed"));
+        assert_eq!(
+            fs::read_to_string(&path).expect("source should remain readable"),
+            source
+        );
+
+        finish_fmt_files(
+            vec![(path.clone(), source.to_string(), formatted.clone())],
+            false,
+        )
+        .expect("write mode should format source");
+        assert_eq!(
+            fs::read_to_string(&path).expect("formatted source should read"),
+            formatted
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn file_formatter_preserves_crlf_without_false_drift() {
+        let source = "page Home() {\r\n  return ASX { <Copy>Ready</Copy> }\r\n}\r\n";
+
+        assert_eq!(format_ax_file_source(source), source);
     }
 
     #[test]

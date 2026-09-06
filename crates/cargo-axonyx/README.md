@@ -15,6 +15,7 @@ cargo install cargo-axonyx
 ```bash
 cargo ax actions
 cargo ax check
+cargo ax fmt --check
 cargo ax content
 cargo ax db check
 cargo ax db pull
@@ -30,6 +31,12 @@ cargo ax run dev --transport std
 cargo ax stream
 cargo ax test
 ```
+
+`cargo ax fmt` formats `.asx` and `.ax` sources in `app`, `routes`, `features`,
+and `jobs`. Use `--file <path>` for one file, pair it with `--stdout` to preview,
+use `--stdin` for editor integration, or use `--check` to fail CI on formatting
+drift. The formatter implementation lives in `axonyx-core`; the CLI is only the
+file and process boundary.
 
 ## Typical Flow
 
