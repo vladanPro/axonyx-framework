@@ -32,7 +32,9 @@ use axonyx_core::ax_parser_auto_prelude::{
     convert_ax_v2_file, parse_ax_auto, AxAutoParseError, AxConvertV2Error,
 };
 use axonyx_core::ax_parser_prelude::AxParseError;
-use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
+use axonyx_core::ax_parser_v2_prelude::{
+    parse_ax_component_module_v2, parse_ax_v2, AxParseV2Error,
+};
 use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{
@@ -5743,64 +5745,16 @@ fn write_contract_report(path: &Path, report: &ContractReport) -> Result<()> {
 }
 
 fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_prelude::AxFileV2> {
-    let has_component_decl = source
+    let has_component = source
         .lines()
         .any(|line| line.trim_start().starts_with("component "));
     if let Ok(file) = parse_ax_v2(source) {
-        if has_component_decl && file.components.is_empty() {
-            // Component-only modules can look like loose page body to older syntax paths.
-            // Reparse them through a synthetic page so declarations stay declarations.
-        } else {
+        if !has_component || !file.components.is_empty() {
             return Some(file);
         }
     }
-    if !has_component_decl {
-        return None;
-    }
 
-    let mut prefix = Vec::new();
-    let mut body = Vec::new();
-    let mut in_prefix = true;
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if in_prefix
-            && (trimmed.is_empty() || trimmed.starts_with("use ") || trimmed.starts_with("import "))
-        {
-            prefix.push(line);
-        } else {
-            in_prefix = false;
-            body.push(line);
-        }
-    }
-
-    let mut synthetic = String::new();
-    if !prefix.is_empty() {
-        synthetic.push_str(&prefix.join("\n"));
-        synthetic.push_str("\n\n");
-    }
-    synthetic.push_str("page ComponentModule\n\n");
-    synthetic.push_str(&body.join("\n"));
-    synthetic.push_str("\n\n");
-    for component_name in component_names_from_source(source) {
-        synthetic.push_str(&format!("<{component_name} />\n"));
-    }
-
-    parse_ax_v2(&synthetic).ok()
-}
-
-fn component_names_from_source(source: &str) -> Vec<String> {
-    source
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim_start();
-            let rest = trimmed.strip_prefix("component ")?;
-            let name = rest
-                .split(|char: char| !(char.is_ascii_alphanumeric() || char == '_'))
-                .next()
-                .unwrap_or_default();
-            (!name.is_empty()).then(|| name.to_string())
-        })
-        .collect()
+    parse_ax_component_module_v2(source).ok().flatten()
 }
 
 fn collect_component_usage_report(
