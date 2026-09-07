@@ -7,7 +7,8 @@ use std::process::Command;
 use axonyx_core::ax_formatter_prelude::format_ax_source;
 use axonyx_core::ax_language_service_prelude::{
     ax_source_imports, ax_source_symbols, classify_ax_source, diagnose_ax_source,
-    diagnose_ax_workspace_imports, resolve_ax_import_path, AxLanguageSymbol, AxSourceKind,
+    diagnose_ax_workspace_imports, resolve_ax_import_path, AxLanguageSymbol, AxLanguageSymbolKind,
+    AxSourceKind,
 };
 use serde_json::{json, Value};
 
@@ -34,6 +35,12 @@ struct ResolvedLanguageSymbol {
     line: usize,
     start_character: usize,
     end_character: usize,
+}
+
+enum CompletionContext {
+    General { prefix: String },
+    AsxTag { prefix: String },
+    Namespace { namespace: String, prefix: String },
 }
 
 pub fn run_server<R, W>(mut reader: R, mut writer: W) -> io::Result<()>
@@ -97,7 +104,11 @@ fn handle_message<W: Write>(
                             },
                             "documentFormattingProvider": true,
                             "definitionProvider": true,
-                            "hoverProvider": true
+                            "hoverProvider": true,
+                            "completionProvider": {
+                                "resolveProvider": false,
+                                "triggerCharacters": ["<", "."]
+                            }
                         },
                         "serverInfo": {
                             "name": "axonyx-lsp",
@@ -204,6 +215,15 @@ fn handle_message<W: Write>(
                     writer,
                     id,
                     symbol_hover(state, &message).unwrap_or(Value::Null),
+                )?;
+            }
+        }
+        Some("textDocument/completion") => {
+            if let Some(id) = id {
+                write_response(
+                    writer,
+                    id,
+                    Value::Array(symbol_completions(state, &message)),
                 )?;
             }
         }
@@ -363,6 +383,316 @@ fn symbol_hover(state: &ServerState, message: &Value) -> Option<Value> {
             }
         }
     }))
+}
+
+fn symbol_completions(state: &ServerState, message: &Value) -> Vec<Value> {
+    let Some(uri) = message
+        .pointer("/params/textDocument/uri")
+        .and_then(Value::as_str)
+    else {
+        return Vec::new();
+    };
+    let Some(line) = message
+        .pointer("/params/position/line")
+        .and_then(Value::as_u64)
+        .map(|line| line as usize)
+    else {
+        return Vec::new();
+    };
+    let Some(character) = message
+        .pointer("/params/position/character")
+        .and_then(Value::as_u64)
+        .map(|character| character as usize)
+    else {
+        return Vec::new();
+    };
+    let Some(document) = state.documents.get(uri) else {
+        return Vec::new();
+    };
+    let Some(importing_path) = file_uri_to_path(uri) else {
+        return Vec::new();
+    };
+    let Some(source_line) = normalized_line(&document.text, line) else {
+        return Vec::new();
+    };
+    let Some((context, start_character)) = completion_context(source_line, character) else {
+        return Vec::new();
+    };
+    let kind = classify_ax_source(&importing_path.to_string_lossy(), &document.text);
+    let mut items = BTreeMap::<String, Value>::new();
+
+    match &context {
+        CompletionContext::Namespace { namespace, prefix } => {
+            for import in ax_source_imports(&importing_path.to_string_lossy(), &document.text) {
+                let is_namespace = import
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.imported == "*" && binding.local == *namespace);
+                if !is_namespace {
+                    continue;
+                }
+                for symbol in import_symbols(state, &importing_path, kind, &import.source) {
+                    if completion_matches(&symbol.name, prefix) {
+                        let item = completion_item(
+                            &symbol.name,
+                            &symbol,
+                            &format!("{} from {}", namespace, import.source),
+                            line,
+                            start_character,
+                            character,
+                            0,
+                        );
+                        items.entry(symbol.name.clone()).or_insert(item);
+                    }
+                }
+            }
+        }
+        CompletionContext::General { prefix } | CompletionContext::AsxTag { prefix } => {
+            let asx_only = matches!(context, CompletionContext::AsxTag { .. });
+            for symbol in ax_source_symbols(&importing_path.to_string_lossy(), &document.text) {
+                if (!asx_only || is_asx_symbol(symbol.kind))
+                    && completion_matches(&symbol.name, prefix)
+                {
+                    let item = completion_item(
+                        &symbol.name,
+                        &symbol,
+                        "local declaration",
+                        line,
+                        start_character,
+                        character,
+                        0,
+                    );
+                    items.entry(symbol.name.clone()).or_insert(item);
+                }
+            }
+
+            for import in ax_source_imports(&importing_path.to_string_lossy(), &document.text) {
+                let imported_symbols = import_symbols(state, &importing_path, kind, &import.source);
+                for binding in import.bindings {
+                    if binding.imported == "*" {
+                        if !asx_only && completion_matches(&binding.local, prefix) {
+                            let label = binding.local.clone();
+                            items.entry(label.clone()).or_insert_with(|| {
+                                module_completion_item(
+                                    &label,
+                                    &import.source,
+                                    line,
+                                    start_character,
+                                    character,
+                                )
+                            });
+                        }
+                        continue;
+                    }
+
+                    let symbol = imported_symbols
+                        .iter()
+                        .find(|symbol| symbol.name == binding.imported);
+                    if asx_only && !symbol.is_some_and(|symbol| is_asx_symbol(symbol.kind)) {
+                        continue;
+                    }
+                    if !completion_matches(&binding.local, prefix) {
+                        continue;
+                    }
+                    let label = binding.local.clone();
+                    let item = symbol.map_or_else(
+                        || {
+                            unresolved_import_completion_item(
+                                &label,
+                                &binding.imported,
+                                &import.source,
+                                line,
+                                start_character,
+                                character,
+                            )
+                        },
+                        |symbol| {
+                            completion_item(
+                                &label,
+                                symbol,
+                                &format!("imported from {}", import.source),
+                                line,
+                                start_character,
+                                character,
+                                1,
+                            )
+                        },
+                    );
+                    items.entry(label).or_insert(item);
+                }
+            }
+        }
+    }
+
+    items.into_values().collect()
+}
+
+fn import_symbols(
+    state: &ServerState,
+    importing_path: &Path,
+    kind: AxSourceKind,
+    source: &str,
+) -> Vec<AxLanguageSymbol> {
+    let Some(root) = state.workspace_root.as_ref() else {
+        return Vec::new();
+    };
+    let Some(target) =
+        resolve_definition_import(root, importing_path, kind, source, &state.package_roots)
+    else {
+        return Vec::new();
+    };
+    let target_uri = path_to_file_uri(&target);
+    let target_source = state
+        .documents
+        .get(&target_uri)
+        .map(|document| document.text.clone())
+        .or_else(|| fs::read_to_string(&target).ok());
+    target_source
+        .map(|source_text| ax_source_symbols(&target.to_string_lossy(), &source_text))
+        .unwrap_or_default()
+}
+
+fn completion_context(line: &str, character: usize) -> Option<(CompletionContext, usize)> {
+    let byte = utf16_character_to_byte(line, character)?;
+    let before = &line[..byte];
+    let prefix_start = before
+        .char_indices()
+        .rev()
+        .find(|(_, value)| !value.is_ascii_alphanumeric() && *value != '_')
+        .map(|(index, value)| index + value.len_utf8())
+        .unwrap_or(0);
+    let prefix = before[prefix_start..].to_string();
+    let start_character = line[..prefix_start].encode_utf16().count();
+    let leading = &before[..prefix_start];
+
+    if let Some(namespace_leading) = leading.strip_suffix('.') {
+        let namespace_start = namespace_leading
+            .char_indices()
+            .rev()
+            .find(|(_, value)| !value.is_ascii_alphanumeric() && *value != '_')
+            .map(|(index, value)| index + value.len_utf8())
+            .unwrap_or(0);
+        let namespace = &namespace_leading[namespace_start..];
+        if !namespace.is_empty() {
+            return Some((
+                CompletionContext::Namespace {
+                    namespace: namespace.to_string(),
+                    prefix,
+                },
+                start_character,
+            ));
+        }
+    }
+
+    if leading.ends_with('<') {
+        return Some((CompletionContext::AsxTag { prefix }, start_character));
+    }
+
+    Some((CompletionContext::General { prefix }, start_character))
+}
+
+fn completion_matches(name: &str, prefix: &str) -> bool {
+    prefix.is_empty()
+        || name
+            .to_ascii_lowercase()
+            .starts_with(&prefix.to_ascii_lowercase())
+}
+
+fn is_asx_symbol(kind: AxLanguageSymbolKind) -> bool {
+    matches!(
+        kind,
+        AxLanguageSymbolKind::Component | AxLanguageSymbolKind::Layout
+    )
+}
+
+fn completion_item(
+    label: &str,
+    symbol: &AxLanguageSymbol,
+    source: &str,
+    line: usize,
+    start_character: usize,
+    end_character: usize,
+    sort_priority: usize,
+) -> Value {
+    json!({
+        "label": label,
+        "kind": completion_item_kind(symbol.kind),
+        "detail": format!("{} ({})", symbol.signature, source),
+        "documentation": {
+            "kind": "markdown",
+            "value": format!("{}\n\n**Source:** `{}`", fenced_axonyx_code(&symbol.signature), escape_inline_code(source))
+        },
+        "sortText": format!("{sort_priority}-{}", label.to_ascii_lowercase()),
+        "filterText": label,
+        "textEdit": {
+            "range": {
+                "start": { "line": line, "character": start_character },
+                "end": { "line": line, "character": end_character }
+            },
+            "newText": label
+        }
+    })
+}
+
+fn unresolved_import_completion_item(
+    label: &str,
+    imported: &str,
+    source: &str,
+    line: usize,
+    start_character: usize,
+    end_character: usize,
+) -> Value {
+    json!({
+        "label": label,
+        "kind": 18,
+        "detail": format!("imported {} from {}", imported, source),
+        "sortText": format!("2-{}", label.to_ascii_lowercase()),
+        "filterText": label,
+        "textEdit": {
+            "range": {
+                "start": { "line": line, "character": start_character },
+                "end": { "line": line, "character": end_character }
+            },
+            "newText": label
+        }
+    })
+}
+
+fn module_completion_item(
+    label: &str,
+    source: &str,
+    line: usize,
+    start_character: usize,
+    end_character: usize,
+) -> Value {
+    json!({
+        "label": label,
+        "kind": 9,
+        "detail": format!("namespace from {}", source),
+        "sortText": format!("1-{}", label.to_ascii_lowercase()),
+        "filterText": label,
+        "textEdit": {
+            "range": {
+                "start": { "line": line, "character": start_character },
+                "end": { "line": line, "character": end_character }
+            },
+            "newText": label
+        }
+    })
+}
+
+fn completion_item_kind(kind: AxLanguageSymbolKind) -> u8 {
+    match kind {
+        AxLanguageSymbolKind::Page
+        | AxLanguageSymbolKind::Layout
+        | AxLanguageSymbolKind::Component => 7,
+        AxLanguageSymbolKind::Function
+        | AxLanguageSymbolKind::Query
+        | AxLanguageSymbolKind::Action
+        | AxLanguageSymbolKind::Job => 3,
+        AxLanguageSymbolKind::Type => 22,
+        AxLanguageSymbolKind::Scope => 9,
+    }
 }
 
 fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<ResolvedLanguageSymbol> {
@@ -868,6 +1198,13 @@ mod tests {
         );
         assert_eq!(messages[0]["result"]["capabilities"]["hoverProvider"], true);
         assert_eq!(
+            messages[0]["result"]["capabilities"]["completionProvider"],
+            json!({
+                "resolveProvider": false,
+                "triggerCharacters": ["<", "."]
+            })
+        );
+        assert_eq!(
             messages[1],
             json!({ "jsonrpc": "2.0", "id": 2, "result": null })
         );
@@ -954,6 +1291,180 @@ mod tests {
                 "end": { "line": 0, "character": 9 }
             })
         );
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn completes_local_backend_symbols_and_replaces_the_typed_prefix() {
+        let root = temp_workspace("local-completion");
+        let module = root.join("app/posts/domain.ax");
+        fs::create_dir_all(root.join("app/posts")).expect("module directory should be created");
+        let module_uri = file_uri(&module);
+        let source =
+            "fn helper() -> Bool {\n  return true\n}\n\nfn visible() -> Bool {\n  return hel\n}";
+        let character = source.lines().nth(5).expect("line should exist").len();
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": module_uri,
+                    "version": 1,
+                    "text": source
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": module_uri },
+                    "position": { "line": 5, "character": character }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let items = messages[2]["result"]
+            .as_array()
+            .expect("completion result should be an array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "helper");
+        assert_eq!(items[0]["kind"], 3);
+        assert!(items[0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("fn helper() -> Bool")));
+        assert_eq!(
+            items[0]["textEdit"],
+            json!({
+                "range": {
+                    "start": { "line": 5, "character": character - 3 },
+                    "end": { "line": 5, "character": character }
+                },
+                "newText": "helper"
+            })
+        );
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn completion_prefix_range_uses_utf16_offsets() {
+        let line = "  return \"forge 🛠\" + hel";
+        let character = line.encode_utf16().count();
+        let (context, start) = completion_context(line, character).expect("context should parse");
+
+        assert!(matches!(
+            context,
+            CompletionContext::General { prefix } if prefix == "hel"
+        ));
+        assert_eq!(start, character - 3);
+    }
+
+    #[test]
+    fn completes_an_imported_alias_inside_an_asx_tag() {
+        let root = temp_workspace("asx-completion");
+        let page = root.join("app/page.asx");
+        let component = root.join("app/components/Card.asx");
+        fs::write(
+            &component,
+            "component Card(title: String = \"\") { render ASX { <article /> } }",
+        )
+        .expect("component should be written");
+        let root_uri = file_uri(&root);
+        let page_uri = file_uri(&page);
+        let source =
+            "import { Card as Panel } from \"@/components/Card\"\n\npage Home() { return ASX { <Pan";
+        let character = source.lines().nth(2).expect("line should exist").len();
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": source
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 2, "character": character }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let items = messages[2]["result"]
+            .as_array()
+            .expect("completion result should be an array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "Panel");
+        assert_eq!(items[0]["kind"], 7);
+        assert!(items[0]["detail"].as_str().is_some_and(|detail| detail
+            .contains("component Card(title: String = \"\")")
+            && detail.contains("@/components/Card")));
+        assert_eq!(items[0]["textEdit"]["newText"], "Panel");
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn completes_members_from_a_backend_namespace_import() {
+        let root = temp_workspace("namespace-completion");
+        let loader = root.join("app/posts/loader.ax");
+        let domain = root.join("app/posts/domain.ax");
+        fs::create_dir_all(root.join("app/posts")).expect("route should be created");
+        fs::write(
+            &domain,
+            "export type Post {\n  title: String\n}\n\nexport fn visible() -> Bool {\n  return true\n}",
+        )
+        .expect("domain should be written");
+        let root_uri = file_uri(&root);
+        let loader_uri = file_uri(&loader);
+        let source = "import * as Domain from \"./domain.ax\"\n\nquery loadPosts() -> Bool {\n  return Domain.vi()\n}";
+        let character = source
+            .lines()
+            .nth(3)
+            .expect("line should exist")
+            .find("()")
+            .expect("call should exist");
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": loader_uri,
+                    "version": 1,
+                    "text": source
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": loader_uri },
+                    "position": { "line": 3, "character": character }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let items = messages[2]["result"]
+            .as_array()
+            .expect("completion result should be an array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "visible");
+        assert_eq!(items[0]["kind"], 3);
+        assert!(items[0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Domain from ./domain.ax")));
+        assert_eq!(items[0]["textEdit"]["newText"], "visible");
         fs::remove_dir_all(root).expect("workspace should be removed");
     }
 
