@@ -29748,13 +29748,10 @@ page Home
     fn renders_real_foundry_components_from_framework_vendor_package() {
         let workspace = make_temp_dir("real-foundry-component-smoke");
         let root = workspace.join("axonyx-site");
-        let ui_root = std::env::current_exe()
-            .expect("test executable path should resolve")
+        let ui_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("framework root should resolve from test executable")
+            .expect("framework root should resolve from crate manifest")
             .join("vendor/axonyx-ui");
         let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
 
