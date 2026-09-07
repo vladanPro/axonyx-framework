@@ -26,6 +26,16 @@ struct OpenDocument {
     version: Option<i64>,
 }
 
+struct ResolvedLanguageSymbol {
+    declaration_uri: String,
+    symbol: Option<AxLanguageSymbol>,
+    reference_name: String,
+    import_source: Option<String>,
+    line: usize,
+    start_character: usize,
+    end_character: usize,
+}
+
 pub fn run_server<R, W>(mut reader: R, mut writer: W) -> io::Result<()>
 where
     R: BufRead,
@@ -86,7 +96,8 @@ fn handle_message<W: Write>(
                                 "change": 1
                             },
                             "documentFormattingProvider": true,
-                            "definitionProvider": true
+                            "definitionProvider": true,
+                            "hoverProvider": true
                         },
                         "serverInfo": {
                             "name": "axonyx-lsp",
@@ -187,6 +198,15 @@ fn handle_message<W: Write>(
                 )?;
             }
         }
+        Some("textDocument/hover") => {
+            if let Some(id) = id {
+                write_response(
+                    writer,
+                    id,
+                    symbol_hover(state, &message).unwrap_or(Value::Null),
+                )?;
+            }
+        }
         Some(method) if id.is_some() => {
             write_error(
                 writer,
@@ -257,7 +277,6 @@ fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
     let character = message.pointer("/params/position/character")?.as_u64()? as usize;
     let document = state.documents.get(uri)?;
     let importing_path = file_uri_to_path(uri)?;
-    let root = state.workspace_root.as_ref()?;
     let source_line = normalized_line(&document.text, line)?;
     if character > source_line.encode_utf16().count() {
         return None;
@@ -271,6 +290,7 @@ fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
         .find(|import| import.line.saturating_sub(1) == line)
     {
         if cursor_is_on_import_source(source_line, &import.source, character) {
+            let root = state.workspace_root.as_ref()?;
             let target = resolve_definition_import(
                 root,
                 &importing_path,
@@ -282,20 +302,106 @@ fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
         }
     }
 
-    let symbol_name = identifier_at_utf16_position(source_line, character)?;
-    if let Some(symbol) = ax_source_symbols(&importing_path.to_string_lossy(), &document.text)
-        .into_iter()
-        .find(|symbol| symbol.name == symbol_name)
-    {
-        return Some(symbol_location(uri, &symbol));
+    let resolution = resolve_language_symbol(state, message)?;
+    Some(
+        resolution
+            .symbol
+            .as_ref()
+            .map(|symbol| symbol_location(&resolution.declaration_uri, symbol))
+            .unwrap_or_else(|| file_start_uri_location(&resolution.declaration_uri)),
+    )
+}
+
+fn symbol_hover(state: &ServerState, message: &Value) -> Option<Value> {
+    let resolution = resolve_language_symbol(state, message)?;
+    let symbol = resolution.symbol.as_ref()?;
+    let mut metadata = vec![format!("**Kind:** `{}`", symbol.kind.label())];
+
+    if resolution.reference_name != symbol.name {
+        if let Some(namespace) = resolution
+            .reference_name
+            .strip_suffix(&format!(".{}", symbol.name))
+        {
+            metadata.push(format!(
+                "**Namespace:** `{}`",
+                escape_inline_code(namespace)
+            ));
+        } else {
+            metadata.push(format!(
+                "**Alias:** `{}` -> `{}`",
+                escape_inline_code(&resolution.reference_name),
+                escape_inline_code(&symbol.name)
+            ));
+        }
+    }
+    if let Some(import_source) = resolution.import_source.as_deref() {
+        metadata.push(format!(
+            "**Import:** `{}`",
+            escape_inline_code(import_source)
+        ));
+    } else {
+        metadata.push("**Source:** local declaration".to_string());
     }
 
-    for import in imports {
+    Some(json!({
+        "contents": {
+            "kind": "markdown",
+            "value": format!(
+                "{}\n\n{}",
+                fenced_axonyx_code(&symbol.signature),
+                metadata.join("\n\n")
+            )
+        },
+        "range": {
+            "start": {
+                "line": resolution.line,
+                "character": resolution.start_character
+            },
+            "end": {
+                "line": resolution.line,
+                "character": resolution.end_character
+            }
+        }
+    }))
+}
+
+fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<ResolvedLanguageSymbol> {
+    let uri = message.pointer("/params/textDocument/uri")?.as_str()?;
+    let line = message.pointer("/params/position/line")?.as_u64()? as usize;
+    let character = message.pointer("/params/position/character")?.as_u64()? as usize;
+    let document = state.documents.get(uri)?;
+    let importing_path = file_uri_to_path(uri)?;
+    let source_line = normalized_line(&document.text, line)?;
+    let (reference_name, start_character, end_character) =
+        identifier_span_at_utf16_position(source_line, character)?;
+    let kind = classify_ax_source(&importing_path.to_string_lossy(), &document.text);
+
+    if let Some(symbol) = ax_source_symbols(&importing_path.to_string_lossy(), &document.text)
+        .into_iter()
+        .find(|symbol| symbol.name == reference_name)
+    {
+        return Some(ResolvedLanguageSymbol {
+            declaration_uri: uri.to_string(),
+            symbol: Some(symbol),
+            reference_name,
+            import_source: None,
+            line,
+            start_character,
+            end_character,
+        });
+    }
+
+    let root = state.workspace_root.as_ref()?;
+    for import in ax_source_imports(&importing_path.to_string_lossy(), &document.text) {
         let imported_name = import.bindings.iter().find_map(|binding| {
-            if binding.local == symbol_name {
+            if binding.local == reference_name
+                || (import.line.saturating_sub(1) == line
+                    && binding.imported != "*"
+                    && binding.imported == reference_name)
+            {
                 return (binding.imported != "*").then(|| binding.imported.clone());
             }
-            let member = symbol_name.strip_prefix(&format!("{}.", binding.local))?;
+            let member = reference_name.strip_prefix(&format!("{}.", binding.local))?;
             (binding.imported == "*" && !member.is_empty()).then(|| member.to_string())
         });
         let Some(imported_name) = imported_name else {
@@ -317,15 +423,18 @@ fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
             .get(&target_uri)
             .map(|document| document.text.clone())
             .or_else(|| fs::read_to_string(&target).ok())?;
-        let target_symbol = ax_source_symbols(&target.to_string_lossy(), &target_source)
+        let symbol = ax_source_symbols(&target.to_string_lossy(), &target_source)
             .into_iter()
             .find(|symbol| symbol.name == imported_name);
-        return Some(
-            target_symbol
-                .as_ref()
-                .map(|symbol| symbol_location(&target_uri, symbol))
-                .unwrap_or_else(|| file_start_location(&target)),
-        );
+        return Some(ResolvedLanguageSymbol {
+            declaration_uri: target_uri,
+            symbol,
+            reference_name,
+            import_source: Some(import.source),
+            line,
+            start_character,
+            end_character,
+        });
     }
 
     None
@@ -345,8 +454,12 @@ fn resolve_definition_import(
 }
 
 fn file_start_location(path: &Path) -> Value {
+    file_start_uri_location(&path_to_file_uri(path))
+}
+
+fn file_start_uri_location(uri: &str) -> Value {
     json!({
-        "uri": path_to_file_uri(path),
+        "uri": uri,
         "range": {
             "start": { "line": 0, "character": 0 },
             "end": { "line": 0, "character": 0 }
@@ -369,7 +482,10 @@ fn symbol_location(uri: &str, symbol: &AxLanguageSymbol) -> Value {
     })
 }
 
-fn identifier_at_utf16_position(line: &str, character: usize) -> Option<String> {
+fn identifier_span_at_utf16_position(
+    line: &str,
+    character: usize,
+) -> Option<(String, usize, usize)> {
     let byte = utf16_character_to_byte(line, character)?;
     let bytes = line.as_bytes();
     let mut start = byte.min(bytes.len());
@@ -380,7 +496,13 @@ fn identifier_at_utf16_position(line: &str, character: usize) -> Option<String> 
     while end < bytes.len() && is_symbol_byte(bytes[end]) {
         end += 1;
     }
-    (start < end).then(|| line[start..end].to_string())
+    (start < end).then(|| {
+        (
+            line[start..end].to_string(),
+            line[..start].encode_utf16().count(),
+            line[..end].encode_utf16().count(),
+        )
+    })
 }
 
 fn utf16_character_to_byte(line: &str, character: usize) -> Option<usize> {
@@ -399,6 +521,20 @@ fn utf16_character_to_byte(line: &str, character: usize) -> Option<usize> {
 
 fn is_symbol_byte(value: u8) -> bool {
     value.is_ascii_alphanumeric() || matches!(value, b'_' | b'.')
+}
+
+fn escape_inline_code(value: &str) -> String {
+    value.replace('`', "\\`")
+}
+
+fn fenced_axonyx_code(value: &str) -> String {
+    let longest_run = value
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or_default();
+    let fence = "`".repeat(longest_run.saturating_add(1).max(3));
+    format!("{fence}ax\n{value}\n{fence}")
 }
 
 fn cursor_is_on_import_source(line: &str, import_source: &str, character: usize) -> bool {
@@ -730,6 +866,7 @@ mod tests {
             messages[0]["result"]["capabilities"]["definitionProvider"],
             true
         );
+        assert_eq!(messages[0]["result"]["capabilities"]["hoverProvider"], true);
         assert_eq!(
             messages[1],
             json!({ "jsonrpc": "2.0", "id": 2, "result": null })
@@ -774,6 +911,50 @@ mod tests {
         assert_eq!(messages[1]["params"]["version"], 2);
         assert_eq!(messages[1]["params"]["diagnostics"], json!([]));
         assert_eq!(messages[2]["params"]["diagnostics"], json!([]));
+    }
+
+    #[test]
+    fn returns_hover_for_local_page_symbol() {
+        let root = temp_workspace("local-hover");
+        let page = root.join("app/page.asx");
+        let page_uri = file_uri(&page);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": "page Home() { return ASX { <main /> } }"
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 0, "character": 6 }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let hover = &messages[2]["result"];
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("```ax\npage Home()\n```")
+                && value.contains("**Kind:** `page`")
+                && value.contains("**Source:** local declaration")));
+        assert_eq!(
+            hover["range"],
+            json!({
+                "start": { "line": 0, "character": 5 },
+                "end": { "line": 0, "character": 9 }
+            })
+        );
+        fs::remove_dir_all(root).expect("workspace should be removed");
     }
 
     #[test]
@@ -1034,6 +1215,15 @@ mod tests {
                     "position": { "line": 2, "character": 29 }
                 }
             }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 2, "character": 29 }
+                }
+            }),
             json!({ "jsonrpc": "2.0", "method": "exit" }),
         ]);
 
@@ -1047,6 +1237,21 @@ mod tests {
                 })
             );
         }
+        let hover = &messages[4]["result"];
+        assert_eq!(hover["contents"]["kind"], "markdown");
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("```ax\ncomponent Card\n```")
+                && value.contains("**Kind:** `component`")
+                && value.contains("**Alias:** `Panel` -> `Card`")
+                && value.contains("**Import:** `@/components/Card`")));
+        assert_eq!(
+            hover["range"],
+            json!({
+                "start": { "line": 2, "character": 28 },
+                "end": { "line": 2, "character": 33 }
+            })
+        );
         fs::remove_dir_all(root).expect("workspace should be removed");
     }
 
@@ -1080,6 +1285,15 @@ mod tests {
                     "position": { "line": 3, "character": 17 }
                 }
             }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "textDocument/hover",
+                "params": {
+                    "textDocument": { "uri": route_uri },
+                    "position": { "line": 3, "character": 17 }
+                }
+            }),
             json!({ "jsonrpc": "2.0", "method": "exit" }),
         ]);
 
@@ -1089,6 +1303,20 @@ mod tests {
             json!({
                 "start": { "line": 0, "character": 10 },
                 "end": { "line": 0, "character": 17 }
+            })
+        );
+        let hover = &messages[3]["result"];
+        assert!(hover["contents"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("```ax\nfn visible() -> Bool\n```")
+                && value.contains("**Kind:** `function`")
+                && value.contains("**Namespace:** `Domain`")
+                && value.contains("**Import:** `./domain.ax`")));
+        assert_eq!(
+            hover["range"],
+            json!({
+                "start": { "line": 3, "character": 9 },
+                "end": { "line": 3, "character": 23 }
             })
         );
         fs::remove_dir_all(root).expect("workspace should be removed");
