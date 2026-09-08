@@ -6,9 +6,10 @@ use std::process::Command;
 
 use axonyx_core::ax_formatter_prelude::format_ax_source;
 use axonyx_core::ax_language_service_prelude::{
-    ax_source_component_contracts, ax_source_imports, ax_source_symbols, classify_ax_source,
-    diagnose_ax_source, diagnose_ax_workspace_imports, resolve_ax_import_path,
-    AxLanguageComponentContract, AxLanguageComponentProp, AxLanguageSymbol, AxLanguageSymbolKind,
+    ax_source_component_contracts, ax_source_identifier_occurrences, ax_source_imports,
+    ax_source_symbols, classify_ax_source, diagnose_ax_source, diagnose_ax_workspace_imports,
+    resolve_ax_import_path, AxLanguageComponentContract, AxLanguageComponentProp,
+    AxLanguageIdentifierOccurrence, AxLanguageImport, AxLanguageSymbol, AxLanguageSymbolKind,
     AxSourceKind,
 };
 use serde_json::{json, Value};
@@ -29,10 +30,26 @@ struct OpenDocument {
 }
 
 struct ResolvedLanguageSymbol {
+    reference_uri: String,
     declaration_uri: String,
     symbol: Option<AxLanguageSymbol>,
     reference_name: String,
     import_source: Option<String>,
+    line: usize,
+    start_character: usize,
+    end_character: usize,
+}
+
+#[derive(Clone)]
+struct WorkspaceDocument {
+    uri: String,
+    path: PathBuf,
+    text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LanguageLocation {
+    uri: String,
     line: usize,
     start_character: usize,
     end_character: usize,
@@ -123,6 +140,10 @@ fn handle_message<W: Write>(
                             },
                             "documentFormattingProvider": true,
                             "definitionProvider": true,
+                            "referencesProvider": true,
+                            "renameProvider": {
+                                "prepareProvider": true
+                            },
                             "hoverProvider": true,
                             "completionProvider": {
                                 "resolveProvider": false,
@@ -226,6 +247,32 @@ fn handle_message<W: Write>(
                     id,
                     import_definition(state, &message).unwrap_or(Value::Null),
                 )?;
+            }
+        }
+        Some("textDocument/references") => {
+            if let Some(id) = id {
+                write_response(
+                    writer,
+                    id,
+                    Value::Array(workspace_references(state, &message)),
+                )?;
+            }
+        }
+        Some("textDocument/prepareRename") => {
+            if let Some(id) = id {
+                write_response(
+                    writer,
+                    id,
+                    prepare_symbol_rename(state, &message).unwrap_or(Value::Null),
+                )?;
+            }
+        }
+        Some("textDocument/rename") => {
+            if let Some(id) = id {
+                match rename_symbol(state, &message) {
+                    Ok(edit) => write_response(writer, id, edit)?,
+                    Err(message) => write_error(writer, id, -32602, message)?,
+                }
             }
         }
         Some("textDocument/hover") => {
@@ -1172,6 +1219,7 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
         .find(|symbol| symbol.name == reference_name)
     {
         return Some(ResolvedLanguageSymbol {
+            reference_uri: uri.to_string(),
             declaration_uri: uri.to_string(),
             symbol: Some(symbol),
             reference_name,
@@ -1218,6 +1266,7 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
             .into_iter()
             .find(|symbol| symbol.name == imported_name);
         return Some(ResolvedLanguageSymbol {
+            reference_uri: uri.to_string(),
             declaration_uri: target_uri,
             symbol,
             reference_name,
@@ -1229,6 +1278,505 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
     }
 
     None
+}
+
+fn workspace_references(state: &ServerState, message: &Value) -> Vec<Value> {
+    let include_declaration = message
+        .pointer("/params/context/includeDeclaration")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let Some(resolution) = resolve_language_symbol(state, message) else {
+        return Vec::new();
+    };
+    if resolution.symbol.is_none() {
+        return Vec::new();
+    }
+
+    let locations = if local_alias_name(&resolution).is_some() {
+        alias_locations(state, &resolution, include_declaration)
+    } else {
+        canonical_symbol_locations(state, &resolution, include_declaration)
+    };
+    locations.into_iter().map(language_location_value).collect()
+}
+
+fn prepare_symbol_rename(state: &ServerState, message: &Value) -> Option<Value> {
+    let resolution = resolve_language_symbol(state, message)?;
+    let symbol = resolution.symbol.as_ref()?;
+    if local_alias_name(&resolution).is_none() {
+        let declaration_path = file_uri_to_path(&resolution.declaration_uri)?;
+        if !path_is_inside_workspace(state, &declaration_path)
+            || path_is_package_source(state, &declaration_path)
+        {
+            return None;
+        }
+    }
+
+    let (start_character, placeholder) = if let Some(alias) = local_alias_name(&resolution) {
+        (resolution.start_character, alias)
+    } else if resolution
+        .reference_name
+        .ends_with(&format!(".{}", symbol.name))
+    {
+        (
+            resolution
+                .end_character
+                .saturating_sub(symbol.name.encode_utf16().count()),
+            symbol.name.as_str(),
+        )
+    } else {
+        (resolution.start_character, symbol.name.as_str())
+    };
+
+    Some(json!({
+        "range": {
+            "start": { "line": resolution.line, "character": start_character },
+            "end": { "line": resolution.line, "character": resolution.end_character }
+        },
+        "placeholder": placeholder
+    }))
+}
+
+fn rename_symbol(state: &ServerState, message: &Value) -> Result<Value, String> {
+    let new_name = message
+        .pointer("/params/newName")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "rename requires a new identifier".to_string())?;
+    if !valid_rename_identifier(new_name) {
+        return Err(format!("`{new_name}` is not a valid Axonyx identifier"));
+    }
+
+    let resolution = resolve_language_symbol(state, message)
+        .ok_or_else(|| "no renameable Axonyx symbol at this position".to_string())?;
+    let symbol = resolution
+        .symbol
+        .as_ref()
+        .ok_or_else(|| "the selected import has no renameable declaration".to_string())?;
+
+    let locations = if let Some(alias) = local_alias_name(&resolution) {
+        ensure_alias_rename_has_no_collision(state, &resolution, alias, new_name)?;
+        alias_locations(state, &resolution, true)
+    } else {
+        let declaration_path = file_uri_to_path(&resolution.declaration_uri)
+            .ok_or_else(|| "the declaration is not a local file".to_string())?;
+        if !path_is_inside_workspace(state, &declaration_path)
+            || path_is_package_source(state, &declaration_path)
+        {
+            return Err(
+                "Cargo package symbols are read-only; create a local alias or override instead"
+                    .to_string(),
+            );
+        }
+        ensure_canonical_rename_has_no_collision(state, &resolution, new_name)?;
+        canonical_rename_locations(state, &resolution)
+    };
+
+    if locations.is_empty() {
+        return Err(format!(
+            "no editable references found for `{}`",
+            symbol.name
+        ));
+    }
+    Ok(rename_workspace_edit(locations, new_name))
+}
+
+fn local_alias_name(resolution: &ResolvedLanguageSymbol) -> Option<&str> {
+    let symbol = resolution.symbol.as_ref()?;
+    (resolution.reference_name != symbol.name
+        && !resolution
+            .reference_name
+            .ends_with(&format!(".{}", symbol.name)))
+    .then_some(resolution.reference_name.as_str())
+}
+
+fn alias_locations(
+    state: &ServerState,
+    resolution: &ResolvedLanguageSymbol,
+    include_declaration: bool,
+) -> BTreeSet<LanguageLocation> {
+    let Some(alias) = local_alias_name(resolution) else {
+        return BTreeSet::new();
+    };
+    let Some(document) = state.documents.get(&resolution.reference_uri) else {
+        return BTreeSet::new();
+    };
+    let uri = resolution.reference_uri.clone();
+    let path = file_uri_to_path(&uri).unwrap_or_default();
+    let kind = resolution
+        .symbol
+        .as_ref()
+        .map(|symbol| symbol.kind)
+        .unwrap_or(AxLanguageSymbolKind::Function);
+    let imports = ax_source_imports(&path.to_string_lossy(), &document.text);
+    let declaration_lines = imports
+        .iter()
+        .filter(|import| {
+            import
+                .bindings
+                .iter()
+                .any(|binding| binding.local == alias && binding.imported != "*")
+        })
+        .map(|import| import.line)
+        .collect::<BTreeSet<_>>();
+
+    ax_source_identifier_occurrences(&document.text)
+        .into_iter()
+        .filter(|occurrence| occurrence.name == alias)
+        .filter(|occurrence| {
+            let declaration = declaration_lines.contains(&occurrence.line);
+            (include_declaration || !declaration)
+                && (declaration
+                    || occurrence_is_symbol_usage(&document.text, occurrence, kind)
+                    || occurrence.line.saturating_sub(1) == resolution.line)
+        })
+        .map(|occurrence| occurrence_location(&uri, &occurrence))
+        .collect()
+}
+
+fn canonical_symbol_locations(
+    state: &ServerState,
+    resolution: &ResolvedLanguageSymbol,
+    include_declaration: bool,
+) -> BTreeSet<LanguageLocation> {
+    canonical_locations(state, resolution, include_declaration, true)
+}
+
+fn canonical_rename_locations(
+    state: &ServerState,
+    resolution: &ResolvedLanguageSymbol,
+) -> BTreeSet<LanguageLocation> {
+    canonical_locations(state, resolution, true, false)
+}
+
+fn canonical_locations(
+    state: &ServerState,
+    resolution: &ResolvedLanguageSymbol,
+    include_declaration: bool,
+    include_alias_usages: bool,
+) -> BTreeSet<LanguageLocation> {
+    let Some(symbol) = resolution.symbol.as_ref() else {
+        return BTreeSet::new();
+    };
+    let Some(target_path) = file_uri_to_path(&resolution.declaration_uri) else {
+        return BTreeSet::new();
+    };
+    let mut locations = BTreeSet::new();
+
+    if include_declaration {
+        locations.insert(LanguageLocation {
+            uri: resolution.declaration_uri.clone(),
+            line: symbol.line.saturating_sub(1),
+            start_character: symbol.column.saturating_sub(1),
+            end_character: symbol.column.saturating_sub(1) + symbol.name.encode_utf16().count(),
+        });
+    }
+
+    for document in workspace_documents(state) {
+        if same_file_path(&document.path, &target_path) {
+            for occurrence in ax_source_identifier_occurrences(&document.text)
+                .into_iter()
+                .filter(|occurrence| occurrence.name == symbol.name)
+                .filter(|occurrence| {
+                    occurrence_is_symbol_usage(&document.text, occurrence, symbol.kind)
+                })
+            {
+                let location = occurrence_location(&document.uri, &occurrence);
+                let is_declaration = location.line == symbol.line.saturating_sub(1)
+                    && location.start_character == symbol.column.saturating_sub(1);
+                if include_declaration || !is_declaration {
+                    locations.insert(location);
+                }
+            }
+            continue;
+        }
+
+        let source_kind = classify_ax_source(&document.path.to_string_lossy(), &document.text);
+        for import in ax_source_imports(&document.path.to_string_lossy(), &document.text) {
+            let Some(import_target) = state.workspace_root.as_deref().and_then(|root| {
+                resolve_definition_import(
+                    root,
+                    &document.path,
+                    source_kind,
+                    &import.source,
+                    &state.package_roots,
+                )
+            }) else {
+                continue;
+            };
+            if !same_file_path(&import_target, &target_path) {
+                continue;
+            }
+            collect_imported_symbol_locations(
+                &mut locations,
+                &document,
+                &import,
+                symbol,
+                include_alias_usages,
+            );
+        }
+    }
+
+    locations
+}
+
+fn collect_imported_symbol_locations(
+    locations: &mut BTreeSet<LanguageLocation>,
+    document: &WorkspaceDocument,
+    import: &AxLanguageImport,
+    symbol: &AxLanguageSymbol,
+    include_alias_usages: bool,
+) {
+    let occurrences = ax_source_identifier_occurrences(&document.text);
+    for binding in &import.bindings {
+        if binding.imported == "*" {
+            for occurrence in occurrences
+                .iter()
+                .filter(|occurrence| occurrence.name == symbol.name)
+                .filter(|occurrence| {
+                    occurrence_has_namespace_prefix(&document.text, occurrence, &binding.local)
+                })
+            {
+                locations.insert(occurrence_location(&document.uri, occurrence));
+            }
+            continue;
+        }
+        if binding.imported != symbol.name {
+            continue;
+        }
+
+        if let Some(imported) = occurrences.iter().find(|occurrence| {
+            occurrence.line == import.line && occurrence.name == binding.imported
+        }) {
+            locations.insert(occurrence_location(&document.uri, imported));
+        }
+        if !include_alias_usages && binding.local != binding.imported {
+            continue;
+        }
+        for occurrence in occurrences
+            .iter()
+            .filter(|occurrence| occurrence.name == binding.local)
+            .filter(|occurrence| {
+                occurrence.line == import.line
+                    || occurrence_is_symbol_usage(&document.text, occurrence, symbol.kind)
+            })
+        {
+            locations.insert(occurrence_location(&document.uri, occurrence));
+        }
+    }
+}
+
+fn occurrence_is_symbol_usage(
+    source: &str,
+    occurrence: &AxLanguageIdentifierOccurrence,
+    kind: AxLanguageSymbolKind,
+) -> bool {
+    let Some(line) = normalized_line(source, occurrence.line.saturating_sub(1)) else {
+        return false;
+    };
+    let Some(start) = utf16_character_to_byte(line, occurrence.column.saturating_sub(1)) else {
+        return false;
+    };
+    let Some(end) = utf16_character_to_byte(line, occurrence.end_column.saturating_sub(1)) else {
+        return false;
+    };
+    let before = line[..start].trim_end();
+    let after = line[end..].trim_start();
+
+    let is_tag = before.ends_with('<') || before.ends_with("</");
+    let is_call = after.starts_with('(');
+    let is_declaration = ax_source_symbols("", source).into_iter().any(|symbol| {
+        symbol.name == occurrence.name
+            && symbol.line == occurrence.line
+            && symbol.column == occurrence.column
+    });
+    if is_tag || is_call || is_declaration {
+        return true;
+    }
+
+    matches!(kind, AxLanguageSymbolKind::Type)
+        && (before.ends_with(':')
+            || before.ends_with("->")
+            || before.ends_with('<')
+            || before.ends_with('|')
+            || after.starts_with('?')
+            || after.starts_with("[]")
+            || after.starts_with('>'))
+}
+
+fn occurrence_has_namespace_prefix(
+    source: &str,
+    occurrence: &AxLanguageIdentifierOccurrence,
+    namespace: &str,
+) -> bool {
+    let Some(line) = normalized_line(source, occurrence.line.saturating_sub(1)) else {
+        return false;
+    };
+    let Some(start) = utf16_character_to_byte(line, occurrence.column.saturating_sub(1)) else {
+        return false;
+    };
+    line[..start].trim_end().ends_with(&format!("{namespace}."))
+}
+
+fn occurrence_location(uri: &str, occurrence: &AxLanguageIdentifierOccurrence) -> LanguageLocation {
+    LanguageLocation {
+        uri: uri.to_string(),
+        line: occurrence.line.saturating_sub(1),
+        start_character: occurrence.column.saturating_sub(1),
+        end_character: occurrence.end_column.saturating_sub(1),
+    }
+}
+
+fn language_location_value(location: LanguageLocation) -> Value {
+    json!({
+        "uri": location.uri,
+        "range": {
+            "start": { "line": location.line, "character": location.start_character },
+            "end": { "line": location.line, "character": location.end_character }
+        }
+    })
+}
+
+fn rename_workspace_edit(locations: BTreeSet<LanguageLocation>, new_name: &str) -> Value {
+    let mut changes = BTreeMap::<String, Vec<Value>>::new();
+    for location in locations {
+        changes.entry(location.uri).or_default().push(json!({
+            "range": {
+                "start": { "line": location.line, "character": location.start_character },
+                "end": { "line": location.line, "character": location.end_character }
+            },
+            "newText": new_name
+        }));
+    }
+    json!({ "changes": changes })
+}
+
+fn ensure_alias_rename_has_no_collision(
+    state: &ServerState,
+    resolution: &ResolvedLanguageSymbol,
+    alias: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    let request_uri = resolution.reference_uri.clone();
+    let document = state
+        .documents
+        .get(&request_uri)
+        .ok_or_else(|| "the alias source document is not open".to_string())?;
+    let path = file_uri_to_path(&request_uri).unwrap_or_default();
+    let collision = ax_source_symbols(&path.to_string_lossy(), &document.text)
+        .into_iter()
+        .any(|symbol| symbol.name == new_name)
+        || ax_source_imports(&path.to_string_lossy(), &document.text)
+            .into_iter()
+            .flat_map(|import| import.bindings)
+            .any(|binding| binding.local == new_name && binding.local != alias);
+    if collision {
+        Err(format!(
+            "`{new_name}` is already declared or imported in this module"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_canonical_rename_has_no_collision(
+    state: &ServerState,
+    resolution: &ResolvedLanguageSymbol,
+    new_name: &str,
+) -> Result<(), String> {
+    let symbol = resolution
+        .symbol
+        .as_ref()
+        .ok_or_else(|| "missing symbol declaration".to_string())?;
+    let target_path = file_uri_to_path(&resolution.declaration_uri)
+        .ok_or_else(|| "the declaration is not a local file".to_string())?;
+    let source = state
+        .documents
+        .get(&resolution.declaration_uri)
+        .map(|document| document.text.clone())
+        .or_else(|| fs::read_to_string(&target_path).ok())
+        .ok_or_else(|| "unable to read the declaration module".to_string())?;
+    if ax_source_symbols(&target_path.to_string_lossy(), &source)
+        .into_iter()
+        .any(|candidate| candidate.name == new_name && candidate.name != symbol.name)
+    {
+        return Err(format!(
+            "`{new_name}` is already declared in the target module"
+        ));
+    }
+
+    for document in workspace_documents(state) {
+        if same_file_path(&document.path, &target_path) {
+            continue;
+        }
+        let source_kind = classify_ax_source(&document.path.to_string_lossy(), &document.text);
+        let imports = ax_source_imports(&document.path.to_string_lossy(), &document.text);
+        let changes_local_binding = imports.iter().any(|import| {
+            state.workspace_root.as_deref().is_some_and(|root| {
+                resolve_definition_import(
+                    root,
+                    &document.path,
+                    source_kind,
+                    &import.source,
+                    &state.package_roots,
+                )
+                .is_some_and(|target| {
+                    same_file_path(&target, &target_path)
+                        && import.bindings.iter().any(|binding| {
+                            binding.imported == symbol.name && binding.local == symbol.name
+                        })
+                })
+            })
+        });
+        if !changes_local_binding {
+            continue;
+        }
+
+        let local_collision = ax_source_symbols(&document.path.to_string_lossy(), &document.text)
+            .into_iter()
+            .any(|candidate| candidate.name == new_name)
+            || imports
+                .iter()
+                .flat_map(|import| &import.bindings)
+                .any(|binding| binding.local == new_name && binding.local != symbol.name);
+        if local_collision {
+            return Err(format!(
+                "`{new_name}` would collide with a declaration or import in `{}`",
+                document.path.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn valid_rename_identifier(name: &str) -> bool {
+    let mut characters = name.chars();
+    let valid = characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_');
+    valid
+        && !matches!(
+            name,
+            "page"
+                | "layout"
+                | "component"
+                | "fn"
+                | "type"
+                | "query"
+                | "loader"
+                | "action"
+                | "scope"
+                | "job"
+                | "import"
+                | "export"
+                | "return"
+                | "render"
+                | "state"
+                | "data"
+                | "const"
+                | "let"
+        )
 }
 
 fn resolve_definition_import(
@@ -1352,6 +1900,129 @@ fn normalized_line(source: &str, target_line: usize) -> Option<&str> {
         .split('\n')
         .nth(target_line)
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
+}
+
+fn workspace_documents(state: &ServerState) -> Vec<WorkspaceDocument> {
+    let mut documents = BTreeMap::<String, WorkspaceDocument>::new();
+    if let Some(root) = state.workspace_root.as_deref() {
+        let mut paths = Vec::new();
+        collect_workspace_ax_paths(root, &mut paths);
+        for path in paths {
+            let uri = path_to_file_uri(&path);
+            if let Ok(text) = fs::read_to_string(&path) {
+                documents.insert(uri.clone(), WorkspaceDocument { uri, path, text });
+            }
+        }
+    }
+
+    for (uri, document) in &state.documents {
+        let Some(path) = file_uri_to_path(uri) else {
+            continue;
+        };
+        if !is_axonyx_source_path(&path)
+            || state
+                .workspace_root
+                .as_deref()
+                .is_some_and(|root| !path_starts_with(&path, root))
+        {
+            continue;
+        }
+        documents.insert(
+            uri.clone(),
+            WorkspaceDocument {
+                uri: uri.clone(),
+                path,
+                text: document.text.clone(),
+            },
+        );
+    }
+
+    documents.into_values().collect()
+}
+
+fn collect_workspace_ax_paths(directory: &Path, paths: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            let skipped = entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_ignored_workspace_directory);
+            if !skipped {
+                collect_workspace_ax_paths(&path, paths);
+            }
+        } else if file_type.is_file() && is_axonyx_source_path(&path) {
+            paths.push(path);
+        }
+    }
+}
+
+fn is_ignored_workspace_directory(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | ".axonyx" | "dist" | "node_modules" | "target" | "vendor"
+    )
+}
+
+fn is_axonyx_source_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "ax" | "asx"))
+}
+
+fn path_is_inside_workspace(state: &ServerState, path: &Path) -> bool {
+    state
+        .workspace_root
+        .as_deref()
+        .is_some_and(|root| path_starts_with(path, root))
+}
+
+fn path_is_package_source(state: &ServerState, path: &Path) -> bool {
+    state
+        .package_roots
+        .values()
+        .any(|package_root| path_starts_with(path, package_root))
+}
+
+fn path_starts_with(path: &Path, root: &Path) -> bool {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let path_components = comparable_path_components(&path);
+    let root_components = comparable_path_components(&root);
+    path_components.starts_with(&root_components)
+}
+
+fn comparable_path_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| {
+            let value = component.as_os_str().to_string_lossy().into_owned();
+            if cfg!(windows) {
+                value.to_ascii_lowercase()
+            } else {
+                value
+            }
+        })
+        .collect()
+}
+
+fn same_file_path(left: &Path, right: &Path) -> bool {
+    let left = fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
 }
 
 fn discover_axonyx_package_roots(root: &Path) -> BTreeMap<String, PathBuf> {
@@ -1656,6 +2327,14 @@ mod tests {
         assert_eq!(
             messages[0]["result"]["capabilities"]["definitionProvider"],
             true
+        );
+        assert_eq!(
+            messages[0]["result"]["capabilities"]["referencesProvider"],
+            true
+        );
+        assert_eq!(
+            messages[0]["result"]["capabilities"]["renameProvider"],
+            json!({ "prepareProvider": true })
         );
         assert_eq!(messages[0]["result"]["capabilities"]["hoverProvider"], true);
         assert_eq!(
@@ -2274,6 +2953,213 @@ mod tests {
             messages[2]["result"]["range"]["start"],
             json!({ "line": 0, "character": 0 })
         );
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn finds_canonical_references_across_alias_and_namespace_imports() {
+        let root = temp_workspace("references");
+        let component = root.join("app/components/Card.asx");
+        let alias_page = root.join("app/alias.asx");
+        let namespace_page = root.join("app/namespace.asx");
+        let direct_page = root.join("app/page.asx");
+        fs::write(
+            &component,
+            "component Card() { render ASX { <article /> } }\n",
+        )
+        .expect("component should be written");
+        fs::write(
+            &alias_page,
+            "import { Card as Panel } from \"@/components/Card\"\npage Alias() { return ASX { <Panel /> } }\n",
+        )
+        .expect("alias page should be written");
+        fs::write(
+            &namespace_page,
+            "import * as UI from \"@/components/Card\"\npage Namespace() { return ASX { <UI.Card /> } }\n",
+        )
+        .expect("namespace page should be written");
+        let direct_source = "import { Card } from \"@/components/Card\"\npage Home() { return ASX { <Card>Card</Card> } }\n";
+        fs::write(&direct_page, direct_source).expect("direct page should be written");
+        let direct_uri = file_uri(&direct_page);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(&root) } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": direct_uri,
+                    "version": 1,
+                    "text": direct_source
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": direct_uri },
+                    "position": { "line": 0, "character": 10 },
+                    "context": { "includeDeclaration": true }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let references = messages
+            .iter()
+            .find(|message| message["id"] == 2)
+            .and_then(|message| message["result"].as_array())
+            .expect("references response should exist");
+        assert_eq!(references.len(), 8);
+        assert!(references.iter().any(|location| {
+            location["uri"] == path_to_file_uri(&component)
+                && location["range"]["start"] == json!({ "line": 0, "character": 10 })
+        }));
+        assert!(references.iter().any(|location| {
+            location["uri"] == path_to_file_uri(&namespace_page)
+                && location["range"]["start"]["line"] == 1
+        }));
+
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn canonical_rename_preserves_explicit_aliases_and_updates_namespace_members() {
+        let root = temp_workspace("rename-canonical");
+        let component = root.join("app/components/Card.asx");
+        let alias_page = root.join("app/alias.asx");
+        let namespace_page = root.join("app/namespace.asx");
+        let direct_page = root.join("app/page.asx");
+        fs::write(
+            &component,
+            "component Card() { render ASX { <article /> } }\n",
+        )
+        .expect("component should be written");
+        fs::write(
+            &alias_page,
+            "import { Card as Panel } from \"@/components/Card\"\npage Alias() { return ASX { <Panel /> } }\n",
+        )
+        .expect("alias page should be written");
+        fs::write(
+            &namespace_page,
+            "import * as UI from \"@/components/Card\"\npage Namespace() { return ASX { <UI.Card /> } }\n",
+        )
+        .expect("namespace page should be written");
+        let direct_source =
+            "import { Card } from \"@/components/Card\"\npage Home() { return ASX { <Card /> } }\n";
+        fs::write(&direct_page, direct_source).expect("direct page should be written");
+        let direct_uri = file_uri(&direct_page);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(&root) } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": direct_uri, "version": 1, "text": direct_source } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": direct_uri },
+                    "position": { "line": 0, "character": 10 },
+                    "newName": "Surface"
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let changes = messages
+            .iter()
+            .find(|message| message["id"] == 2)
+            .and_then(|message| message["result"]["changes"].as_object())
+            .expect("rename workspace edit should exist");
+        assert_eq!(
+            changes[&path_to_file_uri(&component)]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            changes[&path_to_file_uri(&alias_page)]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            changes[&path_to_file_uri(&namespace_page)]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(changes[&direct_uri].as_array().unwrap().len(), 2);
+        assert!(changes[&path_to_file_uri(&alias_page)]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|edit| edit["range"]["start"]["line"] == 0));
+
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn local_alias_rename_stays_inside_the_importing_module() {
+        let root = temp_workspace("rename-alias");
+        let component = root.join("app/components/Card.asx");
+        let page = root.join("app/page.asx");
+        fs::write(
+            &component,
+            "component Card() { render ASX { <article /> } }\n",
+        )
+        .expect("component should be written");
+        let source = "import { Card as Panel } from \"@/components/Card\"\npage Home() { return ASX { <Panel /> } }\n";
+        fs::write(&page, source).expect("page should be written");
+        let page_uri = file_uri(&page);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(&root) } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": page_uri, "version": 1, "text": source } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/prepareRename",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 1, "character": 30 }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 1, "character": 30 },
+                    "newName": "Tile"
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let prepare = messages
+            .iter()
+            .find(|message| message["id"] == 2)
+            .expect("prepare rename response should exist");
+        assert_eq!(prepare["result"]["placeholder"], "Panel");
+        let changes = messages
+            .iter()
+            .find(|message| message["id"] == 3)
+            .and_then(|message| message["result"]["changes"].as_object())
+            .expect("alias rename workspace edit should exist");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[&page_uri].as_array().unwrap().len(), 2);
+
         fs::remove_dir_all(root).expect("workspace should be removed");
     }
 
