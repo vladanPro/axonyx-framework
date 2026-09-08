@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -6,8 +6,9 @@ use std::process::Command;
 
 use axonyx_core::ax_formatter_prelude::format_ax_source;
 use axonyx_core::ax_language_service_prelude::{
-    ax_source_imports, ax_source_symbols, classify_ax_source, diagnose_ax_source,
-    diagnose_ax_workspace_imports, resolve_ax_import_path, AxLanguageSymbol, AxLanguageSymbolKind,
+    ax_source_component_contracts, ax_source_imports, ax_source_symbols, classify_ax_source,
+    diagnose_ax_source, diagnose_ax_workspace_imports, resolve_ax_import_path,
+    AxLanguageComponentContract, AxLanguageComponentProp, AxLanguageSymbol, AxLanguageSymbolKind,
     AxSourceKind,
 };
 use serde_json::{json, Value};
@@ -38,9 +39,27 @@ struct ResolvedLanguageSymbol {
 }
 
 enum CompletionContext {
-    General { prefix: String },
-    AsxTag { prefix: String },
-    Namespace { namespace: String, prefix: String },
+    General {
+        prefix: String,
+    },
+    AsxTag {
+        prefix: String,
+    },
+    AsxProp {
+        component: String,
+        prefix: String,
+        existing: BTreeSet<String>,
+    },
+    AsxPropValue {
+        component: String,
+        prop: String,
+        prefix: String,
+        quoted: bool,
+    },
+    Namespace {
+        namespace: String,
+        prefix: String,
+    },
 }
 
 pub fn run_server<R, W>(mut reader: R, mut writer: W) -> io::Result<()>
@@ -107,7 +126,7 @@ fn handle_message<W: Write>(
                             "hoverProvider": true,
                             "completionProvider": {
                                 "resolveProvider": false,
-                                "triggerCharacters": ["<", "."]
+                                "triggerCharacters": ["<", ".", " ", "=", "\""]
                             }
                         },
                         "serverInfo": {
@@ -412,16 +431,63 @@ fn symbol_completions(state: &ServerState, message: &Value) -> Vec<Value> {
     let Some(importing_path) = file_uri_to_path(uri) else {
         return Vec::new();
     };
-    let Some(source_line) = normalized_line(&document.text, line) else {
-        return Vec::new();
-    };
-    let Some((context, start_character)) = completion_context(source_line, character) else {
+    let Some((context, start_character)) = completion_context(&document.text, line, character)
+    else {
         return Vec::new();
     };
     let kind = classify_ax_source(&importing_path.to_string_lossy(), &document.text);
     let mut items = BTreeMap::<String, Value>::new();
 
     match &context {
+        CompletionContext::AsxProp {
+            component,
+            prefix,
+            existing,
+        } => {
+            if let Some(contract) =
+                resolve_component_contract(state, &importing_path, kind, &document.text, component)
+            {
+                for prop in contract.props {
+                    if !existing.contains(&prop.name) && completion_matches(&prop.name, prefix) {
+                        let item = prop_completion_item(
+                            &contract.name,
+                            &prop,
+                            line,
+                            start_character,
+                            character,
+                        );
+                        items.insert(prop.name.clone(), item);
+                    }
+                }
+            }
+        }
+        CompletionContext::AsxPropValue {
+            component,
+            prop,
+            prefix,
+            quoted,
+        } => {
+            if let Some(contract) =
+                resolve_component_contract(state, &importing_path, kind, &document.text, component)
+            {
+                if let Some(contract_prop) = contract.props.iter().find(|item| item.name == *prop) {
+                    for value in &contract_prop.allowed_values {
+                        if completion_matches(value, prefix) {
+                            let item = prop_value_completion_item(
+                                &contract.name,
+                                contract_prop,
+                                value,
+                                *quoted,
+                                line,
+                                start_character,
+                                character,
+                            );
+                            items.insert(value.clone(), item);
+                        }
+                    }
+                }
+            }
+        }
         CompletionContext::Namespace { namespace, prefix } => {
             for import in ax_source_imports(&importing_path.to_string_lossy(), &document.text) {
                 let is_namespace = import
@@ -533,28 +599,168 @@ fn import_symbols(
     kind: AxSourceKind,
     source: &str,
 ) -> Vec<AxLanguageSymbol> {
-    let Some(root) = state.workspace_root.as_ref() else {
+    let Some((target, target_source)) = import_source(state, importing_path, kind, source) else {
         return Vec::new();
     };
-    let Some(target) =
-        resolve_definition_import(root, importing_path, kind, source, &state.package_roots)
-    else {
-        return Vec::new();
-    };
+    ax_source_symbols(&target.to_string_lossy(), &target_source)
+}
+
+fn import_source(
+    state: &ServerState,
+    importing_path: &Path,
+    kind: AxSourceKind,
+    source: &str,
+) -> Option<(PathBuf, String)> {
+    let root = state.workspace_root.as_ref()?;
+    let target =
+        resolve_definition_import(root, importing_path, kind, source, &state.package_roots)?;
     let target_uri = path_to_file_uri(&target);
     let target_source = state
         .documents
         .get(&target_uri)
         .map(|document| document.text.clone())
-        .or_else(|| fs::read_to_string(&target).ok());
-    target_source
-        .map(|source_text| ax_source_symbols(&target.to_string_lossy(), &source_text))
-        .unwrap_or_default()
+        .or_else(|| fs::read_to_string(&target).ok())?;
+    Some((target, target_source))
 }
 
-fn completion_context(line: &str, character: usize) -> Option<(CompletionContext, usize)> {
-    let byte = utf16_character_to_byte(line, character)?;
-    let before = &line[..byte];
+fn resolve_component_contract(
+    state: &ServerState,
+    importing_path: &Path,
+    kind: AxSourceKind,
+    source: &str,
+    reference_name: &str,
+) -> Option<AxLanguageComponentContract> {
+    if let Some(contract) = ax_source_component_contracts(source)
+        .into_iter()
+        .find(|contract| contract.name == reference_name)
+    {
+        return Some(contract);
+    }
+
+    for import in ax_source_imports(&importing_path.to_string_lossy(), source) {
+        let Some(binding) = import
+            .bindings
+            .iter()
+            .find(|binding| binding.imported != "*" && binding.local == reference_name)
+        else {
+            continue;
+        };
+        let Some((_, target_source)) = import_source(state, importing_path, kind, &import.source)
+        else {
+            continue;
+        };
+        if let Some(contract) = ax_source_component_contracts(&target_source)
+            .into_iter()
+            .find(|contract| contract.name == binding.imported)
+        {
+            return Some(contract);
+        }
+    }
+
+    None
+}
+
+fn prop_completion_item(
+    component: &str,
+    prop: &AxLanguageComponentProp,
+    line: usize,
+    start_character: usize,
+    end_character: usize,
+) -> Value {
+    let ty = prop.ty.as_deref().unwrap_or("inferred");
+    let requirement = if prop.required {
+        "required"
+    } else {
+        "optional"
+    };
+    let default = prop
+        .default
+        .as_deref()
+        .map(|value| format!(", default `{}`", escape_inline_code(value)))
+        .unwrap_or_default();
+    let expression_value = prop
+        .ty
+        .as_deref()
+        .is_some_and(|ty| !ty.contains("String") && !ty.trim_start().starts_with(['\'', '"']))
+        || prop.default.as_deref().is_some_and(|default| {
+            !default.trim_start().starts_with(['\'', '"'])
+                && matches!(default.trim(), "true" | "false")
+        });
+    let new_text = if expression_value {
+        format!("{}={{$1}}", prop.name)
+    } else {
+        format!("{}=\"$1\"", prop.name)
+    };
+
+    json!({
+        "label": prop.name,
+        "kind": 10,
+        "detail": format!("{requirement} {component} prop: {ty}"),
+        "documentation": {
+            "kind": "markdown",
+            "value": format!("**{}** prop on `{}`\n\nType: `{}`{}", requirement, escape_inline_code(component), escape_inline_code(ty), default)
+        },
+        "sortText": format!("{}-{}", if prop.required { 0 } else { 1 }, prop.name.to_ascii_lowercase()),
+        "filterText": prop.name,
+        "insertTextFormat": 2,
+        "textEdit": {
+            "range": {
+                "start": { "line": line, "character": start_character },
+                "end": { "line": line, "character": end_character }
+            },
+            "newText": new_text
+        }
+    })
+}
+
+fn prop_value_completion_item(
+    component: &str,
+    prop: &AxLanguageComponentProp,
+    value: &str,
+    quoted: bool,
+    line: usize,
+    start_character: usize,
+    end_character: usize,
+) -> Value {
+    let new_text = if quoted {
+        value.to_string()
+    } else {
+        format!("\"{value}\"")
+    };
+    json!({
+        "label": value,
+        "kind": 12,
+        "detail": format!("{} value for {}.{}", prop.ty.as_deref().unwrap_or("allowed"), component, prop.name),
+        "sortText": value.to_ascii_lowercase(),
+        "filterText": value,
+        "textEdit": {
+            "range": {
+                "start": { "line": line, "character": start_character },
+                "end": { "line": line, "character": end_character }
+            },
+            "newText": new_text
+        }
+    })
+}
+
+fn completion_context(
+    source: &str,
+    line: usize,
+    character: usize,
+) -> Option<(CompletionContext, usize)> {
+    let source_line = normalized_line(source, line)?;
+    let line_byte = utf16_character_to_byte(source_line, character)?;
+    let line_start = source_line_start(source, line)?;
+    let cursor = line_start + line_byte;
+
+    if let Some((context, prefix_byte)) = asx_attribute_completion_context(source, cursor) {
+        if prefix_byte >= line_start {
+            let start_character = source[line_start..prefix_byte].encode_utf16().count();
+            return Some((context, start_character));
+        }
+    }
+
+    let before = &source_line[..line_byte];
     let prefix_start = before
         .char_indices()
         .rev()
@@ -562,7 +768,7 @@ fn completion_context(line: &str, character: usize) -> Option<(CompletionContext
         .map(|(index, value)| index + value.len_utf8())
         .unwrap_or(0);
     let prefix = before[prefix_start..].to_string();
-    let start_character = line[..prefix_start].encode_utf16().count();
+    let start_character = source_line[..prefix_start].encode_utf16().count();
     let leading = &before[..prefix_start];
 
     if let Some(namespace_leading) = leading.strip_suffix('.') {
@@ -589,6 +795,261 @@ fn completion_context(line: &str, character: usize) -> Option<(CompletionContext
     }
 
     Some((CompletionContext::General { prefix }, start_character))
+}
+
+fn source_line_start(source: &str, target_line: usize) -> Option<usize> {
+    let mut start = 0;
+    for _ in 0..target_line {
+        start += source.get(start..)?.find('\n')? + 1;
+    }
+    Some(start)
+}
+
+fn asx_attribute_completion_context(
+    source: &str,
+    cursor: usize,
+) -> Option<(CompletionContext, usize)> {
+    let tag_start = active_asx_tag_start(source.get(..cursor)?)?;
+    let content = source.get(tag_start + 1..cursor)?;
+    if content.starts_with('/')
+        || !content
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase())
+    {
+        return None;
+    }
+
+    let name_end = content
+        .char_indices()
+        .find(|(_, character)| !character.is_ascii_alphanumeric() && *character != '_')
+        .map(|(index, _)| index)
+        .unwrap_or(content.len());
+    let component = &content[..name_end];
+    if name_end == content.len() {
+        return Some((
+            CompletionContext::AsxTag {
+                prefix: component.to_string(),
+            },
+            tag_start + 1,
+        ));
+    }
+
+    let attributes_start = tag_start + 1 + name_end;
+    parse_asx_attribute_context(source, attributes_start, cursor, component)
+}
+
+fn active_asx_tag_start(source: &str) -> Option<usize> {
+    let mut active = None;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut expression_depth = 0usize;
+
+    for (index, character) in source.char_indices() {
+        if active.is_none() {
+            if character == '<' {
+                active = Some(index);
+            }
+            continue;
+        }
+
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+
+        match character {
+            '\'' | '"' if expression_depth == 0 => quote = Some(character),
+            '{' => expression_depth += 1,
+            '}' => expression_depth = expression_depth.saturating_sub(1),
+            '>' if expression_depth == 0 => active = None,
+            '<' if expression_depth == 0 => active = Some(index),
+            _ => {}
+        }
+    }
+
+    active
+}
+
+fn parse_asx_attribute_context(
+    source: &str,
+    mut position: usize,
+    cursor: usize,
+    component: &str,
+) -> Option<(CompletionContext, usize)> {
+    let mut existing = BTreeSet::new();
+
+    while position < cursor {
+        while position < cursor
+            && source
+                .get(position..)?
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        {
+            position += source.get(position..)?.chars().next()?.len_utf8();
+        }
+        if position == cursor {
+            return Some((
+                CompletionContext::AsxProp {
+                    component: component.to_string(),
+                    prefix: String::new(),
+                    existing,
+                },
+                cursor,
+            ));
+        }
+
+        let name_start = position;
+        while position < cursor {
+            let character = source.get(position..)?.chars().next()?;
+            if !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | ':')) {
+                break;
+            }
+            position += character.len_utf8();
+        }
+        let name = source.get(name_start..position)?;
+        if position == cursor {
+            return Some((
+                CompletionContext::AsxProp {
+                    component: component.to_string(),
+                    prefix: name.to_string(),
+                    existing,
+                },
+                name_start,
+            ));
+        }
+        if name.is_empty() {
+            return None;
+        }
+
+        while position < cursor
+            && source
+                .get(position..)?
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        {
+            position += source.get(position..)?.chars().next()?.len_utf8();
+        }
+        if position == cursor {
+            return Some((
+                CompletionContext::AsxProp {
+                    component: component.to_string(),
+                    prefix: name.to_string(),
+                    existing,
+                },
+                name_start,
+            ));
+        }
+        if source.get(position..)?.chars().next()? != '=' {
+            return None;
+        }
+        existing.insert(name.to_string());
+        position += 1;
+
+        while position < cursor
+            && source
+                .get(position..)?
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace)
+        {
+            position += source.get(position..)?.chars().next()?.len_utf8();
+        }
+        if position == cursor {
+            return Some((
+                CompletionContext::AsxPropValue {
+                    component: component.to_string(),
+                    prop: name.to_string(),
+                    prefix: String::new(),
+                    quoted: false,
+                },
+                cursor,
+            ));
+        }
+
+        let value_start = position;
+        let first = source.get(position..)?.chars().next()?;
+        if matches!(first, '\'' | '"') {
+            position += first.len_utf8();
+            let prefix_start = position;
+            let mut escaped = false;
+            while position < cursor {
+                let character = source.get(position..)?.chars().next()?;
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == first {
+                    position += character.len_utf8();
+                    break;
+                }
+                position += character.len_utf8();
+            }
+            if position == cursor && !source.get(prefix_start..cursor)?.ends_with(first) {
+                return Some((
+                    CompletionContext::AsxPropValue {
+                        component: component.to_string(),
+                        prop: name.to_string(),
+                        prefix: source.get(prefix_start..cursor)?.to_string(),
+                        quoted: true,
+                    },
+                    prefix_start,
+                ));
+            }
+        } else if first == '{' {
+            let mut depth = 0usize;
+            while position < cursor {
+                let character = source.get(position..)?.chars().next()?;
+                match character {
+                    '{' => depth += 1,
+                    '}' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                position += character.len_utf8();
+                if depth == 0 {
+                    break;
+                }
+            }
+        } else {
+            while position < cursor
+                && !source
+                    .get(position..)?
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+            {
+                position += source.get(position..)?.chars().next()?.len_utf8();
+            }
+            if position == cursor {
+                return Some((
+                    CompletionContext::AsxPropValue {
+                        component: component.to_string(),
+                        prop: name.to_string(),
+                        prefix: source.get(value_start..cursor)?.to_string(),
+                        quoted: false,
+                    },
+                    value_start,
+                ));
+            }
+        }
+    }
+
+    Some((
+        CompletionContext::AsxProp {
+            component: component.to_string(),
+            prefix: String::new(),
+            existing,
+        },
+        cursor,
+    ))
 }
 
 fn completion_matches(name: &str, prefix: &str) -> bool {
@@ -1201,7 +1662,7 @@ mod tests {
             messages[0]["result"]["capabilities"]["completionProvider"],
             json!({
                 "resolveProvider": false,
-                "triggerCharacters": ["<", "."]
+                "triggerCharacters": ["<", ".", " ", "=", "\""]
             })
         );
         assert_eq!(
@@ -1352,7 +1813,8 @@ mod tests {
     fn completion_prefix_range_uses_utf16_offsets() {
         let line = "  return \"forge 🛠\" + hel";
         let character = line.encode_utf16().count();
-        let (context, start) = completion_context(line, character).expect("context should parse");
+        let (context, start) =
+            completion_context(line, 0, character).expect("context should parse");
 
         assert!(matches!(
             context,
@@ -1409,6 +1871,108 @@ mod tests {
             .contains("component Card(title: String = \"\")")
             && detail.contains("@/components/Card")));
         assert_eq!(items[0]["textEdit"]["newText"], "Panel");
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn completes_component_props_across_multiline_incomplete_asx() {
+        let root = temp_workspace("prop-completion");
+        let page = root.join("app/page.asx");
+        let component = root.join("app/components/Button.asx");
+        fs::write(
+            &component,
+            "component Button(label: String, variant: \"primary\" | \"ghost\" = \"primary\", disabled: Bool = false) { render ASX { <button>{label}</button> } }",
+        )
+        .expect("component should be written");
+        let root_uri = file_uri(&root);
+        let page_uri = file_uri(&page);
+        let source = "import { Button as Action } from \"@/components/Button\"\n\npage Home() {\n  return ASX {\n    <Action\n      label=\"Ship\"\n      va";
+        let character = source.lines().nth(6).expect("line should exist").len();
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": source
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 6, "character": character }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let items = messages[2]["result"]
+            .as_array()
+            .expect("completion result should be an array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "variant");
+        assert_eq!(items[0]["kind"], 10);
+        assert_eq!(items[0]["insertTextFormat"], 2);
+        assert_eq!(items[0]["textEdit"]["newText"], "variant=\"$1\"");
+        assert!(items[0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("optional Button prop")));
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn completes_literal_union_values_inside_a_quoted_prop() {
+        let root = temp_workspace("prop-value-completion");
+        let page = root.join("app/page.asx");
+        let component = root.join("app/components/Button.asx");
+        fs::write(
+            &component,
+            "component Button(variant: \"primary\" | \"ghost\" = \"primary\") { render ASX { <button /> } }",
+        )
+        .expect("component should be written");
+        let root_uri = file_uri(&root);
+        let page_uri = file_uri(&page);
+        let source = "import { Button } from \"@/components/Button\"\n\npage Home() { return ASX { <Button variant=\"gh";
+        let character = source.lines().nth(2).expect("line should exist").len();
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": source
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 2, "character": character }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let items = messages[2]["result"]
+            .as_array()
+            .expect("completion result should be an array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "ghost");
+        assert_eq!(items[0]["kind"], 12);
+        assert_eq!(items[0]["textEdit"]["newText"], "ghost");
+        assert_eq!(
+            items[0]["textEdit"]["range"]["start"],
+            json!({ "line": 2, "character": character - 2 })
+        );
         fs::remove_dir_all(root).expect("workspace should be removed");
     }
 
