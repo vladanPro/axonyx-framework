@@ -1926,6 +1926,46 @@ mod tests {
     }
 
     #[test]
+    fn completes_local_component_props_while_the_page_body_is_incomplete() {
+        let root = temp_workspace("local-prop-completion");
+        let page = root.join("app/page.asx");
+        let root_uri = file_uri(&root);
+        let page_uri = file_uri(&page);
+        let source = "component Button(label: String, variant: \"primary\" | \"ghost\" = \"primary\") { render ASX { <button>{label}</button> } }\n\npage Home() { return ASX { <Button va";
+        let character = source.lines().nth(2).expect("line should exist").len();
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": root_uri } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": page_uri,
+                    "version": 1,
+                    "text": source
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/completion",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": { "line": 2, "character": character }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let items = messages[2]["result"]
+            .as_array()
+            .expect("completion result should be an array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["label"], "variant");
+        assert_eq!(items[0]["textEdit"]["newText"], "variant=\"$1\"");
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
     fn completes_literal_union_values_inside_a_quoted_prop() {
         let root = temp_workspace("prop-value-completion");
         let page = root.join("app/page.asx");
