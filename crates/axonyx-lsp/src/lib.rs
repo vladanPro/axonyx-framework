@@ -2101,6 +2101,31 @@ mod tests {
     }
 
     #[test]
+    fn formats_multiline_component_signatures_through_lsp() {
+        let uri = "file:///workspace/app/page.asx";
+        let source = "page Home() {\ncomponent Button(\nlabel: String,\nvariant: \"primary\" | \"ghost\" = \"primary\",\n) {\nrender ASX { <button>{label}</button> }\n}\nreturn ASX { <Button label=\"Ship\" /> }\n}";
+        let messages = run(vec![
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": uri, "text": source } }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "format-multiline",
+                "method": "textDocument/formatting",
+                "params": { "textDocument": { "uri": uri }, "options": { "tabSize": 2, "insertSpaces": true } }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        assert_eq!(
+            messages[1]["result"][0]["newText"],
+            "page Home() {\n  component Button(\n    label: String,\n    variant: \"primary\" | \"ghost\" = \"primary\",\n  ) {\n    render ASX { <button>{label}</button> }\n  }\n  return ASX { <Button label=\"Ship\" /> }\n}\n"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_requests_with_json_rpc_error() {
         let messages = run(vec![
             json!({ "jsonrpc": "2.0", "id": 7, "method": "axonyx/unknown" }),
