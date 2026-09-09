@@ -331,17 +331,15 @@ fn publish_diagnostics<W: Write>(
         .into_iter()
         .map(|diagnostic| {
             let line = diagnostic.line.saturating_sub(1);
-            let character = diagnostic.column.saturating_sub(1);
             let line_length = utf16_line_length(source, line).unwrap_or(0);
-            let end_character = if character < line_length {
-                character + 1
-            } else {
-                character
-            };
+            let character = diagnostic.column.saturating_sub(1).min(line_length);
+            let end_line = diagnostic.end_line.saturating_sub(1);
+            let end_line_length = utf16_line_length(source, end_line).unwrap_or(0);
+            let end_character = diagnostic.end_column.saturating_sub(1).min(end_line_length);
             json!({
                 "range": {
                     "start": { "line": line, "character": character },
-                    "end": { "line": line, "character": end_character }
+                    "end": { "line": end_line, "character": end_character }
                 },
                 "severity": 1,
                 "code": diagnostic.code,
@@ -2517,12 +2515,46 @@ mod tests {
             3
         );
         assert_eq!(
+            messages[0]["params"]["diagnostics"][0]["range"]["start"]["character"],
+            6
+        );
+        assert_eq!(
+            messages[0]["params"]["diagnostics"][0]["range"]["end"],
+            json!({ "line": 3, "character": 10 })
+        );
+        assert_eq!(
             messages[0]["params"]["diagnostics"][0]["code"],
             "axonyx-parse"
         );
         assert_eq!(messages[1]["params"]["version"], 2);
         assert_eq!(messages[1]["params"]["diagnostics"], json!([]));
         assert_eq!(messages[2]["params"]["diagnostics"], json!([]));
+    }
+
+    #[test]
+    fn publishes_parser_diagnostic_ranges_in_utf16_columns() {
+        let uri = "file:///workspace/app/page.asx";
+        let source = "page Home() {\n  return ASX {\n    <Copy>🔥</Copy><Card title= />\n  }\n}";
+        let error_line = source.lines().nth(2).expect("error line should exist");
+        let title_offset = error_line.find("title").expect("title should exist");
+        let expected_start = error_line[..title_offset].encode_utf16().count();
+        let messages = run(vec![
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": uri, "version": 1, "text": source } }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0]["params"]["diagnostics"][0]["range"],
+            json!({
+                "start": { "line": 2, "character": expected_start },
+                "end": { "line": 2, "character": expected_start + "title".len() }
+            })
+        );
     }
 
     #[test]
