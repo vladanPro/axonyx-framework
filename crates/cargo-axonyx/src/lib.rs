@@ -12661,12 +12661,47 @@ fn build_compiled_production_binary(
 }
 
 fn compiled_production_binary_path(root: &Path) -> PathBuf {
+    let target = cargo_target_directory(root);
+    compiled_production_binary_path_with_target(root, target.as_deref())
+}
+
+fn compiled_production_binary_path_with_target(
+    root: &Path,
+    cargo_target_dir: Option<&Path>,
+) -> PathBuf {
     let name = if cfg!(windows) {
         "axonyx-production.exe"
     } else {
         "axonyx-production"
     };
-    root.join("target").join("release").join(name)
+    let target = cargo_target_dir.map_or_else(
+        || root.join("target"),
+        |target| {
+            if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                root.join(target)
+            }
+        },
+    );
+    target.join("release").join(name)
+}
+
+fn cargo_target_directory(root: &Path) -> Option<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()?
+        .get("target_directory")?
+        .as_str()
+        .map(PathBuf::from)
 }
 
 fn compiled_action_signal_aliases(root: &Path) -> Result<Vec<(String, String, String)>> {
@@ -25533,6 +25568,31 @@ return ASX { <Copy>{posts}</Copy> }
         assert!(args.production_server);
         assert_eq!(args.transport, ServerTransport::Tokio);
         assert_eq!(args.effective_transport(), ServerTransport::Tokio);
+    }
+
+    #[test]
+    fn compiled_production_binary_tracks_cargo_target_directory() {
+        let root = Path::new("workspace/app");
+        let binary_name = if cfg!(windows) {
+            "axonyx-production.exe"
+        } else {
+            "axonyx-production"
+        };
+
+        assert_eq!(
+            compiled_production_binary_path_with_target(root, None),
+            root.join("target").join("release").join(binary_name)
+        );
+        assert_eq!(
+            compiled_production_binary_path_with_target(root, Some(Path::new("cargo-cache"))),
+            root.join("cargo-cache").join("release").join(binary_name)
+        );
+
+        let absolute_target = std::env::temp_dir().join("axonyx-shared-target");
+        assert_eq!(
+            compiled_production_binary_path_with_target(root, Some(&absolute_target)),
+            absolute_target.join("release").join(binary_name)
+        );
     }
 
     #[test]
