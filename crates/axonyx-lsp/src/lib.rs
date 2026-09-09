@@ -7,10 +7,10 @@ use std::process::Command;
 use axonyx_core::ax_formatter_prelude::format_ax_source;
 use axonyx_core::ax_language_service_prelude::{
     ax_source_component_contracts, ax_source_identifier_occurrences, ax_source_imports,
-    ax_source_symbols, classify_ax_source, diagnose_ax_source, diagnose_ax_workspace_imports,
-    resolve_ax_import_path, AxLanguageComponentContract, AxLanguageComponentProp,
-    AxLanguageIdentifierOccurrence, AxLanguageImport, AxLanguageSymbol, AxLanguageSymbolKind,
-    AxSourceKind,
+    ax_source_local_symbols, ax_source_symbols, classify_ax_source, diagnose_ax_source,
+    diagnose_ax_workspace_imports, resolve_ax_import_path, AxLanguageComponentContract,
+    AxLanguageComponentProp, AxLanguageIdentifierOccurrence, AxLanguageImport,
+    AxLanguageLocalSymbol, AxLanguageSymbol, AxLanguageSymbolKind, AxSourceKind,
 };
 use serde_json::{json, Value};
 
@@ -33,6 +33,7 @@ struct ResolvedLanguageSymbol {
     reference_uri: String,
     declaration_uri: String,
     symbol: Option<AxLanguageSymbol>,
+    local_symbol: Option<AxLanguageLocalSymbol>,
     reference_name: String,
     import_source: Option<String>,
     line: usize,
@@ -389,6 +390,12 @@ fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
     }
 
     let resolution = resolve_language_symbol(state, message)?;
+    if let Some(local) = resolution.local_symbol.as_ref() {
+        return Some(occurrence_uri_location(
+            &resolution.declaration_uri,
+            &local.declaration,
+        ));
+    }
     Some(
         resolution
             .symbol
@@ -400,6 +407,22 @@ fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
 
 fn symbol_hover(state: &ServerState, message: &Value) -> Option<Value> {
     let resolution = resolve_language_symbol(state, message)?;
+    if let Some(local) = resolution.local_symbol.as_ref() {
+        return Some(json!({
+            "contents": {
+                "kind": "markdown",
+                "value": format!(
+                    "{}\n\n**Kind:** `{}`\n\n**Source:** local declaration",
+                    fenced_axonyx_code(&format!("{} {}", local.kind.label(), local.name)),
+                    local.kind.label()
+                )
+            },
+            "range": {
+                "start": { "line": resolution.line, "character": resolution.start_character },
+                "end": { "line": resolution.line, "character": resolution.end_character }
+            }
+        }));
+    }
     let symbol = resolution.symbol.as_ref()?;
     let mut metadata = vec![format!("**Kind:** `{}`", symbol.kind.label())];
 
@@ -1214,6 +1237,29 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
         identifier_span_at_utf16_position(source_line, character)?;
     let kind = classify_ax_source(&importing_path.to_string_lossy(), &document.text);
 
+    if let Some(local_symbol) = ax_source_local_symbols(&document.text)
+        .into_iter()
+        .find(|local| {
+            local.occurrences.iter().any(|occurrence| {
+                occurrence.line.saturating_sub(1) == line
+                    && occurrence.column.saturating_sub(1) == start_character
+                    && occurrence.end_column.saturating_sub(1) == end_character
+            })
+        })
+    {
+        return Some(ResolvedLanguageSymbol {
+            reference_uri: uri.to_string(),
+            declaration_uri: uri.to_string(),
+            symbol: None,
+            local_symbol: Some(local_symbol),
+            reference_name,
+            import_source: None,
+            line,
+            start_character,
+            end_character,
+        });
+    }
+
     if let Some(symbol) = ax_source_symbols(&importing_path.to_string_lossy(), &document.text)
         .into_iter()
         .find(|symbol| symbol.name == reference_name)
@@ -1222,6 +1268,7 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
             reference_uri: uri.to_string(),
             declaration_uri: uri.to_string(),
             symbol: Some(symbol),
+            local_symbol: None,
             reference_name,
             import_source: None,
             line,
@@ -1269,6 +1316,7 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
             reference_uri: uri.to_string(),
             declaration_uri: target_uri,
             symbol,
+            local_symbol: None,
             reference_name,
             import_source: Some(import.source),
             line,
@@ -1288,11 +1336,11 @@ fn workspace_references(state: &ServerState, message: &Value) -> Vec<Value> {
     let Some(resolution) = resolve_language_symbol(state, message) else {
         return Vec::new();
     };
-    if resolution.symbol.is_none() {
-        return Vec::new();
-    }
-
-    let locations = if local_alias_name(&resolution).is_some() {
+    let locations = if let Some(local) = resolution.local_symbol.as_ref() {
+        local_symbol_locations(&resolution.reference_uri, local, include_declaration)
+    } else if resolution.symbol.is_none() {
+        BTreeSet::new()
+    } else if local_alias_name(&resolution).is_some() {
         alias_locations(state, &resolution, include_declaration)
     } else {
         canonical_symbol_locations(state, &resolution, include_declaration)
@@ -1302,6 +1350,15 @@ fn workspace_references(state: &ServerState, message: &Value) -> Vec<Value> {
 
 fn prepare_symbol_rename(state: &ServerState, message: &Value) -> Option<Value> {
     let resolution = resolve_language_symbol(state, message)?;
+    if let Some(local) = resolution.local_symbol.as_ref() {
+        return Some(json!({
+            "range": {
+                "start": { "line": resolution.line, "character": resolution.start_character },
+                "end": { "line": resolution.line, "character": resolution.end_character }
+            },
+            "placeholder": local.name
+        }));
+    }
     let symbol = resolution.symbol.as_ref()?;
     if local_alias_name(&resolution).is_none() {
         let declaration_path = file_uri_to_path(&resolution.declaration_uri)?;
@@ -1348,6 +1405,14 @@ fn rename_symbol(state: &ServerState, message: &Value) -> Result<Value, String> 
 
     let resolution = resolve_language_symbol(state, message)
         .ok_or_else(|| "no renameable Axonyx symbol at this position".to_string())?;
+    if let Some(local) = resolution.local_symbol.as_ref() {
+        ensure_local_rename_has_no_collision(state, &resolution, local, new_name)?;
+        let locations = local_symbol_locations(&resolution.reference_uri, local, true);
+        if locations.is_empty() {
+            return Err(format!("no editable references found for `{}`", local.name));
+        }
+        return Ok(rename_workspace_edit(locations, new_name));
+    }
     let symbol = resolution
         .symbol
         .as_ref()
@@ -1378,6 +1443,59 @@ fn rename_symbol(state: &ServerState, message: &Value) -> Result<Value, String> 
         ));
     }
     Ok(rename_workspace_edit(locations, new_name))
+}
+
+fn local_symbol_locations(
+    uri: &str,
+    local: &AxLanguageLocalSymbol,
+    include_declaration: bool,
+) -> BTreeSet<LanguageLocation> {
+    local
+        .occurrences
+        .iter()
+        .filter(|occurrence| {
+            include_declaration
+                || occurrence.line != local.declaration.line
+                || occurrence.column != local.declaration.column
+        })
+        .map(|occurrence| occurrence_location(uri, occurrence))
+        .collect()
+}
+
+fn ensure_local_rename_has_no_collision(
+    state: &ServerState,
+    resolution: &ResolvedLanguageSymbol,
+    local: &AxLanguageLocalSymbol,
+    new_name: &str,
+) -> Result<(), String> {
+    let document = state
+        .documents
+        .get(&resolution.reference_uri)
+        .ok_or_else(|| "the local symbol source document is not open".to_string())?;
+    let path = file_uri_to_path(&resolution.reference_uri).unwrap_or_default();
+    let overlapping_local = ax_source_local_symbols(&document.text)
+        .into_iter()
+        .any(|candidate| {
+            candidate.name == new_name
+                && (candidate.declaration.line != local.declaration.line
+                    || candidate.declaration.column != local.declaration.column)
+                && candidate.scope_start < local.scope_end
+                && local.scope_start < candidate.scope_end
+        });
+    let module_collision = ax_source_symbols(&path.to_string_lossy(), &document.text)
+        .into_iter()
+        .any(|symbol| symbol.name == new_name)
+        || ax_source_imports(&path.to_string_lossy(), &document.text)
+            .into_iter()
+            .flat_map(|import| import.bindings)
+            .any(|binding| binding.local == new_name);
+    if overlapping_local || module_collision {
+        Err(format!(
+            "`{new_name}` would collide with a visible declaration in this scope"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn local_alias_name(resolution: &ResolvedLanguageSymbol) -> Option<&str> {
@@ -1624,6 +1742,10 @@ fn occurrence_location(uri: &str, occurrence: &AxLanguageIdentifierOccurrence) -
         start_character: occurrence.column.saturating_sub(1),
         end_character: occurrence.end_column.saturating_sub(1),
     }
+}
+
+fn occurrence_uri_location(uri: &str, occurrence: &AxLanguageIdentifierOccurrence) -> Value {
+    language_location_value(occurrence_location(uri, occurrence))
 }
 
 fn language_location_value(location: LanguageLocation) -> Value {
@@ -2282,6 +2404,19 @@ mod tests {
             messages.push(message);
         }
         messages
+    }
+
+    fn source_position(source: &str, needle: &str, occurrence: usize) -> Value {
+        let offset = source
+            .match_indices(needle)
+            .nth(occurrence)
+            .map(|(offset, _)| offset)
+            .expect("source occurrence should exist");
+        let before = &source[..offset];
+        let line = before.bytes().filter(|byte| *byte == b'\n').count();
+        let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+        let character = source[line_start..offset].encode_utf16().count();
+        json!({ "line": line, "character": character })
     }
 
     fn temp_workspace(name: &str) -> PathBuf {
@@ -3019,6 +3154,86 @@ mod tests {
             location["uri"] == path_to_file_uri(&namespace_page)
                 && location["range"]["start"]["line"] == 1
         }));
+
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn resolves_references_and_renames_locals_inside_their_lexical_scope() {
+        let root = temp_workspace("local-symbols");
+        let page = root.join("app/page.asx");
+        let source = r#"page Home(title: String) {
+  const heading = title
+  component Card(title: String) {
+    render ASX { <Copy>{title}</Copy> }
+  }
+  return ASX { <Card title={title}>title</Card> }
+}
+"#;
+        let page_uri = file_uri(&page);
+        let page_reference = source_position(source, "title", 5);
+        let component_reference = source_position(source, "title", 3);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(&root) } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": page_uri, "version": 1, "text": source } }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+                "params": { "textDocument": { "uri": page_uri }, "position": component_reference }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": page_reference,
+                    "context": { "includeDeclaration": true }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 4, "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": page_reference,
+                    "newName": "pageTitle"
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 5, "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": page_uri },
+                    "position": page_reference,
+                    "newName": "heading"
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let definition = messages.iter().find(|message| message["id"] == 2).unwrap();
+        assert_eq!(
+            definition["result"]["range"]["start"],
+            source_position(source, "title", 2)
+        );
+        let references = messages
+            .iter()
+            .find(|message| message["id"] == 3)
+            .and_then(|message| message["result"].as_array())
+            .unwrap();
+        assert_eq!(references.len(), 3);
+
+        let edits = messages
+            .iter()
+            .find(|message| message["id"] == 4)
+            .and_then(|message| message["result"]["changes"][&page_uri].as_array())
+            .unwrap();
+        assert_eq!(edits.len(), 3);
+        assert!(messages
+            .iter()
+            .find(|message| message["id"] == 5)
+            .and_then(|message| message.get("error"))
+            .is_some_and(|error| error["message"].as_str().unwrap().contains("collide")));
 
         fs::remove_dir_all(root).expect("workspace should be removed");
     }
