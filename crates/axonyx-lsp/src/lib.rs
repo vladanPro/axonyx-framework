@@ -2585,6 +2585,33 @@ mod tests {
     }
 
     #[test]
+    fn publishes_backend_expression_diagnostic_ranges() {
+        let uri = "file:///workspace/app/posts/domain.ax";
+        let source = "fn normalize(status: String) -> String {\n  return status ??\n}";
+        let messages = run(vec![
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": uri, "version": 1, "text": source } }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0]["params"]["diagnostics"][0]["range"],
+            json!({
+                "start": { "line": 1, "character": 16 },
+                "end": { "line": 1, "character": 18 }
+            })
+        );
+        assert_eq!(
+            messages[0]["params"]["diagnostics"][0]["code"],
+            "axonyx-backend-parse"
+        );
+    }
+
+    #[test]
     fn returns_hover_for_local_page_symbol() {
         let root = temp_workspace("local-hover");
         let page = root.join("app/page.asx");
