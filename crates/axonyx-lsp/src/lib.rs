@@ -3325,6 +3325,88 @@ mod tests {
     }
 
     #[test]
+    fn resolves_and_safely_renames_backend_local_symbols() {
+        let root = temp_workspace("backend-local-symbols");
+        let backend = root.join("app/posts/actions.ax");
+        let source = r#"action updateStatus(status: String) {
+  data current = db.posts.where({ status: status }).first()
+  const nextStatus = status ?? current.status
+  let result = nextStatus
+  return result
+}
+"#;
+        let backend_uri = file_uri(&backend);
+        let status_reference = source_position(source, "status", 3);
+        let result_reference = source_position(source, "result", 1);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(&root) } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": backend_uri, "version": 1, "text": source } }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "textDocument/definition",
+                "params": { "textDocument": { "uri": backend_uri }, "position": result_reference }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": backend_uri },
+                    "position": status_reference,
+                    "context": { "includeDeclaration": true }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 4, "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": backend_uri },
+                    "position": status_reference,
+                    "newName": "publishedStatus"
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 5, "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": backend_uri },
+                    "position": status_reference,
+                    "newName": "current"
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let definition = messages.iter().find(|message| message["id"] == 2).unwrap();
+        assert_eq!(
+            definition["result"]["range"]["start"],
+            source_position(source, "result", 0)
+        );
+        let references = messages
+            .iter()
+            .find(|message| message["id"] == 3)
+            .and_then(|message| message["result"].as_array())
+            .unwrap();
+        assert_eq!(references.len(), 3);
+
+        let edits = messages
+            .iter()
+            .find(|message| message["id"] == 4)
+            .and_then(|message| message["result"]["changes"][&backend_uri].as_array())
+            .unwrap();
+        assert_eq!(edits.len(), 3);
+        assert!(edits
+            .iter()
+            .all(|edit| edit["newText"] == "publishedStatus"));
+        assert!(messages
+            .iter()
+            .find(|message| message["id"] == 5)
+            .and_then(|message| message.get("error"))
+            .is_some_and(|error| error["message"].as_str().unwrap().contains("collide")));
+
+        fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
     fn canonical_rename_preserves_explicit_aliases_and_updates_namespace_members() {
         let root = temp_workspace("rename-canonical");
         let component = root.join("app/components/Card.asx");
