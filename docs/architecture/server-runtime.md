@@ -73,6 +73,36 @@ long the Tokio transport waits for active connection tasks after Ctrl+C or a
 hosted restart signal. The max connection limit rejects excess Tokio
 connections with `503 Service Unavailable` before they enter the route handler.
 
+## Storage Capabilities
+
+Apps declare persistent file authority as a named, bounded capability:
+
+```toml
+[server]
+max_body_bytes = "12mb"
+
+[storage.media]
+root = "storage/uploads"
+access = "read-write"
+max_file_bytes = "10mb"
+```
+
+`root` cannot be absolute, contain traversal components, or escape the
+project's `storage/` tree. `access` has no implicit default: the app must choose
+`read`, `write`, or `read-write`. Write-capable limits cannot exceed the whole
+request-body limit.
+
+At server startup, Axonyx opens each root once as a capability directory and
+registers it by name. Later runtime operations resolve `media` through that
+registry instead of accepting a caller-provided filesystem path. Browser-facing
+`FileRef` values identify content but grant no read or write authority by
+themselves; route authentication and the named capability remain separate
+checks.
+
+Multipart parsing and capability storage are implemented. Typed
+`File -> FileRef` action lowering remains the next boundary, so this config does
+not yet claim a complete public upload API.
+
 Tokio is now the default transport underneath, without changing the framework
 shape above it. The developer still writes:
 
