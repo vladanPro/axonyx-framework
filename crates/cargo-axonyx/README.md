@@ -102,6 +102,26 @@ in `Axonyx.toml`:
 max_body_bytes = "2mb"
 ```
 
+Persistent file handling uses named capabilities rather than arbitrary host
+paths:
+
+```toml
+[server]
+max_body_bytes = "12mb"
+
+[storage.media]
+root = "storage/uploads"
+access = "read-write"
+max_file_bytes = "10mb"
+```
+
+Storage roots must be project-relative directories below `storage/`. Access is
+explicitly `read`, `write`, or `read-write`, and a write-capable file limit
+cannot exceed the server request-body limit. `cargo ax check` rejects unsafe or
+malformed capabilities, while `cargo ax doctor` prints the effective registry.
+The server opens each configured root once at startup and keeps later file
+operations relative to that directory capability.
+
 Axonyx keeps the authoring model synchronous and structured; the runtime decides
 whether the request path uses the std transport, Tokio tasks, streaming, or a
 future worker layer behind the scenes.

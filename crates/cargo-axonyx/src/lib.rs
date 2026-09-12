@@ -48,6 +48,7 @@ use axonyx_runtime::server_prelude::{
     axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
     AxSseEvent,
 };
+use axonyx_runtime::storage_prelude::{AxCapabilityStorage, AxStorageAccess, AxStorageRegistry};
 use axonyx_runtime::{
     ax_state_wasm_bytes, backend_prelude as ax_backend_runtime, execute_preview_action_sources,
     execute_preview_action_sources_with_runtime, execute_preview_route_request_sources_validated,
@@ -759,7 +760,22 @@ struct DevServerState {
     root: PathBuf,
     preview_store: Mutex<AxPreviewStore>,
     runtime_config: AxServerRuntimeConfig,
+    storage_registry: AxStorageRegistry,
     database_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AxStorageCapabilityConfig {
+    name: String,
+    root: PathBuf,
+    access: AxStorageAccess,
+    max_file_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AxStorageConfigError {
+    capability: Option<String>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4121,6 +4137,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_request_logging_check(root));
     checks.push(doctor_api_response_validation_check(root));
     checks.push(doctor_database_runtime_policy_check(root));
+    checks.push(doctor_storage_capabilities_check(root));
     checks.push(doctor_error_boundaries_check(root));
     checks.push(doctor_aegis_config_check(root));
     checks.push(doctor_api_contracts_check(root));
@@ -4172,6 +4189,59 @@ fn doctor_database_runtime_policy_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message: error.to_string(),
             hint: Some("Run `cargo ax check` and fix invalid [db] runtime policy values."),
+        },
+    }
+}
+
+fn doctor_storage_capabilities_check(root: &Path) -> DoctorCheck {
+    let max_body_bytes = match configured_max_request_body_bytes(root) {
+        Ok(value) => value,
+        Err(message) => {
+            return DoctorCheck {
+                code: "storage-capabilities",
+                severity: DoctorSeverity::Error,
+                message,
+                hint: Some("Fix [server].max_body_bytes before validating storage capabilities."),
+            };
+        }
+    };
+    match configured_storage_capabilities(root, max_body_bytes) {
+        Ok(configs) if configs.is_empty() => DoctorCheck {
+            code: "storage-capabilities",
+            severity: DoctorSeverity::Ok,
+            message: "No storage capabilities are configured.".to_string(),
+            hint: Some(
+                "Add [storage.<name>] when the app needs bounded file persistence or uploads.",
+            ),
+        },
+        Ok(configs) => {
+            let summary = configs
+                .iter()
+                .map(|config| {
+                    format!(
+                        "{}={} ({}, {})",
+                        config.name,
+                        config.root.display(),
+                        storage_access_label(config.access),
+                        format_bytes(config.max_file_bytes as usize)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            DoctorCheck {
+                code: "storage-capabilities",
+                severity: DoctorSeverity::Ok,
+                message: format!("Storage capabilities: {summary}."),
+                hint: Some(
+                    "FileRef values identify stored content; route auth still controls access.",
+                ),
+            }
+        }
+        Err(errors) => DoctorCheck {
+            code: "storage-capabilities",
+            severity: DoctorSeverity::Error,
+            message: format_storage_config_errors(errors),
+            hint: Some("Run `cargo ax check` and fix invalid [storage.<name>] entries."),
         },
     }
 }
@@ -8688,6 +8758,29 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     }
 
+    let max_body_bytes = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("max_body_bytes"))
+        .and_then(|value| parse_max_body_bytes_value(value).ok())
+        .unwrap_or(MAX_REQUEST_BODY_BYTES);
+    if let Err(errors) = parse_storage_capabilities(&value, max_body_bytes) {
+        diagnostics.extend(errors.into_iter().map(|error| {
+            CheckDiagnostic {
+                file: display_path(&path),
+                line: error
+                    .capability
+                    .as_deref()
+                    .map(|name| line_for_config_table(&source, &format!("storage.{name}")))
+                    .unwrap_or_else(|| line_for_config_table(&source, "storage")),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-storage",
+                message: error.message,
+            }
+        }));
+    }
+
     Ok(diagnostics)
 }
 
@@ -8695,6 +8788,15 @@ fn line_for_config_key(source: &str, key: &str) -> usize {
     source
         .lines()
         .position(|line| line.trim_start().starts_with(key))
+        .map(|index| index + 1)
+        .unwrap_or(1)
+}
+
+fn line_for_config_table(source: &str, table: &str) -> usize {
+    let header = format!("[{table}]");
+    source
+        .lines()
+        .position(|line| line.trim() == header)
         .map(|index| index + 1)
         .unwrap_or(1)
 }
@@ -12443,10 +12545,13 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let bind = server_config.bind_addr();
     let preview_store = preview_store_from_content(&root)?;
     let database_required = project_uses_database_runtime(&root)?;
+    let storage_registry = configured_storage_registry(&root, runtime_config.max_body_bytes)
+        .map_err(anyhow::Error::msg)?;
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(preview_store),
         runtime_config,
+        storage_registry,
         database_required,
     });
 
@@ -12476,6 +12581,10 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     println!(
         "Request body limit: {}",
         format_bytes(runtime_config.max_body_bytes)
+    );
+    println!(
+        "Storage capabilities: {}.",
+        shared_state.storage_registry.len()
     );
     println!(
         "Request read timeout: {} second{}",
@@ -13478,6 +13587,7 @@ fn build_static_site_from_app_root(
         root: root.to_path_buf(),
         preview_store: Mutex::new(preview_store_from_content(root)?),
         runtime_config: AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?,
+        storage_registry: AxStorageRegistry::new(),
         database_required: project_uses_database_runtime(root)?,
     };
 
@@ -17833,6 +17943,200 @@ fn request_body_exceeds_limit(request: &AxHttpRequest, max_body_bytes: usize) ->
         || request_content_length(request).is_some_and(|length| length > max_body_bytes)
 }
 
+fn configured_storage_capabilities(
+    root: &Path,
+    max_body_bytes: usize,
+) -> std::result::Result<Vec<AxStorageCapabilityConfig>, Vec<AxStorageConfigError>> {
+    let path = root.join("Axonyx.toml");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(&path).map_err(|error| {
+        vec![AxStorageConfigError {
+            capability: None,
+            message: format!("failed to read '{}': {error}", path.display()),
+        }]
+    })?;
+    let value = match source.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(vec![AxStorageConfigError {
+                capability: None,
+                message: format!("failed to parse Axonyx.toml: {error}"),
+            }]);
+        }
+    };
+    parse_storage_capabilities(&value, max_body_bytes)
+}
+
+fn parse_storage_capabilities(
+    value: &toml::Value,
+    max_body_bytes: usize,
+) -> std::result::Result<Vec<AxStorageCapabilityConfig>, Vec<AxStorageConfigError>> {
+    let Some(storage) = value.get("storage") else {
+        return Ok(Vec::new());
+    };
+    let Some(storage) = storage.as_table() else {
+        return Err(vec![AxStorageConfigError {
+            capability: None,
+            message: "[storage] must contain named capability tables.".to_string(),
+        }]);
+    };
+
+    let mut configs = Vec::new();
+    let mut errors = Vec::new();
+    for (name, value) in storage {
+        match parse_storage_capability(name, value, max_body_bytes) {
+            Ok(config) => configs.push(config),
+            Err(message) => errors.push(AxStorageConfigError {
+                capability: Some(name.clone()),
+                message,
+            }),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(configs)
+    } else {
+        Err(errors)
+    }
+}
+
+fn parse_storage_capability(
+    name: &str,
+    value: &toml::Value,
+    max_body_bytes: usize,
+) -> std::result::Result<AxStorageCapabilityConfig, String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(format!("storage capability name `{name}` is invalid."));
+    }
+    let table = value
+        .as_table()
+        .ok_or_else(|| format!("[storage.{name}] must be a table."))?;
+    for key in table.keys() {
+        if !matches!(key.as_str(), "root" | "access" | "max_file_bytes") {
+            return Err(format!(
+                "[storage.{name}].{key} is not supported; use root, access, or max_file_bytes."
+            ));
+        }
+    }
+
+    let root = table
+        .get("root")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| format!("[storage.{name}].root must be a string."))?;
+    let root = validate_storage_root(name, root)?;
+    let access = table
+        .get("access")
+        .and_then(toml::Value::as_str)
+        .and_then(parse_storage_access)
+        .ok_or_else(|| {
+            format!("[storage.{name}].access must be \"read\", \"write\", or \"read-write\".")
+        })?;
+    let max_file_bytes = table
+        .get("max_file_bytes")
+        .ok_or_else(|| format!("[storage.{name}].max_file_bytes is required."))
+        .and_then(|value| {
+            parse_max_body_bytes_value(value).map_err(|_| {
+                format!(
+                    "[storage.{name}].max_file_bytes must be a positive integer or byte-size string."
+                )
+            })
+        })?;
+    if access.can_write() && max_file_bytes > max_body_bytes {
+        return Err(format!(
+            "[storage.{name}].max_file_bytes ({}) cannot exceed [server].max_body_bytes ({}).",
+            format_bytes(max_file_bytes),
+            format_bytes(max_body_bytes)
+        ));
+    }
+
+    Ok(AxStorageCapabilityConfig {
+        name: name.to_string(),
+        root,
+        access,
+        max_file_bytes: max_file_bytes as u64,
+    })
+}
+
+fn parse_storage_access(value: &str) -> Option<AxStorageAccess> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "read" => Some(AxStorageAccess::Read),
+        "write" => Some(AxStorageAccess::Write),
+        "read-write" => Some(AxStorageAccess::ReadWrite),
+        _ => None,
+    }
+}
+
+fn storage_access_label(access: AxStorageAccess) -> &'static str {
+    match access {
+        AxStorageAccess::Read => "read",
+        AxStorageAccess::Write => "write",
+        AxStorageAccess::ReadWrite => "read-write",
+    }
+}
+
+fn validate_storage_root(name: &str, value: &str) -> std::result::Result<PathBuf, String> {
+    let path = Path::new(value);
+    let mut components = path.components();
+    if value.trim().is_empty()
+        || value.contains('\\')
+        || path.is_absolute()
+        || !matches!(components.next(), Some(std::path::Component::Normal(root)) if root == "storage")
+        || components.any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "[storage.{name}].root must be a project-relative path inside storage/ without `.` or `..`."
+        ));
+    }
+    if path.components().count() < 2 {
+        return Err(format!(
+            "[storage.{name}].root must name a directory below storage/, not the storage root itself."
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn configured_storage_registry(
+    root: &Path,
+    max_body_bytes: usize,
+) -> std::result::Result<AxStorageRegistry, String> {
+    let configs = configured_storage_capabilities(root, max_body_bytes)
+        .map_err(format_storage_config_errors)?;
+    let mut registry = AxStorageRegistry::new();
+    for config in configs {
+        let storage = AxCapabilityStorage::open_with_access(
+            &config.name,
+            root.join(&config.root),
+            config.max_file_bytes,
+            config.access,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to open storage capability `{}`: {error}",
+                config.name
+            )
+        })?;
+        registry
+            .register(storage)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(registry)
+}
+
+fn format_storage_config_errors(errors: Vec<AxStorageConfigError>) -> String {
+    errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn configured_max_request_body_bytes(root: &Path) -> std::result::Result<usize, String> {
     match axonyx_config_value(root, "server", "max_body_bytes") {
         Some(value) => parse_max_body_bytes_value(&value),
@@ -20403,6 +20707,7 @@ mod tests {
             root: root.to_path_buf(),
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::default(),
+            storage_registry: AxStorageRegistry::new(),
             database_required: project_uses_database_runtime(root).unwrap_or(false),
         }
     }
@@ -22700,6 +23005,110 @@ component ThemeSwitch() {
     }
 
     #[test]
+    fn storage_config_builds_named_capability_registry() {
+        let root = make_temp_dir("storage-capability-registry");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"[app]
+name = "demo"
+
+[server]
+max_body_bytes = "2mb"
+
+[storage.media]
+root = "storage/uploads"
+access = "read-write"
+max_file_bytes = "1mb"
+"#,
+        )
+        .expect("config should write");
+
+        let configs = configured_storage_capabilities(&root, 2 * 1024 * 1024)
+            .expect("storage config should parse");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "media");
+        assert_eq!(configs[0].root, PathBuf::from("storage/uploads"));
+        assert_eq!(configs[0].access, AxStorageAccess::ReadWrite);
+        assert_eq!(configs[0].max_file_bytes, 1024 * 1024);
+
+        let registry = configured_storage_registry(&root, 2 * 1024 * 1024)
+            .expect("storage registry should open");
+        assert_eq!(registry.names().collect::<Vec<_>>(), vec!["media"]);
+        assert!(root.join("storage/uploads").is_dir());
+
+        drop(registry);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn storage_config_rejects_roots_outside_storage_tree() {
+        for invalid_root in ["../private", "public/uploads", "storage/../private"] {
+            let value = format!(
+                r#"[storage.media]
+root = "{invalid_root}"
+access = "write"
+max_file_bytes = "512kb"
+"#
+            )
+            .parse::<toml::Value>()
+            .expect("config should parse as TOML");
+
+            let errors = parse_storage_capabilities(&value, 1024 * 1024)
+                .expect_err("unsafe storage root should fail");
+            assert!(errors[0].message.contains("inside storage/"));
+        }
+    }
+
+    #[test]
+    fn storage_config_requires_explicit_access_and_respects_body_limit() {
+        let missing_access = r#"[storage.media]
+root = "storage/uploads"
+max_file_bytes = "512kb"
+"#
+        .parse::<toml::Value>()
+        .expect("config should parse as TOML");
+        let errors = parse_storage_capabilities(&missing_access, 1024 * 1024)
+            .expect_err("missing access should fail");
+        assert!(errors[0].message.contains("access"));
+
+        let oversized = r#"[storage.media]
+root = "storage/uploads"
+access = "write"
+max_file_bytes = "2mb"
+"#
+        .parse::<toml::Value>()
+        .expect("config should parse as TOML");
+        let errors = parse_storage_capabilities(&oversized, 1024 * 1024)
+            .expect_err("write capability above request limit should fail");
+        assert!(errors[0].message.contains("cannot exceed"));
+    }
+
+    #[test]
+    fn check_reports_invalid_storage_capability_at_its_table() {
+        let root = make_temp_dir("invalid-storage-capability");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[storage.media]\nroot = \"../uploads\"\naccess = \"write\"\nmax_file_bytes = \"512kb\"\n",
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/page.asx"),
+            "page Home() { return ASX { <Copy>Home</Copy> } }\n",
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-config-storage"
+                && diagnostic.line == 4
+                && diagnostic.message.contains("inside storage/")
+        }));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn check_app_sources_reports_invalid_request_timeout_config() {
         let root = make_temp_dir("invalid-request-timeout-config");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -22875,6 +23284,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -22938,6 +23348,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -22966,6 +23377,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -26369,6 +26781,37 @@ axonyx-runtime = "0.1.14"
     }
 
     #[test]
+    fn doctor_reports_effective_storage_capabilities() {
+        let root = make_temp_dir("doctor-storage-capabilities");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"[app]
+name = "demo"
+
+[server]
+max_body_bytes = "2mb"
+
+[storage.media]
+root = "storage/uploads"
+access = "read-write"
+max_file_bytes = "1mb"
+"#,
+        )
+        .expect("config should write");
+
+        let check = doctor_storage_capabilities_check(&root);
+        assert_eq!(check.severity, DoctorSeverity::Ok);
+        assert!(
+            check.message.contains("media=storage\\uploads")
+                || check.message.contains("media=storage/uploads")
+        );
+        assert!(check.message.contains("read-write"));
+        assert!(check.message.contains("1 MiB"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn doctor_reports_request_timeout_config() {
         let root = make_temp_dir("doctor-request-timeout");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -27330,6 +27773,7 @@ axonyx-runtime = "0.1.0"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -27562,6 +28006,7 @@ axonyx-runtime = "0.1.0"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
