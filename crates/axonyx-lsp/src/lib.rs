@@ -140,6 +140,8 @@ fn handle_message<W: Write>(
                                 "change": 1
                             },
                             "documentFormattingProvider": true,
+                            "documentSymbolProvider": true,
+                            "workspaceSymbolProvider": true,
                             "definitionProvider": true,
                             "referencesProvider": true,
                             "renameProvider": {
@@ -239,6 +241,16 @@ fn handle_message<W: Write>(
                     .map(|document| formatting_edits(&document.text))
                     .unwrap_or_default();
                 write_response(writer, id, Value::Array(edits))?;
+            }
+        }
+        Some("textDocument/documentSymbol") => {
+            if let Some(id) = id {
+                write_response(writer, id, Value::Array(document_symbols(state, &message)))?;
+            }
+        }
+        Some("workspace/symbol") => {
+            if let Some(id) = id {
+                write_response(writer, id, Value::Array(workspace_symbols(state, &message)))?;
             }
         }
         Some("textDocument/definition") => {
@@ -1230,6 +1242,104 @@ fn completion_item_kind(kind: AxLanguageSymbolKind) -> u8 {
         AxLanguageSymbolKind::Type => 22,
         AxLanguageSymbolKind::Scope => 9,
     }
+}
+
+fn symbol_information_kind(kind: AxLanguageSymbolKind) -> u8 {
+    match kind {
+        AxLanguageSymbolKind::Page
+        | AxLanguageSymbolKind::Function
+        | AxLanguageSymbolKind::Query
+        | AxLanguageSymbolKind::Action
+        | AxLanguageSymbolKind::Job => 12,
+        AxLanguageSymbolKind::Layout | AxLanguageSymbolKind::Component => 5,
+        AxLanguageSymbolKind::Type => 23,
+        AxLanguageSymbolKind::Scope => 3,
+    }
+}
+
+fn document_symbols(state: &ServerState, message: &Value) -> Vec<Value> {
+    let Some(uri) = message
+        .pointer("/params/textDocument/uri")
+        .and_then(Value::as_str)
+    else {
+        return Vec::new();
+    };
+    let Some(document) = state.documents.get(uri) else {
+        return Vec::new();
+    };
+    let path = file_uri_to_path(uri).unwrap_or_default();
+
+    ax_source_symbols(&path.to_string_lossy(), &document.text)
+        .into_iter()
+        .map(|symbol| {
+            let line = symbol.line.saturating_sub(1);
+            let line_length = utf16_line_length(&document.text, line).unwrap_or_default();
+            let start_character = symbol.column.saturating_sub(1);
+            let end_character = start_character + symbol.name.encode_utf16().count();
+            json!({
+                "name": symbol.name,
+                "detail": symbol.signature,
+                "kind": symbol_information_kind(symbol.kind),
+                "range": {
+                    "start": { "line": line, "character": 0 },
+                    "end": { "line": line, "character": line_length }
+                },
+                "selectionRange": {
+                    "start": { "line": line, "character": start_character },
+                    "end": { "line": line, "character": end_character }
+                }
+            })
+        })
+        .collect()
+}
+
+fn workspace_symbols(state: &ServerState, message: &Value) -> Vec<Value> {
+    let query = message
+        .pointer("/params/query")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut symbols = workspace_documents(state)
+        .into_iter()
+        .flat_map(|document| {
+            let container = state
+                .workspace_root
+                .as_deref()
+                .and_then(|root| document.path.strip_prefix(root).ok())
+                .unwrap_or(&document.path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            ax_source_symbols(&document.path.to_string_lossy(), &document.text)
+                .into_iter()
+                .filter(|symbol| symbol.name.to_ascii_lowercase().contains(&query))
+                .map(move |symbol| {
+                    json!({
+                        "name": symbol.name,
+                        "kind": symbol_information_kind(symbol.kind),
+                        "location": symbol_location(&document.uri, &symbol),
+                        "containerName": container
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    symbols.sort_by(|left, right| {
+        left["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .cmp(
+                &right["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase(),
+            )
+            .then_with(|| {
+                left["containerName"]
+                    .as_str()
+                    .cmp(&right["containerName"].as_str())
+            })
+    });
+    symbols
 }
 
 fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<ResolvedLanguageSymbol> {
@@ -2466,6 +2576,14 @@ mod tests {
             true
         );
         assert_eq!(
+            messages[0]["result"]["capabilities"]["documentSymbolProvider"],
+            true
+        );
+        assert_eq!(
+            messages[0]["result"]["capabilities"]["workspaceSymbolProvider"],
+            true
+        );
+        assert_eq!(
             messages[0]["result"]["capabilities"]["definitionProvider"],
             true
         );
@@ -2489,6 +2607,101 @@ mod tests {
             messages[1],
             json!({ "jsonrpc": "2.0", "id": 2, "result": null })
         );
+    }
+
+    #[test]
+    fn returns_document_symbols_with_signatures_and_utf16_ranges() {
+        let uri = "file:///workspace/app/page.asx";
+        let source = "type Post { title: String }\n\npage Posts() { return ASX { <main /> } }\n";
+        let messages = run(vec![
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": { "uri": uri, "version": 1, "text": source } }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "textDocument/documentSymbol",
+                "params": { "textDocument": { "uri": uri } }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let result = messages
+            .iter()
+            .find(|message| message["id"] == 1)
+            .and_then(|message| message["result"].as_array())
+            .expect("document symbols should be returned");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["name"], "Post");
+        assert_eq!(result[0]["kind"], 23);
+        assert_eq!(result[0]["detail"], "type Post");
+        assert_eq!(
+            result[0]["selectionRange"]["start"],
+            json!({ "line": 0, "character": 5 })
+        );
+        assert_eq!(result[1]["name"], "Posts");
+        assert_eq!(result[1]["kind"], 12);
+        assert_eq!(
+            result[1]["range"]["end"],
+            json!({ "line": 2, "character": source.lines().nth(2).unwrap().encode_utf16().count() })
+        );
+    }
+
+    #[test]
+    fn searches_workspace_symbols_and_prefers_open_document_text() {
+        let root = temp_workspace("workspace-symbols");
+        let component = root.join("app/components/Card.asx");
+        let domain = root.join("app/domain.ax");
+        fs::write(
+            &component,
+            "component StaleCard() { render ASX { <article /> } }",
+        )
+        .expect("component should be written");
+        fs::write(&domain, "export fn visible() -> Bool {\n  return true\n}\n")
+            .expect("domain should be written");
+        let component_uri = file_uri(&component);
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(&root) } }),
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": { "textDocument": {
+                    "uri": component_uri,
+                    "version": 2,
+                    "text": "component NewCard() { render ASX { <article /> } }"
+                } }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "workspace/symbol",
+                "params": { "query": "new" }
+            }),
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "workspace/symbol",
+                "params": { "query": "VIS" }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        let new_symbols = messages
+            .iter()
+            .find(|message| message["id"] == 2)
+            .and_then(|message| message["result"].as_array())
+            .unwrap();
+        assert_eq!(new_symbols.len(), 1);
+        assert_eq!(new_symbols[0]["name"], "NewCard");
+        assert_eq!(new_symbols[0]["containerName"], "app/components/Card.asx");
+        assert_eq!(new_symbols[0]["location"]["uri"], component_uri);
+
+        let visible_symbols = messages
+            .iter()
+            .find(|message| message["id"] == 3)
+            .and_then(|message| message["result"].as_array())
+            .unwrap();
+        assert_eq!(visible_symbols.len(), 1);
+        assert_eq!(visible_symbols[0]["name"], "visible");
+        assert_eq!(visible_symbols[0]["kind"], 12);
+
+        fs::remove_dir_all(root).expect("workspace should be removed");
     }
 
     #[test]
