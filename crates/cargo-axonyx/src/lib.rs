@@ -17212,6 +17212,7 @@ async fn axum_request_to_dev_request(
         target,
         headers,
         body,
+        multipart: None,
     })
 }
 
@@ -17718,6 +17719,7 @@ fn read_http_request(
         target,
         headers,
         body,
+        multipart: None,
     }))
 }
 
@@ -17798,6 +17800,7 @@ fn parse_http_request_buffer(buffer: &[u8]) -> Result<Option<AxHttpRequest>> {
         target,
         headers,
         body,
+        multipart: None,
     }))
 }
 
@@ -22879,6 +22882,7 @@ route GET "/api/posts"
             target: "/logo.svg".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -22941,6 +22945,7 @@ route GET "/api/posts"
             target: "/_ax/state/snapshot.json".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -22968,6 +22973,7 @@ route GET "/api/posts"
             target: axonyx_runtime::AX_STATE_WASM_PATH.to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -27092,12 +27098,14 @@ axonyx-runtime = "0.1.0"
             .into_iter()
             .collect(),
             body: Vec::new(),
+            multipart: None,
         };
         let body_request = AxHttpRequest {
             method: "POST".to_string(),
             target: "/api/posts".to_string(),
             headers: Default::default(),
             body: vec![0; MAX_REQUEST_BODY_BYTES + 1],
+            multipart: None,
         };
 
         assert!(request_body_exceeds_limit(
@@ -27304,6 +27312,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         assert!(suppress_response_body_for_method(&request.method));
@@ -27328,6 +27337,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -27350,6 +27360,7 @@ axonyx-runtime = "0.1.0"
             target: "/__axonyx/health?probe=1".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -27380,6 +27391,7 @@ axonyx-runtime = "0.1.0"
             target: "/__axonyx/ready?probe=1".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -27424,6 +27436,7 @@ axonyx-runtime = "0.1.0"
             target: "/__axonyx/ready".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -27460,6 +27473,7 @@ axonyx-runtime = "0.1.0"
             target: "/__axonyx/ready".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -27490,6 +27504,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::html(200, "<main>ok</main>");
 
@@ -27520,6 +27535,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::from([("accept-encoding".to_string(), "br, gzip".to_string())]),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::html(200, "Axonyx ".repeat(512));
 
@@ -27553,6 +27569,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::from([("accept-encoding".to_string(), "gzip".to_string())]),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::html(200, "Axonyx ".repeat(512));
 
@@ -27571,6 +27588,7 @@ axonyx-runtime = "0.1.0"
             target: "/docs".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::html(200, "Axonyx docs");
 
@@ -27605,6 +27623,7 @@ axonyx-runtime = "0.1.0"
             target: "/api/posts".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::json(201, &serde_json::json!({ "ok": true }))
             .expect("json response should render");
@@ -28942,6 +28961,7 @@ query loadFeatured(status: String) -> Post[] {
             target: "/api/posts".to_string(),
             headers: std::collections::BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
@@ -29030,6 +29050,7 @@ page Posts() {
             target: "/api/posts/sqlite-draft?status=draft".to_string(),
             headers: std::collections::BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
