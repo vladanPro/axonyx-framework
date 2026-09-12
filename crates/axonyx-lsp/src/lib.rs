@@ -453,11 +453,7 @@ fn symbol_hover(state: &ServerState, message: &Value) -> Option<Value> {
     Some(json!({
         "contents": {
             "kind": "markdown",
-            "value": format!(
-                "{}\n\n{}",
-                fenced_axonyx_code(&symbol.signature),
-                metadata.join("\n\n")
-            )
+            "value": symbol_markdown(symbol, &metadata.join("\n\n"))
         },
         "range": {
             "start": {
@@ -1143,13 +1139,14 @@ fn completion_item(
     end_character: usize,
     sort_priority: usize,
 ) -> Value {
+    let metadata = format!("**Source:** `{}`", escape_inline_code(source));
     json!({
         "label": label,
         "kind": completion_item_kind(symbol.kind),
         "detail": format!("{} ({})", symbol.signature, source),
         "documentation": {
             "kind": "markdown",
-            "value": format!("{}\n\n**Source:** `{}`", fenced_axonyx_code(&symbol.signature), escape_inline_code(source))
+            "value": symbol_markdown(symbol, &metadata)
         },
         "sortText": format!("{sort_priority}-{}", label.to_ascii_lowercase()),
         "filterText": label,
@@ -1161,6 +1158,17 @@ fn completion_item(
             "newText": label
         }
     })
+}
+
+fn symbol_markdown(symbol: &AxLanguageSymbol, metadata: &str) -> String {
+    let mut sections = vec![fenced_axonyx_code(&symbol.signature)];
+    if let Some(documentation) = symbol.documentation.as_deref() {
+        if !documentation.trim().is_empty() {
+            sections.push(documentation.to_string());
+        }
+    }
+    sections.push(metadata.to_string());
+    sections.join("\n\n")
 }
 
 fn unresolved_import_completion_item(
@@ -2730,7 +2738,7 @@ mod tests {
         let component = root.join("app/components/Card.asx");
         fs::write(
             &component,
-            "component Card(title: String = \"\") { render ASX { <article /> } }",
+            "/// Renders content on a forged surface.\ncomponent Card(title: String = \"\") { render ASX { <article /> } }",
         )
         .expect("component should be written");
         let root_uri = file_uri(&root);
@@ -2770,6 +2778,12 @@ mod tests {
         assert!(items[0]["detail"].as_str().is_some_and(|detail| detail
             .contains("component Card(title: String = \"\")")
             && detail.contains("@/components/Card")));
+        assert!(items[0]["documentation"]["value"]
+            .as_str()
+            .is_some_and(
+                |value| value.contains("Renders content on a forged surface.")
+                    && value.contains("**Source:** `imported from @/components/Card`")
+            ));
         assert_eq!(items[0]["textEdit"]["newText"], "Panel");
         fs::remove_dir_all(root).expect("workspace should be removed");
     }
@@ -2924,7 +2938,7 @@ mod tests {
         fs::create_dir_all(root.join("app/posts")).expect("route should be created");
         fs::write(
             &domain,
-            "export type Post {\n  title: String\n}\n\nexport fn visible() -> Bool {\n  return true\n}",
+            "export type Post {\n  title: String\n}\n\n/// Returns whether a post is visible.\nexport fn visible() -> Bool {\n  return true\n}",
         )
         .expect("domain should be written");
         let root_uri = file_uri(&root);
@@ -2968,6 +2982,10 @@ mod tests {
         assert!(items[0]["detail"]
             .as_str()
             .is_some_and(|detail| detail.contains("Domain from ./domain.ax")));
+        assert!(items[0]["documentation"]["value"]
+            .as_str()
+            .is_some_and(|value| value.contains("Returns whether a post is visible.")
+                && value.contains("**Source:** `Domain from ./domain.ax`")));
         assert_eq!(items[0]["textEdit"]["newText"], "visible");
         fs::remove_dir_all(root).expect("workspace should be removed");
     }
@@ -3589,7 +3607,7 @@ mod tests {
         let component = root.join("app/components/Card.asx");
         fs::write(
             &component,
-            "component Card {\n  render ASX {\n    <article />\n  }\n}",
+            "/// Renders content on a forged surface.\ncomponent Card {\n  render ASX {\n    <article />\n  }\n}",
         )
         .expect("component should be written");
         let root_uri = file_uri(&root);
@@ -3641,8 +3659,8 @@ mod tests {
             assert_eq!(
                 response["result"]["range"],
                 json!({
-                    "start": { "line": 0, "character": 10 },
-                    "end": { "line": 0, "character": 14 }
+                    "start": { "line": 1, "character": 10 },
+                    "end": { "line": 1, "character": 14 }
                 })
             );
         }
@@ -3651,6 +3669,7 @@ mod tests {
         assert!(hover["contents"]["value"]
             .as_str()
             .is_some_and(|value| value.contains("```ax\ncomponent Card\n```")
+                && value.contains("Renders content on a forged surface.")
                 && value.contains("**Kind:** `component`")
                 && value.contains("**Alias:** `Panel` -> `Card`")
                 && value.contains("**Import:** `@/components/Card`")));
@@ -3670,7 +3689,10 @@ mod tests {
         let route = root.join("app/posts/loader.ax");
         let domain = root.join("app/posts/domain.ax");
         fs::create_dir_all(root.join("app/posts")).expect("route should be created");
-        fs::write(&domain, "export fn visible() -> Bool {\n  return true\n}")
+        fs::write(
+            &domain,
+            "/// Returns whether a post is visible.\nexport fn visible() -> Bool {\n  return true\n}",
+        )
             .expect("domain should be written");
         let root_uri = file_uri(&root);
         let route_uri = file_uri(&route);
@@ -3710,14 +3732,15 @@ mod tests {
         assert_eq!(
             messages[2]["result"]["range"],
             json!({
-                "start": { "line": 0, "character": 10 },
-                "end": { "line": 0, "character": 17 }
+                "start": { "line": 1, "character": 10 },
+                "end": { "line": 1, "character": 17 }
             })
         );
         let hover = &messages[3]["result"];
         assert!(hover["contents"]["value"]
             .as_str()
             .is_some_and(|value| value.contains("```ax\nfn visible() -> Bool\n```")
+                && value.contains("Returns whether a post is visible.")
                 && value.contains("**Kind:** `function`")
                 && value.contains("**Namespace:** `Domain`")
                 && value.contains("**Import:** `./domain.ax`")));
