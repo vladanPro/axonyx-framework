@@ -44,14 +44,20 @@ use axonyx_core::state_prelude::{
     build_state_manifest_with_scope, build_state_manifest_with_scope_mapper, AxStatePersistence,
     AxStateValue,
 };
+#[cfg(test)]
+use axonyx_runtime::execute_preview_action_sources;
 use axonyx_runtime::server_prelude::{
     axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
     AxSseEvent,
 };
+#[cfg(test)]
+use axonyx_runtime::server_prelude::{AxIncomingFile, AxMultipartForm};
 use axonyx_runtime::storage_prelude::{AxCapabilityStorage, AxStorageAccess, AxStorageRegistry};
 use axonyx_runtime::{
-    ax_state_wasm_bytes, backend_prelude as ax_backend_runtime, execute_preview_action_sources,
-    execute_preview_action_sources_with_runtime, execute_preview_route_request_sources_validated,
+    ax_state_wasm_bytes, backend_prelude as ax_backend_runtime,
+    execute_preview_action_request_sources_with_runtime_and_storage,
+    execute_preview_action_request_sources_with_storage,
+    execute_preview_route_request_sources_validated,
     execute_preview_route_request_sources_with_runtime_validated,
     preview_ax_route_with_request_context_and_imports,
     preview_ax_route_with_request_context_and_runtime_and_imports, AxApiResponseValidationMode,
@@ -8227,6 +8233,7 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     diagnostics.extend(check_axonyx_config(root)?);
     diagnostics.extend(check_route_manifest(root)?);
     diagnostics.extend(check_action_patch_contracts(root)?);
+    diagnostics.extend(check_storage_action_contracts(root)?);
     diagnostics.extend(check_query_function_call_contracts(root)?);
     diagnostics.extend(check_generated_database_contract(root)?);
 
@@ -8434,6 +8441,81 @@ fn check_action_patch_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     }
 
     Ok(diagnostics)
+}
+
+fn check_storage_action_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let Ok(max_body_bytes) = configured_max_request_body_bytes(root) else {
+        return Ok(Vec::new());
+    };
+    let Ok(configs) = configured_storage_capabilities(root, max_body_bytes) else {
+        return Ok(Vec::new());
+    };
+    let capabilities = configs
+        .iter()
+        .map(|config| (config.name.as_str(), config.access))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut sources = Vec::new();
+    collect_backend_sources(root, &mut sources)?;
+    let mut diagnostics = Vec::new();
+
+    for (name, source) in sources {
+        let Ok(document) = parse_backend_ax(&source) else {
+            continue;
+        };
+        let Ok(plan) = lower_backend_document(&document) else {
+            continue;
+        };
+        let file = backend_source_display_path(root, &name);
+
+        for handler in &plan.handlers {
+            for step in &handler.steps {
+                let AxStepPlan::Let {
+                    value: AxValuePlan::StorageSave { capability, .. },
+                    ..
+                } = step
+                else {
+                    continue;
+                };
+                let line = line_for_source_pattern(&source, "Storage.save(");
+                match capabilities.get(capability.as_str()) {
+                    None => diagnostics.push(CheckDiagnostic {
+                        file: file.clone(),
+                        line,
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-storage-capability",
+                        message: format!(
+                            "action `{}` writes to unknown storage capability `{capability}`. Add [storage.{capability}] to Axonyx.toml.",
+                            handler.name
+                        ),
+                    }),
+                    Some(access) if !access.can_write() => diagnostics.push(CheckDiagnostic {
+                        file: file.clone(),
+                        line,
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-storage-access",
+                        message: format!(
+                            "action `{}` cannot write to read-only storage capability `{capability}`.",
+                            handler.name
+                        ),
+                    }),
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+
+    Ok(diagnostics)
+}
+
+fn backend_source_display_path(root: &Path, relative: &str) -> String {
+    ["app", "routes", "jobs"]
+        .into_iter()
+        .map(|directory| root.join(directory).join(relative))
+        .find(|path| path.is_file())
+        .map(|path| display_path(&path))
+        .unwrap_or_else(|| relative.to_string())
 }
 
 fn collect_route_state_manifest_from_route_item(
@@ -10645,6 +10727,7 @@ fn is_supported_backend_return_contract(ty: &str) -> bool {
             | "Number"
             | "Json"
             | "Null"
+            | "FileRef"
             | "string"
             | "bool"
             | "boolean"
@@ -10691,6 +10774,7 @@ fn is_builtin_backend_return_type(ty: &str) -> bool {
             | "Number"
             | "Json"
             | "Null"
+            | "FileRef"
             | "string"
             | "bool"
             | "boolean"
@@ -10740,6 +10824,10 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
             value: AxValuePlan::Query(query),
             ..
         } => query_uses_input_scope(query),
+        AxStepPlan::Let {
+            value: AxValuePlan::StorageSave { .. },
+            ..
+        } => true,
         AxStepPlan::Transaction { operations } => operations
             .iter()
             .any(transaction_operation_uses_input_scope),
@@ -10836,7 +10924,16 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
                 .iter()
                 .any(transaction_operation_uses_signed_session),
             AxStepPlan::Send { payload, .. } => payload.code.contains("Auth.signedSession"),
-            AxStepPlan::Let { .. } | AxStepPlan::Delete { .. } | AxStepPlan::Return(_) => false,
+            AxStepPlan::Let {
+                value: AxValuePlan::StorageSave { .. },
+                ..
+            }
+            | AxStepPlan::Let {
+                value: AxValuePlan::Query(_),
+                ..
+            }
+            | AxStepPlan::Delete { .. }
+            | AxStepPlan::Return(_) => false,
         })
     })
 }
@@ -10957,6 +11054,10 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
                 collect_env_refs_from_expr(&filter.value, refs);
             }
         }
+        AxStepPlan::Let {
+            value: AxValuePlan::StorageSave { .. },
+            ..
+        } => {}
         AxStepPlan::Require { value, fallback } => {
             collect_env_refs_from_expr(value, refs);
             if let Some(fallback) = fallback {
@@ -12736,6 +12837,10 @@ fn build_compiled_production_binary(
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let database_required = project_uses_database_runtime(root)?;
+    let runtime_config = AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?;
+    let storage_configs = configured_storage_capabilities(root, runtime_config.max_body_bytes)
+        .map_err(format_storage_config_errors)
+        .map_err(anyhow::Error::msg)?;
     let validate_api_responses = configured_api_response_validation(root)
         .map_err(anyhow::Error::msg)?
         .enabled(false);
@@ -12744,9 +12849,12 @@ fn build_compiled_production_binary(
         &signal_aliases,
         &data_bindings,
         &page_renderers,
-        &database_runtime_defaults,
-        database_required,
-        validate_api_responses,
+        CompiledProductionOptions {
+            database_runtime_defaults: &database_runtime_defaults,
+            database_required,
+            validate_api_responses,
+            storage_configs: &storage_configs,
+        },
     );
     fs::write(&source_path, source).with_context(|| {
         format!(
@@ -12755,8 +12863,12 @@ fn build_compiled_production_binary(
         )
     })?;
 
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--bin", "axonyx-production"])
+    let mut command = Command::new("cargo");
+    command.args(["build", "--release", "--bin", "axonyx-production"]);
+    if !storage_configs.is_empty() {
+        command.args(["--features", "axonyx-runtime/storage"]);
+    }
+    let status = command
         .current_dir(root)
         .status()
         .context("failed to invoke cargo for the compiled production server")?;
@@ -12972,15 +13084,40 @@ fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
     Ok(steps)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CompiledProductionOptions<'a> {
+    database_runtime_defaults: &'a str,
+    database_required: bool,
+    validate_api_responses: bool,
+    storage_configs: &'a [AxStorageCapabilityConfig],
+}
+
 fn compiled_production_source(
     dist_literal: &str,
     signal_aliases: &[(String, String, String)],
     data_bindings: &[CompiledDataBinding],
     page_renderers: &[CompiledPageRenderer],
-    database_runtime_defaults: &str,
-    database_required: bool,
-    validate_api_responses: bool,
+    options: CompiledProductionOptions<'_>,
 ) -> String {
+    let CompiledProductionOptions {
+        database_runtime_defaults,
+        database_required,
+        validate_api_responses,
+        storage_configs,
+    } = options;
+    let storage_import = if storage_configs.is_empty() {
+        "use axonyx_runtime::server_prelude::{AxFileStorage, AxUnavailableFileStorage};\n"
+            .to_string()
+    } else {
+        "use axonyx_runtime::server_prelude::AxFileStorage;\nuse axonyx_runtime::storage_prelude::{AxCapabilityStorage, AxStorageAccess, AxStorageError, AxStorageRegistry};\n"
+            .to_string()
+    };
+    let storage_init = if storage_configs.is_empty() {
+        "    let storage = Arc::new(AxUnavailableFileStorage);\n".to_string()
+    } else {
+        "    let storage = Arc::new(configured_file_storage()?);\n".to_string()
+    };
+    let storage_bootstrap = compiled_storage_bootstrap(storage_configs);
     let signal_match_arms = signal_aliases
         .iter()
         .map(|(route, alias, canonical)| {
@@ -13062,7 +13199,7 @@ use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
 use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
-use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
+{storage_import}use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
 
 #[path = "../generated/backend.rs"]
@@ -13087,8 +13224,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let dist = PathBuf::from({dist_literal});
     let mut env = AxEnv::from_env();
 {database_runtime_defaults}    let runtime = Arc::new(lazy_runtime_from_env(env)?);
+{storage_init}
     let handler: AxCompiledHandler =
-        Arc::new(move |request| handle_request(&dist, runtime.as_ref(), request));
+        Arc::new(move |request| handle_request(&dist, runtime.as_ref(), storage.as_ref(), request));
     println!("Axonyx compiled production server listening at http://{{bind}}");
     serve_compiled_axum(bind, 1024 * 1024, handler)
 }}
@@ -13096,6 +13234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
 fn handle_request(
     dist: &Path,
     runtime: &impl AxBackendRuntime,
+    storage: &impl AxFileStorage,
     request: AxHttpRequest,
 ) -> AxHttpResponse {{
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/health") {{
@@ -13107,7 +13246,7 @@ fn handle_request(
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/action") {{
-        return secure(handle_compiled_action(runtime, &request));
+        return secure(handle_compiled_action(runtime, storage, &request));
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/data") {{
@@ -13183,6 +13322,7 @@ fn readiness_response(runtime: &impl AxBackendRuntime) -> AxHttpResponse {{
 
 fn handle_compiled_action(
     runtime: &impl AxBackendRuntime,
+    storage: &impl AxFileStorage,
     request: &AxHttpRequest,
 ) -> AxHttpResponse {{
     if !request.method.eq_ignore_ascii_case("POST") {{
@@ -13198,8 +13338,9 @@ fn handle_compiled_action(
     let content_type = request.header_value("Content-Type").unwrap_or("");
     if !content_type.starts_with("application/x-www-form-urlencoded")
         && !content_type.starts_with("application/json")
+        && !content_type.starts_with("multipart/form-data")
     {{
-        return AxHttpResponse::text(415, "expected form-urlencoded or JSON action input")
+        return AxHttpResponse::text(415, "expected form-urlencoded, multipart, or JSON action input")
             .with_no_store();
     }}
 
@@ -13214,7 +13355,7 @@ fn handle_compiled_action(
         .map(safe_action_route)
         .unwrap_or_else(|| "/".to_string());
 
-    let dispatched = backend::dispatch_action(runtime, &name, request);
+    let dispatched = backend::dispatch_action(runtime, storage, &name, request);
 
     match dispatched {{
         Ok(Some(mut payload)) => {{
@@ -13518,6 +13659,38 @@ fn secure(response: AxHttpResponse) -> AxHttpResponse {{
         .with_header("X-Content-Type-Options", "nosniff")
         .with_header("X-Frame-Options", "SAMEORIGIN")
         .with_header("Referrer-Policy", "strict-origin-when-cross-origin")
+}}
+{storage_bootstrap}"#
+    )
+}
+
+fn compiled_storage_bootstrap(configs: &[AxStorageCapabilityConfig]) -> String {
+    if configs.is_empty() {
+        return String::new();
+    }
+
+    let registrations = configs
+        .iter()
+        .map(|config| {
+            let root = config.root.to_string_lossy().replace('\\', "/");
+            let access = match config.access {
+                AxStorageAccess::Read => "AxStorageAccess::Read",
+                AxStorageAccess::Write => "AxStorageAccess::Write",
+                AxStorageAccess::ReadWrite => "AxStorageAccess::ReadWrite",
+            };
+            format!(
+                "    registry.register(AxCapabilityStorage::open_with_access({name:?}, PathBuf::from({root:?}), {max_file_bytes}, {access})?)?;\n",
+                name = config.name,
+                max_file_bytes = config.max_file_bytes,
+            )
+        })
+        .collect::<String>();
+
+    format!(
+        r#"
+fn configured_file_storage() -> Result<AxStorageRegistry, AxStorageError> {{
+    let mut registry = AxStorageRegistry::new();
+{registrations}    Ok(registry)
 }}
 "#
     )
@@ -18355,10 +18528,14 @@ fn handle_action_request(
     request: &AxHttpRequest,
 ) -> Result<AxHttpResponse> {
     let content_type = request.header_value("Content-Type").unwrap_or("");
-    if !content_type.starts_with("application/x-www-form-urlencoded") {
-        return Ok(
-            AxHttpResponse::text(415, "expected application/x-www-form-urlencoded").with_no_store(),
-        );
+    if !content_type.starts_with("application/x-www-form-urlencoded")
+        && !content_type.starts_with("multipart/form-data")
+    {
+        return Ok(AxHttpResponse::text(
+            415,
+            "expected application/x-www-form-urlencoded or multipart/form-data",
+        )
+        .with_no_store());
     }
 
     let request_path =
@@ -18381,39 +18558,49 @@ fn handle_action_request(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let input_fields = parse_form_body(&request.body);
-    let result = if mode == AxServerMode::Start
-        && backend_source_refs_use_database(&action_source_refs)?
-    {
-        let mut store = state
-            .preview_store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
-            .clone();
-        let env = db_env_for_root(&state.root, None)?;
-        let runtime = ax_backend_runtime::runtime_from_env(env)
-            .with_context(|| "failed to initialize action database runtime from environment")?;
-        execute_preview_action_sources_with_runtime(
-            &action_source_refs,
-            &action_name,
-            &input_fields,
-            &runtime,
-            &mut store,
-        )
-    } else {
-        let mut store = state
-            .preview_store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
-        execute_preview_action_sources(&action_source_refs, &action_name, &input_fields, &mut store)
-    }
-    .with_context(|| {
-        format!(
-            "failed to execute action '{}' from '{}'",
-            action_name,
-            actions_path.display()
-        )
-    })?;
+    let input_fields = request
+        .multipart
+        .as_ref()
+        .map(|form| form.fields.clone())
+        .unwrap_or_else(|| parse_form_body(&request.body));
+    let result =
+        if mode == AxServerMode::Start && backend_source_refs_use_database(&action_source_refs)? {
+            let mut store = state
+                .preview_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
+                .clone();
+            let env = db_env_for_root(&state.root, None)?;
+            let runtime = ax_backend_runtime::runtime_from_env(env)
+                .with_context(|| "failed to initialize action database runtime from environment")?;
+            execute_preview_action_request_sources_with_runtime_and_storage(
+                &action_source_refs,
+                &action_name,
+                request,
+                &runtime,
+                &state.storage_registry,
+                &mut store,
+            )
+        } else {
+            let mut store = state
+                .preview_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+            execute_preview_action_request_sources_with_storage(
+                &action_source_refs,
+                &action_name,
+                request,
+                &state.storage_registry,
+                &mut store,
+            )
+        }
+        .with_context(|| {
+            format!(
+                "failed to execute action '{}' from '{}'",
+                action_name,
+                actions_path.display()
+            )
+        })?;
 
     if wants_action_patch_response(request, &input_fields) {
         return action_patch_response(&route, &result);
@@ -23050,6 +23237,56 @@ max_file_bytes = "1mb"
     }
 
     #[test]
+    fn check_app_sources_validates_storage_action_capabilities() {
+        let root = make_temp_dir("storage-action-contracts");
+        fs::create_dir_all(root.join("app/posts")).expect("actions dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"[app]
+name = "demo"
+
+[server]
+max_body_bytes = "2mb"
+
+[storage.media]
+root = "storage/media"
+access = "read"
+max_file_bytes = "1mb"
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/posts/actions.ax"),
+            r#"action SaveMedia(image: File) -> FileRef {
+  data saved = Storage.save("media", input.image)
+  return json(saved)
+}
+
+action SaveMissing(image: File) -> FileRef {
+  data saved = Storage.save("documents", input.image)
+  return json(saved)
+}
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-storage-access"
+                && diagnostic.file.ends_with("app/posts/actions.ax")
+                && diagnostic.message.contains("read-only")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-storage-capability"
+                && diagnostic.file.ends_with("app/posts/actions.ax")
+                && diagnostic.message.contains("[storage.documents]")
+        }));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn storage_config_rejects_roots_outside_storage_tree() {
         for invalid_root in ["../private", "public/uploads", "storage/../private"] {
             let value = format!(
@@ -25559,9 +25796,12 @@ action ValidPost
                 document_json: "{\"page\":\"posts\"}".to_string(),
                 import_sources: Vec::new(),
             }],
-            "",
-            true,
-            false,
+            CompiledProductionOptions {
+                database_runtime_defaults: "",
+                database_required: true,
+                validate_api_responses: false,
+                storage_configs: &[],
+            },
         );
 
         assert!(source.contains("backend::dispatch_api_route"));
@@ -25578,7 +25818,11 @@ action ValidPost
         assert!(source.contains("let mut env = AxEnv::from_env()"));
         assert!(source.contains("let runtime = Arc::new(lazy_runtime_from_env"));
         assert_eq!(source.matches("lazy_runtime_from_env(env)").count(), 1);
-        assert!(source.contains("handle_request(&dist, runtime.as_ref(), request)"));
+        assert!(
+            source.contains("handle_request(&dist, runtime.as_ref(), storage.as_ref(), request)")
+        );
+        assert!(source.contains("let storage = Arc::new(AxUnavailableFileStorage)"));
+        assert!(source.contains("backend::dispatch_action(runtime, storage, &name, request)"));
         assert!(source.contains("const DATABASE_REQUIRED: bool = true"));
         assert!(source.contains("const VALIDATE_API_RESPONSES: bool = false"));
         assert!(source
@@ -25594,6 +25838,34 @@ action ValidPost
         );
         assert!(!source.contains("compiled actions are not enabled"));
         assert!(!source.contains("read_to_string"));
+    }
+
+    #[test]
+    fn compiled_production_source_bootstraps_configured_file_storage() {
+        let source = compiled_production_source(
+            "\"dist\"",
+            &[],
+            &[],
+            &[],
+            CompiledProductionOptions {
+                database_runtime_defaults: "",
+                database_required: false,
+                validate_api_responses: false,
+                storage_configs: &[AxStorageCapabilityConfig {
+                    name: "media".to_string(),
+                    root: PathBuf::from("storage/media"),
+                    access: AxStorageAccess::Write,
+                    max_file_bytes: 2 * 1024 * 1024,
+                }],
+            },
+        );
+
+        assert!(source.contains("fn configured_file_storage()"));
+        assert!(source.contains("AxStorageRegistry::new()"));
+        assert!(source.contains("AxCapabilityStorage::open_with_access"));
+        assert!(source.contains("\"media\", PathBuf::from(\"storage/media\")"));
+        assert!(source.contains("2097152, AxStorageAccess::Write"));
+        assert!(!source.contains("AxUnavailableFileStorage"));
     }
 
     #[test]
@@ -27536,6 +27808,95 @@ axonyx-runtime = "0.1.0"
             fields.get("excerpt").map(String::as_str),
             Some("Fast forms")
         );
+    }
+
+    #[test]
+    fn dev_action_request_persists_multipart_file_through_storage_registry() {
+        let root = make_temp_dir("dev-storage-action");
+        fs::create_dir_all(root.join("app/upload")).expect("upload route should exist");
+        fs::write(
+            root.join("app/upload/page.asx"),
+            "page Upload() { return ASX { <Copy>Upload</Copy> } }\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/upload/actions.ax"),
+            r#"action UploadImage(image: File) -> FileRef {
+  data saved = Storage.save("media", input.image)
+  return json(saved)
+}
+"#,
+        )
+        .expect("actions should write");
+        let mut registry = AxStorageRegistry::new();
+        registry
+            .register(
+                AxCapabilityStorage::open_with_access(
+                    "media",
+                    root.join("storage/media"),
+                    1024,
+                    AxStorageAccess::Write,
+                )
+                .expect("storage should open"),
+            )
+            .expect("storage should register");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+            runtime_config: AxServerRuntimeConfig::default(),
+            storage_registry: registry,
+            database_required: false,
+        };
+        let request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/__axonyx/action?path=%2Fupload&name=UploadImage".to_string(),
+            headers: [
+                (
+                    "content-type".to_string(),
+                    "multipart/form-data; boundary=axonyx".to_string(),
+                ),
+                (
+                    "accept".to_string(),
+                    "application/ax-patch+json".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            body: Vec::new(),
+            multipart: Some(AxMultipartForm {
+                fields: [("__ax_patch".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+                files: [(
+                    "image".to_string(),
+                    vec![AxIncomingFile {
+                        field_name: "image".to_string(),
+                        file_name: "hero.txt".to_string(),
+                        content_type: Some("text/plain".to_string()),
+                        bytes: b"hello storage".to_vec(),
+                    }],
+                )]
+                .into_iter()
+                .collect(),
+            }),
+        };
+
+        let response = handle_action_request(&state, AxServerMode::Dev, &request)
+            .expect("storage action should execute");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&response.body.into_bytes()).expect("response should be JSON");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(payload["value"]["storage"], "media");
+        assert_eq!(payload["value"]["file_name"], "hero.txt");
+        assert_eq!(payload["value"]["size"], 13);
+        let object_count = fs::read_dir(root.join("storage/media/objects"))
+            .expect("objects should exist")
+            .count();
+        assert_eq!(object_count, 1);
+
+        drop(state);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
