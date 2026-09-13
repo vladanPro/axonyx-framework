@@ -301,6 +301,7 @@ fields:
   <ActionStatus state="pending">Saving theme...</ActionStatus>
   <ActionStatus state="complete">Theme saved.</ActionStatus>
   <ActionStatus state="error">Theme could not be saved.</ActionStatus>
+  <ActionProgress />
   <Button type="submit">Apply</Button>
 </ActionForm>
 ```
@@ -308,6 +309,14 @@ fields:
 It renders a regular `form` pointed at `/__axonyx/action` and includes the
 internal patch marker automatically. `ActionStatus` renders a status message that
 is shown from the form lifecycle state managed by the small action runtime.
+For multipart forms, `ActionProgress` exposes the actual transferred-byte
+percentage without author-written JavaScript. The form also receives
+`data-ax-upload-state`, `data-ax-upload-loaded`, `data-ax-upload-total`, and
+`data-ax-upload-percent`; advanced components may listen for the stable
+`axonyx:upload-start`, `axonyx:upload-progress`, `axonyx:upload-complete`, and
+`axonyx:upload-error` events. Upload completion means request bytes reached the
+server; `axonyx:action-complete` remains the signal that server processing
+finished.
 Route actions coerce declared `input:` fields before execution: `string` stays
 text, `bool` accepts browser checkbox-style values such as `on`, and integer
 fields such as `i64` / `u64` must parse successfully or the action fails with a
