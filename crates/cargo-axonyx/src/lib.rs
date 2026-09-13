@@ -6892,6 +6892,8 @@ fn collect_api_schema_type_names(ty: &AxType, names: &mut Vec<String>) {
         | AxType::Time
         | AxType::Uuid
         | AxType::Bytes
+        | AxType::File
+        | AxType::FileRef
         | AxType::Json
         | AxType::Never
         | AxType::Void
@@ -21597,6 +21599,13 @@ route GET "/api/posts" -> Post[]
         assert!(!resources.contains("themes"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn file_contracts_do_not_create_named_api_schema_dependencies() {
+        assert!(api_schema_type_names("File").is_empty());
+        assert!(api_schema_type_names("FileRef").is_empty());
+        assert!(api_schema_type_names("Optional<FileRef>").is_empty());
     }
 
     #[test]
