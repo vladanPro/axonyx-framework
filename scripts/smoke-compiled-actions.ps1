@@ -97,10 +97,27 @@ action SetTheme(theme: string) {
 action Noop() {
   return ok()
 }
+
+action UploadImage(image: File) -> FileRef {
+  data saved = Storage.save("media", input.image)
+  return json(saved)
+}
 '@
   [System.IO.File]::WriteAllText(
     $actionsPath,
     $actionSource,
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+
+  [System.IO.File]::AppendAllText(
+    (Join-Path $appRoot "Axonyx.toml"),
+    @'
+
+[storage.media]
+root = "storage/media"
+access = "read-write"
+max_file_bytes = "64kb"
+'@,
     (New-Object System.Text.UTF8Encoding($false))
   )
 
@@ -211,6 +228,36 @@ return ASX {
   if ($payload.patches[0].signal -ne "page:posts:draftStatus:1" -or $payload.patches[0].value -ne "gold") { throw "Compiled state patch is invalid: $($success.Body)" }
   if ($payload.invalidations[0].target -ne "/posts" -or $payload.invalidations[0].queryKey[0] -ne "posts") { throw "Compiled invalidation is invalid" }
   if ($payload.refreshes[0].name -ne "posts" -or $payload.refreshes[0].source -ne "loadPosts()") { throw "Compiled data refresh metadata is invalid: $($success.Body)" }
+
+  $uploadUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=UploadImage"
+  $clientHandler = New-Object System.Net.Http.HttpClientHandler
+  $clientHandler.AllowAutoRedirect = $false
+  $client = New-Object System.Net.Http.HttpClient($clientHandler)
+  $multipart = New-Object System.Net.Http.MultipartFormDataContent
+  try {
+    $multipart.Add((New-Object System.Net.Http.StringContent("true")), "__ax_patch")
+    $fileContent = New-Object System.Net.Http.ByteArrayContent(,[System.Text.Encoding]::UTF8.GetBytes("compiled storage"))
+    $fileContent.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue("text/plain")
+    $multipart.Add($fileContent, "image", "compiled.txt")
+    $uploadRequest = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, $uploadUrl)
+    $uploadRequest.Headers.Accept.ParseAdd("application/ax-patch+json")
+    $uploadRequest.Content = $multipart
+    $uploadResponse = $client.SendAsync($uploadRequest).GetAwaiter().GetResult()
+    $uploadBody = $uploadResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    if ([int]$uploadResponse.StatusCode -ne 200) { throw "Compiled upload returned HTTP $([int]$uploadResponse.StatusCode): $uploadBody" }
+    $uploadPayload = $uploadBody | ConvertFrom-Json
+    if (!$uploadPayload.ok -or $uploadPayload.value.storage -ne "media" -or $uploadPayload.value.file_name -ne "compiled.txt") {
+      throw "Compiled storage action response is invalid: $uploadBody"
+    }
+  } finally {
+    if ($null -ne $uploadResponse) { $uploadResponse.Dispose() }
+    if ($null -ne $uploadRequest) { $uploadRequest.Dispose() }
+    $multipart.Dispose()
+    $client.Dispose()
+    $clientHandler.Dispose()
+  }
+  $storedObjects = @(Get-ChildItem (Join-Path $appRoot "storage/media/objects") -File -Recurse)
+  if ($storedObjects.Count -ne 1) { throw "Compiled storage action did not persist exactly one object" }
 
   $createUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=CreatePost"
   $created = Invoke-AxRequest -Url $createUrl -Body "title=Fresh+compiled+post&excerpt=Rendered+without+reload&status=published&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
