@@ -1,6 +1,6 @@
 [package]
 name = "create-axonyx"
-version = "0.4.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Scaffold a new Axonyx app"
@@ -8,6 +8,7 @@ readme = "README.md"
 repository.workspace = true
 homepage.workspace = true
 documentation.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
