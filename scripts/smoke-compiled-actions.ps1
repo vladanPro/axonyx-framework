@@ -89,6 +89,7 @@ try {
 
 action SetTheme(theme: string) {
   require input.theme in ["silver", "bronze", "gold"] else error("Theme is required.")
+  cookie "theme" = input.theme
   patch draftStatus = input.theme
   revalidate "/posts"
   return ok()
@@ -263,6 +264,9 @@ return ASX {
   $created = Invoke-AxRequest -Url $createUrl -Body "title=Fresh+compiled+post&excerpt=Rendered+without+reload&status=published&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
   $createdPayload = $created.Body | ConvertFrom-Json
   if (!$createdPayload.ok -or $createdPayload.refreshes[0].name -ne "posts") { throw "Compiled create action did not invalidate posts: $($created.Body)" }
+
+  $themeCookie = Invoke-AxRequest -Url $actionUrl -Body "theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  if ($themeCookie.Headers["Set-Cookie"] -notmatch "theme=gold") { throw "Compiled action response did not emit its cookie" }
 
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }

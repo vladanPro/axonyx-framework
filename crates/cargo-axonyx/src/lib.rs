@@ -13198,7 +13198,7 @@ use std::path::{{Component, Path, PathBuf}};
 use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
-use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
+use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxCookie, AxHttpRequest, AxHttpResponse}};
 {storage_import}use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
 
@@ -13358,7 +13358,8 @@ fn handle_compiled_action(
     let dispatched = backend::dispatch_action(runtime, storage, &name, request);
 
     match dispatched {{
-        Ok(Some(mut payload)) => {{
+        Ok(Some(output)) => {{
+            let mut payload = output.payload;
             if payload.get("redirect").is_none_or(Value::is_null) {{
                 if let Value::Object(fields) = &mut payload {{
                     fields.insert("redirect".to_string(), Value::String(route.clone()));
@@ -13366,7 +13367,7 @@ fn handle_compiled_action(
             }}
             normalize_action_payload(&route, &mut payload);
             let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
-            if wants_action_patch_response(request) || !ok {{
+            let response = if wants_action_patch_response(request) || !ok {{
                 let status = if ok {{
                     200
                 }} else {{
@@ -13388,7 +13389,8 @@ fn handle_compiled_action(
             }} else {{
                 let redirect = payload.get("redirect").and_then(Value::as_str).unwrap_or(&route);
                 AxHttpResponse::redirect_with_status(303, redirect).with_no_store()
-            }}
+            }};
+            with_action_cookies(response, output.cookies)
         }}
         Ok(None) => AxHttpResponse::text(404, "action not found").with_no_store(),
         Err(error) => {{
@@ -13407,6 +13409,16 @@ fn handle_compiled_action(
             }}
         }}
     }}
+}}
+
+fn with_action_cookies(
+    mut response: AxHttpResponse,
+    cookies: impl IntoIterator<Item = AxCookie>,
+) -> AxHttpResponse {{
+    for cookie in cookies {{
+        response = response.with_cookie(cookie);
+    }}
+    response
 }}
 
 fn normalize_action_payload(route: &str, payload: &mut Value) {{
@@ -25823,6 +25835,10 @@ action ValidPost
         );
         assert!(source.contains("let storage = Arc::new(AxUnavailableFileStorage)"));
         assert!(source.contains("backend::dispatch_action(runtime, storage, &name, request)"));
+        assert!(source.contains("let mut payload = output.payload"));
+        assert!(source.contains("with_action_cookies(response, output.cookies)"));
+        assert!(source.contains("response = response.with_cookie(cookie)"));
+        assert!(source.contains("AxCompiledHandler, AxCookie, AxHttpRequest"));
         assert!(source.contains("const DATABASE_REQUIRED: bool = true"));
         assert!(source.contains("const VALIDATE_API_RESPONSES: bool = false"));
         assert!(source
