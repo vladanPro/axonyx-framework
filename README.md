@@ -31,16 +31,17 @@ state signals.
 
 ## Packages
 
-This repository contains the public CLI packages:
+This repository contains the public tooling packages:
 
 - `create-axonyx` - project scaffolding CLI, similar in spirit to `create-next-app`
 - `cargo-axonyx` - Cargo helper CLI exposed as `cargo ax ...`
+- `axonyx-lsp` - persistent language server for editor diagnostics and formatting
 
 Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.3.0"
+axonyx-runtime = "0.4.0"
 axonyx-ui = "0.0.71"
 ```
 
@@ -52,6 +53,10 @@ Install the public CLI tools:
 cargo install create-axonyx
 cargo install cargo-axonyx
 ```
+
+Framework contributors can install the unreleased language server locally with
+`cargo install --path crates/axonyx-lsp`. The VS Code adapter will own this
+setup after the LSP package is released.
 
 Create and run a site:
 
@@ -118,7 +123,14 @@ app:
 request_timeout_seconds = 2
 shutdown_grace_seconds = 5
 max_connections = 1024
+api_response_validation = "development"
 ```
+
+Typed API routes can enforce their declared `-> Type` response at the runtime
+boundary. `development` validates during `cargo ax run dev`, `always` also
+validates compiled production responses, and `off` disables the check. A
+mismatch is logged with its exact JSON path while clients receive a redacted
+JSON `500` response.
 
 This is intentionally a runtime choice, not an authoring burden: `.ax` pages,
 loaders, actions, and state patches keep the same shape while Axonyx chooses the
@@ -289,6 +301,7 @@ fields:
   <ActionStatus state="pending">Saving theme...</ActionStatus>
   <ActionStatus state="complete">Theme saved.</ActionStatus>
   <ActionStatus state="error">Theme could not be saved.</ActionStatus>
+  <ActionProgress />
   <Button type="submit">Apply</Button>
 </ActionForm>
 ```
@@ -296,6 +309,14 @@ fields:
 It renders a regular `form` pointed at `/__axonyx/action` and includes the
 internal patch marker automatically. `ActionStatus` renders a status message that
 is shown from the form lifecycle state managed by the small action runtime.
+For multipart forms, `ActionProgress` exposes the actual transferred-byte
+percentage without author-written JavaScript. The form also receives
+`data-ax-upload-state`, `data-ax-upload-loaded`, `data-ax-upload-total`, and
+`data-ax-upload-percent`; advanced components may listen for the stable
+`axonyx:upload-start`, `axonyx:upload-progress`, `axonyx:upload-complete`, and
+`axonyx:upload-error` events. Upload completion means request bytes reached the
+server; `axonyx:action-complete` remains the signal that server processing
+finished.
 Route actions coerce declared `input:` fields before execution: `string` stays
 text, `bool` accepts browser checkbox-style values such as `on`, and integer
 fields such as `i64` / `u64` must parse successfully or the action fails with a
@@ -311,11 +332,13 @@ From an app root:
 ```bash
 cargo ax doctor
 cargo ax check
+cargo ax fmt --check
 cargo ax migrate asx --dry-run
 cargo ax g component ThemeSwitcher
 cargo ax g island CommandPalette
 cargo ax g page settings/profile
 cargo ax contracts
+cargo ax api --openapi
 cargo ax schema pull ./sample-posts.json --name Post
 cargo ax actions
 cargo ax content
@@ -325,6 +348,12 @@ cargo ax run dev
 cargo ax test
 ```
 
+`cargo ax fmt` formats project `.asx` and `.ax` sources through the same Rust
+formatter that editor tooling can reuse. Use `cargo ax fmt --file app/page.asx`
+for one file, `--stdout` for a non-mutating preview, `--stdin` for editor pipes,
+or `--check` in CI. Formatter V0 owns whitespace only and does not rewrite
+expressions, strings, imports, or embedded client code.
+
 Axonyx 0.2 uses `.asx` for pages, layouts, boundaries, and UI components while
 keeping `.ax` for loaders, actions, API routes, domain code, and jobs. Existing
 projects can preview and apply the mechanical migration with:
@@ -333,6 +362,28 @@ projects can preview and apply the mechanical migration with:
 cargo ax migrate asx --dry-run
 cargo ax migrate asx
 ```
+
+`cargo ax api --openapi` writes `public/openapi.json` by default. Override the
+path with `--out contracts/api.json`, use `--out -` for stdout, or set
+`[api].openapi_output` in `Axonyx.toml`. The generated document title defaults
+to `<app name> API` and its version follows the Cargo package version; both can
+be overridden with `[api].title` and `[api].version`.
+
+Inspect or pull another service's OpenAPI contract without executing remote
+code:
+
+```bash
+cargo ax api inspect https://service.example/openapi.json
+cargo ax api pull https://service.example/openapi.json --name service
+cargo ax api pull https://service.example/openapi.json --name service \
+  --expect-hash sha256:<canonical-document-hash>
+```
+
+Pull writes `.axonyx/contracts/service.openapi.json`. HTTPS is required for
+remote hosts; loopback HTTP remains available for development and
+`--allow-http` is an explicit escape hatch. Fetches have a ten-second timeout,
+no redirects, and a 2 MiB response limit. Query strings are excluded from
+reports so URL tokens are not persisted.
 
 `cargo ax schema pull` accepts sample JSON as a draft, but it can also read a typed
 envelope from an endpoint or file. When the source includes `schema`, Axonyx uses
@@ -547,7 +598,7 @@ Today, `cargo ax add ui` and the `site` / `docs` templates use the published `ax
 
 Generated apps can target:
 
-- the published crates.io package, `axonyx-runtime = "0.1.14"`
+- the published crates.io package, `axonyx-runtime = "0.4.0"`
 - a local Cargo `path` dependency into a checked-out runtime workspace
 - the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
 
@@ -669,6 +720,7 @@ Drafts and lower-level architecture notes should live in `docs/`, not in the top
 
 ```text
 crates/
+  axonyx-lsp/
   cargo-axonyx/
   create-axonyx/
 vendor/

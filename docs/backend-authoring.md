@@ -94,6 +94,50 @@ That separation is important:
 - lowering owns execution shape
 - runtime owns environment and transport behavior
 
+## OpenAPI Export
+
+Axonyx API declarations remain the source of truth. Export their OpenAPI 3.1
+view without choosing an output path on every run:
+
+```bash
+cargo ax api --openapi
+```
+
+The default output is `public/openapi.json`. Use `--out -` for stdout or
+`--out path/to/openapi.json` for a one-off override. Project defaults can live
+in `Axonyx.toml`:
+
+```toml
+[api]
+openapi_output = "public/openapi.json"
+title = "Acme Public API"
+version = "1.0.0"
+```
+
+Without explicit title/version values, Axonyx uses `<app name> API` and the
+Cargo package version. Parent output directories are created automatically.
+
+Remote contracts use a separate inspect/pull flow so sample-payload type
+inference and API interoperability cannot be confused:
+
+```bash
+cargo ax api inspect https://service.example/openapi.json
+cargo ax api inspect https://service.example/openapi.json --format json
+cargo ax api pull https://service.example/openapi.json --name service
+```
+
+`inspect` validates OpenAPI 3.x structure and reports title, API version, path,
+operation, schema, Axonyx semantic contract hash, and canonical document hash.
+`pull` performs the same validation before writing a deterministic pretty JSON
+snapshot to `.axonyx/contracts/<name>.openapi.json`.
+
+Use `--expect-hash sha256:<canonical-document-hash>` to pin the exact fetched
+document. This compares computed content rather than trusting a hash declared
+inside the remote document. Remote hosts require HTTPS by default. Loopback
+HTTP is allowed for local development; other plain HTTP endpoints require the
+explicit `--allow-http` flag. Requests do not follow redirects, time out after
+ten seconds, and reject bodies larger than 2 MiB.
+
 ## Atomic Transactions
 
 Use `transaction {}` when several database writes must either all succeed or

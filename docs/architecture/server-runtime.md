@@ -63,6 +63,7 @@ connection forever:
 request_timeout_seconds = 2
 shutdown_grace_seconds = 5
 max_connections = 1024
+api_response_validation = "development"
 ```
 
 The same timeout is respected by the standard transport and the Tokio preview
@@ -71,6 +72,36 @@ configuration before the server starts. The shutdown grace period controls how
 long the Tokio transport waits for active connection tasks after Ctrl+C or a
 hosted restart signal. The max connection limit rejects excess Tokio
 connections with `503 Service Unavailable` before they enter the route handler.
+
+## Storage Capabilities
+
+Apps declare persistent file authority as a named, bounded capability:
+
+```toml
+[server]
+max_body_bytes = "12mb"
+
+[storage.media]
+root = "storage/uploads"
+access = "read-write"
+max_file_bytes = "10mb"
+```
+
+`root` cannot be absolute, contain traversal components, or escape the
+project's `storage/` tree. `access` has no implicit default: the app must choose
+`read`, `write`, or `read-write`. Write-capable limits cannot exceed the whole
+request-body limit.
+
+At server startup, Axonyx opens each root once as a capability directory and
+registers it by name. Later runtime operations resolve `media` through that
+registry instead of accepting a caller-provided filesystem path. Browser-facing
+`FileRef` values identify content but grant no read or write authority by
+themselves; route authentication and the named capability remain separate
+checks.
+
+Multipart parsing and capability storage are implemented. Typed
+`File -> FileRef` action lowering remains the next boundary, so this config does
+not yet claim a complete public upload API.
 
 Tokio is now the default transport underneath, without changing the framework
 shape above it. The developer still writes:
@@ -122,6 +153,20 @@ render`. The Melt records whether compiled backend code uses `db.*`. Static
 applications therefore need no database configuration, while database-backed
 applications run one direct SQLite/Postgres query probe without retrying or
 exposing connection details. A failed required dependency returns `503`.
+
+Declared API response contracts are enforced at the shared runtime boundary:
+
+```ax
+route GET "/api/posts" -> Post[] {
+  return json(posts)
+}
+```
+
+`[server].api_response_validation` accepts `off`, `development`, or `always`.
+Development is the default and catches payload drift in `cargo ax run dev`
+without adding production validation work. `always` applies the same check in
+the compiled Axum/Tokio server. Contract failures keep route/path diagnostics
+in server logs and return a redacted JSON `500` to the client.
 
 and the app should still be authored through:
 

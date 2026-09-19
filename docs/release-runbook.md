@@ -15,19 +15,19 @@ It does not mean "publish now". Use it to decide when the system is ready and to
 
 Publish in dependency order:
 
-1. `axonyx-macros`
-2. `axonyx-core`
-3. `axonyx-runtime`
-4. `axonyx-ui`
-5. `create-axonyx`
-6. `cargo-axonyx`
+1. `axonyx-core`
+2. `axonyx-runtime`
+3. `axonyx-lsp`
+4. `create-axonyx`
+5. `cargo-axonyx`
 
 Why this order:
 
-- `axonyx-core` depends on `axonyx-macros`.
+- `axonyx-core` depends on the already published, unchanged `axonyx-macros`.
 - `axonyx-runtime` depends on `axonyx-core`.
+- `axonyx-lsp` depends on `axonyx-core`.
 - generated apps depend on `axonyx-runtime`.
-- generated UI-enabled apps can depend on `axonyx-ui`.
+- `axonyx-ui` is released independently and is not republished with every framework release.
 - the CLIs should be published only after the packages they scaffold are available.
 
 ## Current CI Gate
@@ -90,7 +90,6 @@ The important rule is to wait for crates.io index propagation between crates:
 
 ```bash
 cd H:/CODE/axonyx/axonyx-framework/vendor/axonyx-runtime
-cargo publish -p axonyx-macros
 cargo publish -p axonyx-core
 cargo publish -p axonyx-runtime
 ```
@@ -124,8 +123,10 @@ From the framework repo:
 
 ```bash
 cd H:/CODE/axonyx/axonyx-framework
+cargo package -p axonyx-lsp
 cargo package -p create-axonyx
 cargo package -p cargo-axonyx
+cargo publish -p axonyx-lsp
 cargo publish -p create-axonyx
 cargo publish -p cargo-axonyx
 ```

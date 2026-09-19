@@ -132,3 +132,4 @@ jobs:
         run: |
           cargo package -p create-axonyx --list
           cargo package -p cargo-axonyx --list
+          cargo package -p axonyx-lsp --list

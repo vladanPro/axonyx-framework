@@ -13,6 +13,7 @@ routes_dir = "routes"
 jobs_dir = "jobs"
 stream_pages = false
 max_body_bytes = "1mb"
+api_response_validation = "development"
 
 [db]
 migrations = "db/migrations"

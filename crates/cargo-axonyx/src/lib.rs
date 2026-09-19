@@ -26,12 +26,15 @@ use axonyx_core::ax_backend_lowering_prelude::{
     AxStepPlan, AxTransactionOperationPlan, AxValuePlan,
 };
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
+use axonyx_core::ax_formatter_prelude::format_ax_source;
 use axonyx_core::ax_lowering_prelude::AxValue;
 use axonyx_core::ax_parser_auto_prelude::{
     convert_ax_v2_file, parse_ax_auto, AxAutoParseError, AxConvertV2Error,
 };
 use axonyx_core::ax_parser_prelude::AxParseError;
-use axonyx_core::ax_parser_v2_prelude::{parse_ax_v2, AxParseV2Error};
+use axonyx_core::ax_parser_v2_prelude::{
+    parse_ax_component_module_v2, parse_ax_v2, AxParseV2Error,
+};
 use axonyx_core::ax_query_ast_prelude::AxQuerySource;
 use axonyx_core::ax_semantics_v2_prelude::AxSemanticV2Error;
 use axonyx_core::ax_types_prelude::{
@@ -41,22 +44,39 @@ use axonyx_core::state_prelude::{
     build_state_manifest_with_scope, build_state_manifest_with_scope_mapper, AxStatePersistence,
     AxStateValue,
 };
+#[cfg(test)]
+use axonyx_runtime::execute_preview_action_sources;
 use axonyx_runtime::server_prelude::{
     axonyx_response_to_axum, AxHttpRequest, AxHttpResponse, AxServer, AxServerConfig, AxServerMode,
     AxSseEvent,
 };
+#[cfg(test)]
+use axonyx_runtime::server_prelude::{AxIncomingFile, AxMultipartForm};
+use axonyx_runtime::storage_prelude::{AxCapabilityStorage, AxStorageAccess, AxStorageRegistry};
 use axonyx_runtime::{
-    ax_state_wasm_bytes, backend_prelude as ax_backend_runtime, execute_preview_action_sources,
-    execute_preview_action_sources_with_runtime, execute_preview_route_request_sources,
-    execute_preview_route_request_sources_with_runtime,
+    ax_state_wasm_bytes, backend_prelude as ax_backend_runtime,
+    execute_preview_action_request_sources_with_runtime_and_storage,
+    execute_preview_action_request_sources_with_storage,
+    execute_preview_route_request_sources_validated,
+    execute_preview_route_request_sources_with_runtime_validated,
     preview_ax_route_with_request_context_and_imports,
-    preview_ax_route_with_request_context_and_runtime_and_imports, AxPreviewActionResult,
-    AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore, AX_STATE_WASM_PATH,
+    preview_ax_route_with_request_context_and_runtime_and_imports, AxApiResponseValidationMode,
+    AxPreviewActionResult, AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
+    AX_STATE_WASM_PATH,
 };
+
+mod remote_contract;
+
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 use flate2::write::GzEncoder;
 use flate2::Compression;
+#[cfg(test)]
+use remote_contract::validate_remote_contract_url;
+use remote_contract::{
+    inspect_remote_api_contract, print_remote_api_contract, read_api_contract_source,
+    resolve_remote_contract_output, verify_expected_contract_hash,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
@@ -69,7 +89,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.3.0";
+const AXONYX_RUNTIME_VERSION: &str = "0.4.0";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -93,7 +113,7 @@ static CARGO_PACKAGE_ROOT_CACHE: OnceLock<Mutex<std::collections::HashMap<String
     name = "ax",
     version = AXONYX_CLI_VERSION,
     about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.",
-    long_about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.\n\nCommon commands:\n  cargo ax run dev      Start the local development server\n  cargo ax build --clean Build a production-ready static/server bundle\n  cargo ax check        Run .ax diagnostics before build/deploy\n  cargo ax g component Alert Generate a reusable app component\n  cargo ax doctor       Inspect app, runtime, UI, server, and deploy readiness"
+    long_about = "Axonyx framework CLI for Rust-first pages, server routes, state, and Foundry UI.\n\nCommon commands:\n  cargo ax run dev      Start the local development server\n  cargo ax build --clean Build a production-ready static/server bundle\n  cargo ax check        Run .ax diagnostics before build/deploy\n  cargo ax fmt --check  Verify compiler-owned source formatting\n  cargo ax g component Alert Generate a reusable app component\n  cargo ax doctor       Inspect app, runtime, UI, server, and deploy readiness"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -122,6 +142,8 @@ enum Commands {
     Dev(DevArgs),
     #[command(about = "Inspect app, runtime, UI, server, state, and deploy readiness.")]
     Doctor(DoctorArgs),
+    #[command(about = "Format .asx and .ax source files with the compiler-owned formatter.")]
+    Fmt(FmtArgs),
     #[command(about = "Print the Melt graph for framework internals.")]
     Graph(GraphArgs),
     #[command(
@@ -153,6 +175,9 @@ enum Commands {
 
 #[derive(Debug, Parser)]
 struct ApiArgs {
+    #[command(subcommand)]
+    command: Option<ApiCommands>,
+
     /// Output format for the API contract report.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
@@ -161,13 +186,61 @@ struct ApiArgs {
     #[arg(long)]
     schema: bool,
 
-    /// Render API contracts as an OpenAPI-compatible JSON document.
+    /// Render API contracts to public/openapi.json or the configured output.
     #[arg(long)]
     openapi: bool,
 
-    /// Write the rendered API output to a file instead of stdout.
+    /// Override the OpenAPI output path. Use `-` to write to stdout.
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ApiCommands {
+    /// Inspect a remote or local OpenAPI contract without writing files.
+    Inspect(ApiContractInspectArgs),
+    /// Pull a remote or local OpenAPI contract into .axonyx/contracts.
+    Pull(ApiContractPullArgs),
+}
+
+#[derive(Debug, Parser)]
+struct ApiContractInspectArgs {
+    /// HTTPS URL or local OpenAPI JSON file.
+    source: String,
+
+    /// Output format for the contract summary.
+    #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+    format: CheckFormat,
+
+    /// Require the canonical JSON document to match this sha256 value.
+    #[arg(long)]
+    expect_hash: Option<String>,
+
+    /// Permit plain HTTP for non-loopback development endpoints.
+    #[arg(long)]
+    allow_http: bool,
+}
+
+#[derive(Debug, Parser)]
+struct ApiContractPullArgs {
+    /// HTTPS URL or local OpenAPI JSON file.
+    source: String,
+
+    /// Stable local contract name used for the default snapshot filename.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Override the snapshot output path.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Require the canonical JSON document to match this sha256 value.
+    #[arg(long)]
+    expect_hash: Option<String>,
+
+    /// Permit plain HTTP for non-loopback development endpoints.
+    #[arg(long)]
+    allow_http: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -294,6 +367,25 @@ struct CheckArgs {
     /// Output format for diagnostics.
     #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
     format: CheckFormat,
+}
+
+#[derive(Debug, Parser)]
+struct FmtArgs {
+    /// Format one .asx or .ax file instead of project sources.
+    #[arg(long)]
+    file: Option<PathBuf>,
+
+    /// Read Axonyx source from stdin and write formatted source to stdout.
+    #[arg(long, conflicts_with_all = ["file", "stdout"])]
+    stdin: bool,
+
+    /// Print one formatted file to stdout without changing it.
+    #[arg(long, requires = "file", conflicts_with = "check")]
+    stdout: bool,
+
+    /// Check formatting without changing files.
+    #[arg(long)]
+    check: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -674,7 +766,22 @@ struct DevServerState {
     root: PathBuf,
     preview_store: Mutex<AxPreviewStore>,
     runtime_config: AxServerRuntimeConfig,
+    storage_registry: AxStorageRegistry,
     database_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AxStorageCapabilityConfig {
+    name: String,
+    root: PathBuf,
+    access: AxStorageAccess,
+    max_file_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AxStorageConfigError {
+    capability: Option<String>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -687,6 +794,7 @@ struct AxServerRuntimeConfig {
     security_headers: bool,
     request_logging: bool,
     log_format: AxServerLogFormat,
+    api_response_validation: AxApiResponseValidationMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -777,6 +885,7 @@ impl AxServerRuntimeConfig {
                 DEFAULT_REQUEST_LOGGING_ENABLED,
             )?,
             log_format: configured_server_log_format(root)?,
+            api_response_validation: configured_api_response_validation(root)?,
         })
     }
 }
@@ -792,6 +901,7 @@ impl Default for AxServerRuntimeConfig {
             security_headers: DEFAULT_SECURITY_HEADERS_ENABLED,
             request_logging: DEFAULT_REQUEST_LOGGING_ENABLED,
             log_format: AxServerLogFormat::Text,
+            api_response_validation: AxApiResponseValidationMode::Development,
         }
     }
 }
@@ -960,6 +1070,7 @@ struct RegistryItemReport {
 struct ApiReport {
     version: u32,
     contract_hash: String,
+    response_validation: String,
     routes: Vec<ApiRouteReport>,
     schemas: Vec<ApiSchemaReport>,
 }
@@ -1577,6 +1688,7 @@ fn run() -> Result<()> {
         Commands::Db(args) => db_command(args),
         Commands::Dev(args) => run_dev_server(args),
         Commands::Doctor(args) => doctor_command(args),
+        Commands::Fmt(args) => fmt_command(args),
         Commands::Graph(args) => graph_command(args),
         Commands::Generate(args) => generate_command(args),
         Commands::Melt(args) => melt_command(args),
@@ -2092,6 +2204,130 @@ fn check_command(args: CheckArgs) -> Result<()> {
     } else {
         std::process::exit(1);
     }
+}
+
+fn fmt_command(args: FmtArgs) -> Result<()> {
+    if args.stdin {
+        let mut source = String::new();
+        std::io::stdin()
+            .read_to_string(&mut source)
+            .context("failed to read Axonyx source from stdin")?;
+        let formatted = format_ax_source(&source);
+        if args.check {
+            if source == formatted {
+                return Ok(());
+            }
+            bail!("Axonyx formatting check failed for stdin");
+        }
+        print!("{formatted}");
+        return Ok(());
+    }
+
+    if let Some(file) = args.file {
+        let path = resolve_fmt_file(&file)?;
+        let source = read_fmt_source(&path)?;
+        let formatted = format_ax_file_source(&source);
+        if args.stdout {
+            print!("{formatted}");
+            return Ok(());
+        }
+        return finish_fmt_files(vec![(path, source, formatted)], args.check);
+    }
+
+    let root = app_root()?;
+    let mut paths = Vec::new();
+    for relative in ["app", "routes", "features", "jobs"] {
+        collect_ax_files(&root.join(relative), &mut paths)?;
+    }
+    paths.sort();
+    paths.dedup();
+
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = read_fmt_source(&path)?;
+        let formatted = format_ax_file_source(&source);
+        files.push((path, source, formatted));
+    }
+    finish_fmt_files(files, args.check)
+}
+
+fn resolve_fmt_file(file: &Path) -> Result<PathBuf> {
+    let path = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve current directory")?
+            .join(file)
+    };
+    if !path.is_file() {
+        bail!("Axonyx source file '{}' does not exist", path.display());
+    }
+    if !is_axonyx_source_file(&path) {
+        bail!(
+            "Axonyx formatter expects a .asx or .ax file, got '{}'",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+fn read_fmt_source(path: &Path) -> Result<String> {
+    fs::read_to_string(path)
+        .with_context(|| format!("failed to read Axonyx source '{}'", path.display()))
+}
+
+fn format_ax_file_source(source: &str) -> String {
+    let formatted = format_ax_source(source);
+    if source.contains("\r\n") {
+        formatted.replace('\n', "\r\n")
+    } else {
+        formatted
+    }
+}
+
+fn display_fmt_path(path: &Path) -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| path.strip_prefix(cwd).ok())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn finish_fmt_files(files: Vec<(PathBuf, String, String)>, check: bool) -> Result<()> {
+    let changed = files
+        .iter()
+        .filter(|(_, source, formatted)| source != formatted)
+        .map(|(path, _, _)| path.clone())
+        .collect::<Vec<_>>();
+
+    if check {
+        if changed.is_empty() {
+            println!("Axonyx formatting check passed.");
+            return Ok(());
+        }
+        let list = changed
+            .iter()
+            .map(|path| format!("  {}", display_fmt_path(path)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!("Axonyx formatting check failed:\n{list}");
+    }
+
+    for (path, source, formatted) in files {
+        if source == formatted {
+            continue;
+        }
+        fs::write(&path, formatted)
+            .with_context(|| format!("failed to write formatted source '{}'", path.display()))?;
+    }
+
+    if changed.is_empty() {
+        println!("Axonyx sources are already formatted.");
+    } else {
+        println!("Formatted {} Axonyx source file(s).", changed.len());
+    }
+    Ok(())
 }
 
 fn db_command(args: DbArgs) -> Result<()> {
@@ -3905,7 +4141,9 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     checks.push(doctor_server_compression_check(root));
     checks.push(doctor_server_security_headers_check(root));
     checks.push(doctor_server_request_logging_check(root));
+    checks.push(doctor_api_response_validation_check(root));
     checks.push(doctor_database_runtime_policy_check(root));
+    checks.push(doctor_storage_capabilities_check(root));
     checks.push(doctor_error_boundaries_check(root));
     checks.push(doctor_aegis_config_check(root));
     checks.push(doctor_api_contracts_check(root));
@@ -3957,6 +4195,59 @@ fn doctor_database_runtime_policy_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message: error.to_string(),
             hint: Some("Run `cargo ax check` and fix invalid [db] runtime policy values."),
+        },
+    }
+}
+
+fn doctor_storage_capabilities_check(root: &Path) -> DoctorCheck {
+    let max_body_bytes = match configured_max_request_body_bytes(root) {
+        Ok(value) => value,
+        Err(message) => {
+            return DoctorCheck {
+                code: "storage-capabilities",
+                severity: DoctorSeverity::Error,
+                message,
+                hint: Some("Fix [server].max_body_bytes before validating storage capabilities."),
+            };
+        }
+    };
+    match configured_storage_capabilities(root, max_body_bytes) {
+        Ok(configs) if configs.is_empty() => DoctorCheck {
+            code: "storage-capabilities",
+            severity: DoctorSeverity::Ok,
+            message: "No storage capabilities are configured.".to_string(),
+            hint: Some(
+                "Add [storage.<name>] when the app needs bounded file persistence or uploads.",
+            ),
+        },
+        Ok(configs) => {
+            let summary = configs
+                .iter()
+                .map(|config| {
+                    format!(
+                        "{}={} ({}, {})",
+                        config.name,
+                        config.root.display(),
+                        storage_access_label(config.access),
+                        format_bytes(config.max_file_bytes as usize)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            DoctorCheck {
+                code: "storage-capabilities",
+                severity: DoctorSeverity::Ok,
+                message: format!("Storage capabilities: {summary}."),
+                hint: Some(
+                    "FileRef values identify stored content; route auth still controls access.",
+                ),
+            }
+        }
+        Err(errors) => DoctorCheck {
+            code: "storage-capabilities",
+            severity: DoctorSeverity::Error,
+            message: format_storage_config_errors(errors),
+            hint: Some("Run `cargo ax check` and fix invalid [storage.<name>] entries."),
         },
     }
 }
@@ -4101,6 +4392,25 @@ fn doctor_server_request_logging_check(root: &Path) -> DoctorCheck {
             severity: DoctorSeverity::Error,
             message,
             hint: Some("Set [server].request_logging to true/false and [server].log_format to \"text\" or \"json\"."),
+        },
+    }
+}
+
+fn doctor_api_response_validation_check(root: &Path) -> DoctorCheck {
+    match configured_api_response_validation(root) {
+        Ok(mode) => DoctorCheck {
+            code: "api-response-validation",
+            severity: DoctorSeverity::Ok,
+            message: format!("API response validation mode resolves to {}.", mode.label()),
+            hint: Some(
+                "Use development for local contract checks or always for production enforcement.",
+            ),
+        },
+        Err(message) => DoctorCheck {
+            code: "api-response-validation",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Set [server].api_response_validation to off, development, or always."),
         },
     }
 }
@@ -5511,64 +5821,16 @@ fn write_contract_report(path: &Path, report: &ContractReport) -> Result<()> {
 }
 
 fn parse_component_report_source(source: &str) -> Option<axonyx_core::ax_ast_v2_prelude::AxFileV2> {
-    let has_component_decl = source
+    let has_component = source
         .lines()
         .any(|line| line.trim_start().starts_with("component "));
     if let Ok(file) = parse_ax_v2(source) {
-        if has_component_decl && file.components.is_empty() {
-            // Component-only modules can look like loose page body to older syntax paths.
-            // Reparse them through a synthetic page so declarations stay declarations.
-        } else {
+        if !has_component || !file.components.is_empty() {
             return Some(file);
         }
     }
-    if !has_component_decl {
-        return None;
-    }
 
-    let mut prefix = Vec::new();
-    let mut body = Vec::new();
-    let mut in_prefix = true;
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if in_prefix
-            && (trimmed.is_empty() || trimmed.starts_with("use ") || trimmed.starts_with("import "))
-        {
-            prefix.push(line);
-        } else {
-            in_prefix = false;
-            body.push(line);
-        }
-    }
-
-    let mut synthetic = String::new();
-    if !prefix.is_empty() {
-        synthetic.push_str(&prefix.join("\n"));
-        synthetic.push_str("\n\n");
-    }
-    synthetic.push_str("page ComponentModule\n\n");
-    synthetic.push_str(&body.join("\n"));
-    synthetic.push_str("\n\n");
-    for component_name in component_names_from_source(source) {
-        synthetic.push_str(&format!("<{component_name} />\n"));
-    }
-
-    parse_ax_v2(&synthetic).ok()
-}
-
-fn component_names_from_source(source: &str) -> Vec<String> {
-    source
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim_start();
-            let rest = trimmed.strip_prefix("component ")?;
-            let name = rest
-                .split(|char: char| !(char.is_ascii_alphanumeric() || char == '_'))
-                .next()
-                .unwrap_or_default();
-            (!name.is_empty()).then(|| name.to_string())
-        })
-        .collect()
+    parse_ax_component_module_v2(source).ok().flatten()
 }
 
 fn collect_component_usage_report(
@@ -6309,6 +6571,13 @@ fn routes_report(root: &Path) -> Result<RoutesReport> {
 }
 
 fn api_command(args: ApiArgs) -> Result<()> {
+    if let Some(command) = args.command {
+        if args.schema || args.openapi || args.out.is_some() || args.format != CheckFormat::Text {
+            bail!("API inspect/pull subcommands cannot be combined with report/export flags");
+        }
+        return remote_api_contract_command(command);
+    }
+
     let root = app_root()?;
     let report = collect_api_report(&root)?;
 
@@ -6317,8 +6586,13 @@ fn api_command(args: ApiArgs) -> Result<()> {
     }
 
     if args.openapi {
-        let output = serde_json::to_string_pretty(&api_report_openapi_value(&report))?;
-        write_or_print_api_output(args.out.as_deref(), &output)?;
+        let mut document = api_report_openapi_value(&report);
+        let (title, version) = openapi_document_info(&root);
+        document["info"]["title"] = serde_json::Value::String(title);
+        document["info"]["version"] = serde_json::Value::String(version);
+        let output = serde_json::to_string_pretty(&document)?;
+        let out = resolve_openapi_output(&root, args.out.as_deref())?;
+        write_or_print_api_output(out.as_deref(), &output)?;
         return Ok(());
     }
 
@@ -6342,6 +6616,93 @@ fn api_command(args: ApiArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn remote_api_contract_command(command: ApiCommands) -> Result<()> {
+    match command {
+        ApiCommands::Inspect(args) => {
+            let document = read_api_contract_source(&args.source, args.allow_http, None)?;
+            let report = inspect_remote_api_contract(&args.source, &document)?;
+            verify_expected_contract_hash(args.expect_hash.as_deref(), &report)?;
+            match args.format {
+                CheckFormat::Text => print_remote_api_contract(&report),
+                CheckFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            }
+            Ok(())
+        }
+        ApiCommands::Pull(args) => {
+            let root = app_root()?;
+            let document = read_api_contract_source(&args.source, args.allow_http, Some(&root))?;
+            let report = inspect_remote_api_contract(&args.source, &document)?;
+            verify_expected_contract_hash(args.expect_hash.as_deref(), &report)?;
+            let out = resolve_remote_contract_output(
+                &root,
+                &args.source,
+                args.name.as_deref(),
+                args.out.as_deref(),
+            )?;
+            let rendered = serde_json::to_string_pretty(&document)?;
+            write_or_print_api_output(Some(&out), &rendered)?;
+            print_remote_api_contract(&report);
+            Ok(())
+        }
+    }
+}
+
+const DEFAULT_OPENAPI_OUTPUT: &str = "public/openapi.json";
+
+fn resolve_openapi_output(root: &Path, cli_out: Option<&Path>) -> Result<Option<PathBuf>> {
+    if let Some(out) = cli_out {
+        return resolve_openapi_output_path(root, out, "--out");
+    }
+
+    match axonyx_config_value(root, "api", "openapi_output") {
+        Some(toml::Value::String(out)) => {
+            resolve_openapi_output_path(root, Path::new(&out), "[api].openapi_output")
+        }
+        Some(_) => bail!("[api].openapi_output must be a path string or `-`"),
+        None => Ok(Some(root.join(DEFAULT_OPENAPI_OUTPUT))),
+    }
+}
+
+fn resolve_openapi_output_path(root: &Path, out: &Path, source: &str) -> Result<Option<PathBuf>> {
+    if out == Path::new("-") {
+        return Ok(None);
+    }
+    if out.as_os_str().is_empty() {
+        bail!("{source} cannot be empty");
+    }
+
+    Ok(Some(if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        root.join(out)
+    }))
+}
+
+fn openapi_document_info(root: &Path) -> (String, String) {
+    let app_name = axonyx_config_string(root, "app", "name")
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "Axonyx".to_string());
+    let title = axonyx_config_string(root, "api", "title")
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| format!("{app_name} API"));
+    let version = axonyx_config_string(root, "api", "version")
+        .filter(|version| !version.trim().is_empty())
+        .or_else(|| cargo_package_value(root, "version"))
+        .unwrap_or_else(|| "0.1.0".to_string());
+    (title, version)
+}
+
+fn cargo_package_value(root: &Path, key: &str) -> Option<String> {
+    let source = fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    source
+        .parse::<toml::Value>()
+        .ok()?
+        .get("package")?
+        .get(key)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn write_or_print_api_output(out: Option<&Path>, output: &str) -> Result<()> {
@@ -6380,7 +6741,12 @@ fn collect_api_report(root: &Path) -> Result<ApiReport> {
         })
         .collect();
 
-    finalize_api_report(routes, collect_project_type_schemas(root)?)
+    let mut report = finalize_api_report(routes, collect_project_type_schemas(root)?)?;
+    report.response_validation = configured_api_response_validation(root)
+        .map_err(anyhow::Error::msg)?
+        .label()
+        .to_string();
+    Ok(report)
 }
 
 fn finalize_api_report(
@@ -6418,6 +6784,7 @@ fn finalize_api_report(
     Ok(ApiReport {
         version: 1,
         contract_hash,
+        response_validation: AxApiResponseValidationMode::Development.label().to_string(),
         routes,
         schemas,
     })
@@ -6531,6 +6898,8 @@ fn collect_api_schema_type_names(ty: &AxType, names: &mut Vec<String>) {
         | AxType::Time
         | AxType::Uuid
         | AxType::Bytes
+        | AxType::File
+        | AxType::FileRef
         | AxType::Json
         | AxType::Never
         | AxType::Void
@@ -7864,6 +8233,7 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     diagnostics.extend(check_axonyx_config(root)?);
     diagnostics.extend(check_route_manifest(root)?);
     diagnostics.extend(check_action_patch_contracts(root)?);
+    diagnostics.extend(check_storage_action_contracts(root)?);
     diagnostics.extend(check_query_function_call_contracts(root)?);
     diagnostics.extend(check_generated_database_contract(root)?);
 
@@ -8071,6 +8441,81 @@ fn check_action_patch_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
     }
 
     Ok(diagnostics)
+}
+
+fn check_storage_action_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let Ok(max_body_bytes) = configured_max_request_body_bytes(root) else {
+        return Ok(Vec::new());
+    };
+    let Ok(configs) = configured_storage_capabilities(root, max_body_bytes) else {
+        return Ok(Vec::new());
+    };
+    let capabilities = configs
+        .iter()
+        .map(|config| (config.name.as_str(), config.access))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut sources = Vec::new();
+    collect_backend_sources(root, &mut sources)?;
+    let mut diagnostics = Vec::new();
+
+    for (name, source) in sources {
+        let Ok(document) = parse_backend_ax(&source) else {
+            continue;
+        };
+        let Ok(plan) = lower_backend_document(&document) else {
+            continue;
+        };
+        let file = backend_source_display_path(root, &name);
+
+        for handler in &plan.handlers {
+            for step in &handler.steps {
+                let AxStepPlan::Let {
+                    value: AxValuePlan::StorageSave { capability, .. },
+                    ..
+                } = step
+                else {
+                    continue;
+                };
+                let line = line_for_source_pattern(&source, "Storage.save(");
+                match capabilities.get(capability.as_str()) {
+                    None => diagnostics.push(CheckDiagnostic {
+                        file: file.clone(),
+                        line,
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-storage-capability",
+                        message: format!(
+                            "action `{}` writes to unknown storage capability `{capability}`. Add [storage.{capability}] to Axonyx.toml.",
+                            handler.name
+                        ),
+                    }),
+                    Some(access) if !access.can_write() => diagnostics.push(CheckDiagnostic {
+                        file: file.clone(),
+                        line,
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-storage-access",
+                        message: format!(
+                            "action `{}` cannot write to read-only storage capability `{capability}`.",
+                            handler.name
+                        ),
+                    }),
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+
+    Ok(diagnostics)
+}
+
+fn backend_source_display_path(root: &Path, relative: &str) -> String {
+    ["app", "routes", "jobs"]
+        .into_iter()
+        .map(|directory| root.join(directory).join(relative))
+        .find(|path| path.is_file())
+        .map(|path| display_path(&path))
+        .unwrap_or_else(|| relative.to_string())
 }
 
 fn collect_route_state_manifest_from_route_item(
@@ -8375,6 +8820,51 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     }
 
+    if let Some(validation) = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("api_response_validation"))
+    {
+        let valid = validation
+            .as_str()
+            .and_then(AxApiResponseValidationMode::parse)
+            .is_some();
+        if !valid {
+            diagnostics.push(CheckDiagnostic {
+                file: display_path(&path),
+                line: line_for_config_key(&source, "api_response_validation"),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-api-response-validation",
+                message: "[server].api_response_validation must be \"off\", \"development\", or \"always\"."
+                    .to_string(),
+            });
+        }
+    }
+
+    let max_body_bytes = value
+        .get("server")
+        .and_then(toml::Value::as_table)
+        .and_then(|server| server.get("max_body_bytes"))
+        .and_then(|value| parse_max_body_bytes_value(value).ok())
+        .unwrap_or(MAX_REQUEST_BODY_BYTES);
+    if let Err(errors) = parse_storage_capabilities(&value, max_body_bytes) {
+        diagnostics.extend(errors.into_iter().map(|error| {
+            CheckDiagnostic {
+                file: display_path(&path),
+                line: error
+                    .capability
+                    .as_deref()
+                    .map(|name| line_for_config_table(&source, &format!("storage.{name}")))
+                    .unwrap_or_else(|| line_for_config_table(&source, "storage")),
+                column: 1,
+                severity: "error",
+                code: "axonyx-config-storage",
+                message: error.message,
+            }
+        }));
+    }
+
     Ok(diagnostics)
 }
 
@@ -8382,6 +8872,15 @@ fn line_for_config_key(source: &str, key: &str) -> usize {
     source
         .lines()
         .position(|line| line.trim_start().starts_with(key))
+        .map(|index| index + 1)
+        .unwrap_or(1)
+}
+
+fn line_for_config_table(source: &str, table: &str) -> usize {
+    let header = format!("[{table}]");
+    source
+        .lines()
+        .position(|line| line.trim() == header)
         .map(|index| index + 1)
         .unwrap_or(1)
 }
@@ -10228,6 +10727,7 @@ fn is_supported_backend_return_contract(ty: &str) -> bool {
             | "Number"
             | "Json"
             | "Null"
+            | "FileRef"
             | "string"
             | "bool"
             | "boolean"
@@ -10274,6 +10774,7 @@ fn is_builtin_backend_return_type(ty: &str) -> bool {
             | "Number"
             | "Json"
             | "Null"
+            | "FileRef"
             | "string"
             | "bool"
             | "boolean"
@@ -10323,6 +10824,10 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
             value: AxValuePlan::Query(query),
             ..
         } => query_uses_input_scope(query),
+        AxStepPlan::Let {
+            value: AxValuePlan::StorageSave { .. },
+            ..
+        } => true,
         AxStepPlan::Transaction { operations } => operations
             .iter()
             .any(transaction_operation_uses_input_scope),
@@ -10419,7 +10924,16 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
                 .iter()
                 .any(transaction_operation_uses_signed_session),
             AxStepPlan::Send { payload, .. } => payload.code.contains("Auth.signedSession"),
-            AxStepPlan::Let { .. } | AxStepPlan::Delete { .. } | AxStepPlan::Return(_) => false,
+            AxStepPlan::Let {
+                value: AxValuePlan::StorageSave { .. },
+                ..
+            }
+            | AxStepPlan::Let {
+                value: AxValuePlan::Query(_),
+                ..
+            }
+            | AxStepPlan::Delete { .. }
+            | AxStepPlan::Return(_) => false,
         })
     })
 }
@@ -10540,6 +11054,10 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
                 collect_env_refs_from_expr(&filter.value, refs);
             }
         }
+        AxStepPlan::Let {
+            value: AxValuePlan::StorageSave { .. },
+            ..
+        } => {}
         AxStepPlan::Require { value, fallback } => {
             collect_env_refs_from_expr(value, refs);
             if let Some(fallback) = fallback {
@@ -12130,10 +12648,13 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let bind = server_config.bind_addr();
     let preview_store = preview_store_from_content(&root)?;
     let database_required = project_uses_database_runtime(&root)?;
+    let storage_registry = configured_storage_registry(&root, runtime_config.max_body_bytes)
+        .map_err(anyhow::Error::msg)?;
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(preview_store),
         runtime_config,
+        storage_registry,
         database_required,
     });
 
@@ -12163,6 +12684,10 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     println!(
         "Request body limit: {}",
         format_bytes(runtime_config.max_body_bytes)
+    );
+    println!(
+        "Storage capabilities: {}.",
+        shared_state.storage_registry.len()
     );
     println!(
         "Request read timeout: {} second{}",
@@ -12312,13 +12837,24 @@ fn build_compiled_production_binary(
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let database_required = project_uses_database_runtime(root)?;
+    let runtime_config = AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?;
+    let storage_configs = configured_storage_capabilities(root, runtime_config.max_body_bytes)
+        .map_err(format_storage_config_errors)
+        .map_err(anyhow::Error::msg)?;
+    let validate_api_responses = configured_api_response_validation(root)
+        .map_err(anyhow::Error::msg)?
+        .enabled(false);
     let source = compiled_production_source(
         &dist_literal,
         &signal_aliases,
         &data_bindings,
         &page_renderers,
-        &database_runtime_defaults,
-        database_required,
+        CompiledProductionOptions {
+            database_runtime_defaults: &database_runtime_defaults,
+            database_required,
+            validate_api_responses,
+            storage_configs: &storage_configs,
+        },
     );
     fs::write(&source_path, source).with_context(|| {
         format!(
@@ -12327,8 +12863,12 @@ fn build_compiled_production_binary(
         )
     })?;
 
-    let status = Command::new("cargo")
-        .args(["build", "--release", "--bin", "axonyx-production"])
+    let mut command = Command::new("cargo");
+    command.args(["build", "--release", "--bin", "axonyx-production"]);
+    if !storage_configs.is_empty() {
+        command.args(["--features", "axonyx-runtime/storage"]);
+    }
+    let status = command
         .current_dir(root)
         .status()
         .context("failed to invoke cargo for the compiled production server")?;
@@ -12344,12 +12884,47 @@ fn build_compiled_production_binary(
 }
 
 fn compiled_production_binary_path(root: &Path) -> PathBuf {
+    let target = cargo_target_directory(root);
+    compiled_production_binary_path_with_target(root, target.as_deref())
+}
+
+fn compiled_production_binary_path_with_target(
+    root: &Path,
+    cargo_target_dir: Option<&Path>,
+) -> PathBuf {
     let name = if cfg!(windows) {
         "axonyx-production.exe"
     } else {
         "axonyx-production"
     };
-    root.join("target").join("release").join(name)
+    let target = cargo_target_dir.map_or_else(
+        || root.join("target"),
+        |target| {
+            if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                root.join(target)
+            }
+        },
+    );
+    target.join("release").join(name)
+}
+
+fn cargo_target_directory(root: &Path) -> Option<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()?
+        .get("target_directory")?
+        .as_str()
+        .map(PathBuf::from)
 }
 
 fn compiled_action_signal_aliases(root: &Path) -> Result<Vec<(String, String, String)>> {
@@ -12509,14 +13084,40 @@ fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
     Ok(steps)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CompiledProductionOptions<'a> {
+    database_runtime_defaults: &'a str,
+    database_required: bool,
+    validate_api_responses: bool,
+    storage_configs: &'a [AxStorageCapabilityConfig],
+}
+
 fn compiled_production_source(
     dist_literal: &str,
     signal_aliases: &[(String, String, String)],
     data_bindings: &[CompiledDataBinding],
     page_renderers: &[CompiledPageRenderer],
-    database_runtime_defaults: &str,
-    database_required: bool,
+    options: CompiledProductionOptions<'_>,
 ) -> String {
+    let CompiledProductionOptions {
+        database_runtime_defaults,
+        database_required,
+        validate_api_responses,
+        storage_configs,
+    } = options;
+    let storage_import = if storage_configs.is_empty() {
+        "use axonyx_runtime::server_prelude::{AxFileStorage, AxUnavailableFileStorage};\n"
+            .to_string()
+    } else {
+        "use axonyx_runtime::server_prelude::AxFileStorage;\nuse axonyx_runtime::storage_prelude::{AxCapabilityStorage, AxStorageAccess, AxStorageError, AxStorageRegistry};\n"
+            .to_string()
+    };
+    let storage_init = if storage_configs.is_empty() {
+        "    let storage = Arc::new(AxUnavailableFileStorage);\n".to_string()
+    } else {
+        "    let storage = Arc::new(configured_file_storage()?);\n".to_string()
+    };
+    let storage_bootstrap = compiled_storage_bootstrap(storage_configs);
     let signal_match_arms = signal_aliases
         .iter()
         .map(|(route, alias, canonical)| {
@@ -12598,7 +13199,7 @@ use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
 use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
-use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
+{storage_import}use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
 
 #[path = "../generated/backend.rs"]
@@ -12614,6 +13215,7 @@ struct CompiledBinding {{
 }}
 
 const DATABASE_REQUIRED: bool = {database_required};
+const VALIDATE_API_RESPONSES: bool = {validate_api_responses};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let host = std::env::var("AXONYX_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -12622,8 +13224,9 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let dist = PathBuf::from({dist_literal});
     let mut env = AxEnv::from_env();
 {database_runtime_defaults}    let runtime = Arc::new(lazy_runtime_from_env(env)?);
+{storage_init}
     let handler: AxCompiledHandler =
-        Arc::new(move |request| handle_request(&dist, runtime.as_ref(), request));
+        Arc::new(move |request| handle_request(&dist, runtime.as_ref(), storage.as_ref(), request));
     println!("Axonyx compiled production server listening at http://{{bind}}");
     serve_compiled_axum(bind, 1024 * 1024, handler)
 }}
@@ -12631,6 +13234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
 fn handle_request(
     dist: &Path,
     runtime: &impl AxBackendRuntime,
+    storage: &impl AxFileStorage,
     request: AxHttpRequest,
 ) -> AxHttpResponse {{
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/health") {{
@@ -12642,7 +13246,7 @@ fn handle_request(
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/action") {{
-        return secure(handle_compiled_action(runtime, &request));
+        return secure(handle_compiled_action(runtime, storage, &request));
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/data") {{
@@ -12650,13 +13254,16 @@ fn handle_request(
     }}
 
     if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
-        let response = backend::dispatch_api_route(runtime, &request);
+        let response = backend::dispatch_api_route(runtime, &request, VALIDATE_API_RESPONSES);
         return secure(match response {{
             Ok(Some(response)) => response,
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
             Err(error) => {{
                 eprintln!("Axonyx compiled API error: {{error}}");
-                AxHttpResponse::text(500, "Internal Server Error")
+                AxHttpResponse::json(500, &json!({{
+                    "error": "internal_server_error",
+                    "message": "API request could not be completed."
+                }})).unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store()
             }}
         }});
     }}
@@ -12715,6 +13322,7 @@ fn readiness_response(runtime: &impl AxBackendRuntime) -> AxHttpResponse {{
 
 fn handle_compiled_action(
     runtime: &impl AxBackendRuntime,
+    storage: &impl AxFileStorage,
     request: &AxHttpRequest,
 ) -> AxHttpResponse {{
     if !request.method.eq_ignore_ascii_case("POST") {{
@@ -12730,8 +13338,9 @@ fn handle_compiled_action(
     let content_type = request.header_value("Content-Type").unwrap_or("");
     if !content_type.starts_with("application/x-www-form-urlencoded")
         && !content_type.starts_with("application/json")
+        && !content_type.starts_with("multipart/form-data")
     {{
-        return AxHttpResponse::text(415, "expected form-urlencoded or JSON action input")
+        return AxHttpResponse::text(415, "expected form-urlencoded, multipart, or JSON action input")
             .with_no_store();
     }}
 
@@ -12746,7 +13355,7 @@ fn handle_compiled_action(
         .map(safe_action_route)
         .unwrap_or_else(|| "/".to_string());
 
-    let dispatched = backend::dispatch_action(runtime, &name, request);
+    let dispatched = backend::dispatch_action(runtime, storage, &name, request);
 
     match dispatched {{
         Ok(Some(mut payload)) => {{
@@ -13051,6 +13660,38 @@ fn secure(response: AxHttpResponse) -> AxHttpResponse {{
         .with_header("X-Frame-Options", "SAMEORIGIN")
         .with_header("Referrer-Policy", "strict-origin-when-cross-origin")
 }}
+{storage_bootstrap}"#
+    )
+}
+
+fn compiled_storage_bootstrap(configs: &[AxStorageCapabilityConfig]) -> String {
+    if configs.is_empty() {
+        return String::new();
+    }
+
+    let registrations = configs
+        .iter()
+        .map(|config| {
+            let root = config.root.to_string_lossy().replace('\\', "/");
+            let access = match config.access {
+                AxStorageAccess::Read => "AxStorageAccess::Read",
+                AxStorageAccess::Write => "AxStorageAccess::Write",
+                AxStorageAccess::ReadWrite => "AxStorageAccess::ReadWrite",
+            };
+            format!(
+                "    registry.register(AxCapabilityStorage::open_with_access({name:?}, PathBuf::from({root:?}), {max_file_bytes}, {access})?)?;\n",
+                name = config.name,
+                max_file_bytes = config.max_file_bytes,
+            )
+        })
+        .collect::<String>();
+
+    format!(
+        r#"
+fn configured_file_storage() -> Result<AxStorageRegistry, AxStorageError> {{
+    let mut registry = AxStorageRegistry::new();
+{registrations}    Ok(registry)
+}}
 "#
     )
 }
@@ -13121,6 +13762,7 @@ fn build_static_site_from_app_root(
         root: root.to_path_buf(),
         preview_store: Mutex::new(preview_store_from_content(root)?),
         runtime_config: AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?,
+        storage_registry: AxStorageRegistry::new(),
         database_required: project_uses_database_runtime(root)?,
     };
 
@@ -14642,6 +15284,7 @@ fn print_api_text(report: &ApiReport) {
     }
 
     println!("API contract v{} {}:", report.version, report.contract_hash);
+    println!("Response validation: {}", report.response_validation);
     for route in &report.routes {
         let mut details = vec![format!("file={}", route.file)];
         if let Some(returns) = &route.returns {
@@ -14701,6 +15344,8 @@ fn print_api_schema_text(report: &ApiReport) {
         return;
     }
 
+    println!("// response-validation: {}", report.response_validation);
+
     for route in &report.routes {
         println!("// {} {}", route.method, route.route);
         println!("// request-hash: {}", route.request_hash);
@@ -14758,6 +15403,7 @@ fn api_report_openapi_value(report: &ApiReport) -> serde_json::Value {
         "openapi": "3.1.0",
         "x-axonyx-contract-version": report.version,
         "x-axonyx-contract-hash": report.contract_hash,
+        "x-axonyx-response-validation": report.response_validation,
         "info": {
             "title": "Axonyx API",
             "version": "0.1.0"
@@ -16526,7 +17172,7 @@ fn handle_http_request(
         return Ok(AxHttpResponse::text(200, version).with_no_store());
     }
 
-    if let Some(response) = execute_backend_route_request(state, &request)? {
+    if let Some(response) = execute_backend_route_request(state, mode, &request)? {
         return Ok(preview_response_to_http(response));
     }
 
@@ -16851,6 +17497,7 @@ async fn axum_request_to_dev_request(
         target,
         headers,
         body,
+        multipart: None,
     })
 }
 
@@ -16996,6 +17643,7 @@ fn normalize_request_for_routing(mut request: AxHttpRequest) -> AxHttpRequest {
 
 fn execute_backend_route_request(
     state: &DevServerState,
+    mode: AxServerMode,
     request: &AxHttpRequest,
 ) -> Result<Option<AxPreviewHttpResponse>> {
     let mut sources = Vec::new();
@@ -17020,15 +17668,20 @@ fn execute_backend_route_request(
         .preview_store
         .lock()
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+    let validate_response = state
+        .runtime_config
+        .api_response_validation
+        .enabled(mode == AxServerMode::Dev);
 
     if uses_db_runtime {
         let env = db_env_for_root(&state.root, None)?;
         let runtime = ax_backend_runtime::runtime_from_env(env)
             .with_context(|| "failed to initialize backend runtime from environment")?;
-        execute_preview_route_request_sources_with_runtime(
+        execute_preview_route_request_sources_with_runtime_validated(
             &source_refs,
             request,
             &runtime,
+            validate_response,
             &mut store,
         )
         .with_context(|| {
@@ -17038,14 +17691,18 @@ fn execute_backend_route_request(
             )
         })
     } else {
-        execute_preview_route_request_sources(&source_refs, request, &mut store).with_context(
-            || {
-                format!(
-                    "failed to execute backend route {} {}",
-                    request.method, request.target
-                )
-            },
+        execute_preview_route_request_sources_validated(
+            &source_refs,
+            request,
+            validate_response,
+            &mut store,
         )
+        .with_context(|| {
+            format!(
+                "failed to execute backend route {} {}",
+                request.method, request.target
+            )
+        })
     }
 }
 
@@ -17347,6 +18004,7 @@ fn read_http_request(
         target,
         headers,
         body,
+        multipart: None,
     }))
 }
 
@@ -17427,6 +18085,7 @@ fn parse_http_request_buffer(buffer: &[u8]) -> Result<Option<AxHttpRequest>> {
         target,
         headers,
         body,
+        multipart: None,
     }))
 }
 
@@ -17457,6 +18116,200 @@ fn request_content_length(request: &AxHttpRequest) -> Option<usize> {
 fn request_body_exceeds_limit(request: &AxHttpRequest, max_body_bytes: usize) -> bool {
     request.body.len() > max_body_bytes
         || request_content_length(request).is_some_and(|length| length > max_body_bytes)
+}
+
+fn configured_storage_capabilities(
+    root: &Path,
+    max_body_bytes: usize,
+) -> std::result::Result<Vec<AxStorageCapabilityConfig>, Vec<AxStorageConfigError>> {
+    let path = root.join("Axonyx.toml");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(&path).map_err(|error| {
+        vec![AxStorageConfigError {
+            capability: None,
+            message: format!("failed to read '{}': {error}", path.display()),
+        }]
+    })?;
+    let value = match source.parse::<toml::Value>() {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(vec![AxStorageConfigError {
+                capability: None,
+                message: format!("failed to parse Axonyx.toml: {error}"),
+            }]);
+        }
+    };
+    parse_storage_capabilities(&value, max_body_bytes)
+}
+
+fn parse_storage_capabilities(
+    value: &toml::Value,
+    max_body_bytes: usize,
+) -> std::result::Result<Vec<AxStorageCapabilityConfig>, Vec<AxStorageConfigError>> {
+    let Some(storage) = value.get("storage") else {
+        return Ok(Vec::new());
+    };
+    let Some(storage) = storage.as_table() else {
+        return Err(vec![AxStorageConfigError {
+            capability: None,
+            message: "[storage] must contain named capability tables.".to_string(),
+        }]);
+    };
+
+    let mut configs = Vec::new();
+    let mut errors = Vec::new();
+    for (name, value) in storage {
+        match parse_storage_capability(name, value, max_body_bytes) {
+            Ok(config) => configs.push(config),
+            Err(message) => errors.push(AxStorageConfigError {
+                capability: Some(name.clone()),
+                message,
+            }),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(configs)
+    } else {
+        Err(errors)
+    }
+}
+
+fn parse_storage_capability(
+    name: &str,
+    value: &toml::Value,
+    max_body_bytes: usize,
+) -> std::result::Result<AxStorageCapabilityConfig, String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(format!("storage capability name `{name}` is invalid."));
+    }
+    let table = value
+        .as_table()
+        .ok_or_else(|| format!("[storage.{name}] must be a table."))?;
+    for key in table.keys() {
+        if !matches!(key.as_str(), "root" | "access" | "max_file_bytes") {
+            return Err(format!(
+                "[storage.{name}].{key} is not supported; use root, access, or max_file_bytes."
+            ));
+        }
+    }
+
+    let root = table
+        .get("root")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| format!("[storage.{name}].root must be a string."))?;
+    let root = validate_storage_root(name, root)?;
+    let access = table
+        .get("access")
+        .and_then(toml::Value::as_str)
+        .and_then(parse_storage_access)
+        .ok_or_else(|| {
+            format!("[storage.{name}].access must be \"read\", \"write\", or \"read-write\".")
+        })?;
+    let max_file_bytes = table
+        .get("max_file_bytes")
+        .ok_or_else(|| format!("[storage.{name}].max_file_bytes is required."))
+        .and_then(|value| {
+            parse_max_body_bytes_value(value).map_err(|_| {
+                format!(
+                    "[storage.{name}].max_file_bytes must be a positive integer or byte-size string."
+                )
+            })
+        })?;
+    if access.can_write() && max_file_bytes > max_body_bytes {
+        return Err(format!(
+            "[storage.{name}].max_file_bytes ({}) cannot exceed [server].max_body_bytes ({}).",
+            format_bytes(max_file_bytes),
+            format_bytes(max_body_bytes)
+        ));
+    }
+
+    Ok(AxStorageCapabilityConfig {
+        name: name.to_string(),
+        root,
+        access,
+        max_file_bytes: max_file_bytes as u64,
+    })
+}
+
+fn parse_storage_access(value: &str) -> Option<AxStorageAccess> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "read" => Some(AxStorageAccess::Read),
+        "write" => Some(AxStorageAccess::Write),
+        "read-write" => Some(AxStorageAccess::ReadWrite),
+        _ => None,
+    }
+}
+
+fn storage_access_label(access: AxStorageAccess) -> &'static str {
+    match access {
+        AxStorageAccess::Read => "read",
+        AxStorageAccess::Write => "write",
+        AxStorageAccess::ReadWrite => "read-write",
+    }
+}
+
+fn validate_storage_root(name: &str, value: &str) -> std::result::Result<PathBuf, String> {
+    let path = Path::new(value);
+    let mut components = path.components();
+    if value.trim().is_empty()
+        || value.contains('\\')
+        || path.is_absolute()
+        || !matches!(components.next(), Some(std::path::Component::Normal(root)) if root == "storage")
+        || components.any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(format!(
+            "[storage.{name}].root must be a project-relative path inside storage/ without `.` or `..`."
+        ));
+    }
+    if path.components().count() < 2 {
+        return Err(format!(
+            "[storage.{name}].root must name a directory below storage/, not the storage root itself."
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn configured_storage_registry(
+    root: &Path,
+    max_body_bytes: usize,
+) -> std::result::Result<AxStorageRegistry, String> {
+    let configs = configured_storage_capabilities(root, max_body_bytes)
+        .map_err(format_storage_config_errors)?;
+    let mut registry = AxStorageRegistry::new();
+    for config in configs {
+        let storage = AxCapabilityStorage::open_with_access(
+            &config.name,
+            root.join(&config.root),
+            config.max_file_bytes,
+            config.access,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to open storage capability `{}`: {error}",
+                config.name
+            )
+        })?;
+        registry
+            .register(storage)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(registry)
+}
+
+fn format_storage_config_errors(errors: Vec<AxStorageConfigError>) -> String {
+    errors
+        .into_iter()
+        .map(|error| error.message)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn configured_max_request_body_bytes(root: &Path) -> std::result::Result<usize, String> {
@@ -17503,6 +18356,24 @@ fn configured_server_log_format(root: &Path) -> std::result::Result<AxServerLogF
     match axonyx_config_value(root, "server", "log_format") {
         Some(value) => parse_server_log_format_value(&value),
         None => parse_server_log_format_str(DEFAULT_LOG_FORMAT),
+    }
+}
+
+fn configured_api_response_validation(
+    root: &Path,
+) -> std::result::Result<AxApiResponseValidationMode, String> {
+    match axonyx_config_value(root, "server", "api_response_validation") {
+        Some(toml::Value::String(value)) => {
+            AxApiResponseValidationMode::parse(&value).ok_or_else(|| {
+                "[server].api_response_validation must be \"off\", \"development\", or \"always\"."
+                    .to_string()
+            })
+        }
+        Some(_) => Err(
+            "[server].api_response_validation must be \"off\", \"development\", or \"always\"."
+                .to_string(),
+        ),
+        None => Ok(AxApiResponseValidationMode::Development),
     }
 }
 
@@ -17657,10 +18528,14 @@ fn handle_action_request(
     request: &AxHttpRequest,
 ) -> Result<AxHttpResponse> {
     let content_type = request.header_value("Content-Type").unwrap_or("");
-    if !content_type.starts_with("application/x-www-form-urlencoded") {
-        return Ok(
-            AxHttpResponse::text(415, "expected application/x-www-form-urlencoded").with_no_store(),
-        );
+    if !content_type.starts_with("application/x-www-form-urlencoded")
+        && !content_type.starts_with("multipart/form-data")
+    {
+        return Ok(AxHttpResponse::text(
+            415,
+            "expected application/x-www-form-urlencoded or multipart/form-data",
+        )
+        .with_no_store());
     }
 
     let request_path =
@@ -17683,39 +18558,49 @@ fn handle_action_request(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let input_fields = parse_form_body(&request.body);
-    let result = if mode == AxServerMode::Start
-        && backend_source_refs_use_database(&action_source_refs)?
-    {
-        let mut store = state
-            .preview_store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
-            .clone();
-        let env = db_env_for_root(&state.root, None)?;
-        let runtime = ax_backend_runtime::runtime_from_env(env)
-            .with_context(|| "failed to initialize action database runtime from environment")?;
-        execute_preview_action_sources_with_runtime(
-            &action_source_refs,
-            &action_name,
-            &input_fields,
-            &runtime,
-            &mut store,
-        )
-    } else {
-        let mut store = state
-            .preview_store
-            .lock()
-            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
-        execute_preview_action_sources(&action_source_refs, &action_name, &input_fields, &mut store)
-    }
-    .with_context(|| {
-        format!(
-            "failed to execute action '{}' from '{}'",
-            action_name,
-            actions_path.display()
-        )
-    })?;
+    let input_fields = request
+        .multipart
+        .as_ref()
+        .map(|form| form.fields.clone())
+        .unwrap_or_else(|| parse_form_body(&request.body));
+    let result =
+        if mode == AxServerMode::Start && backend_source_refs_use_database(&action_source_refs)? {
+            let mut store = state
+                .preview_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
+                .clone();
+            let env = db_env_for_root(&state.root, None)?;
+            let runtime = ax_backend_runtime::runtime_from_env(env)
+                .with_context(|| "failed to initialize action database runtime from environment")?;
+            execute_preview_action_request_sources_with_runtime_and_storage(
+                &action_source_refs,
+                &action_name,
+                request,
+                &runtime,
+                &state.storage_registry,
+                &mut store,
+            )
+        } else {
+            let mut store = state
+                .preview_store
+                .lock()
+                .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+            execute_preview_action_request_sources_with_storage(
+                &action_source_refs,
+                &action_name,
+                request,
+                &state.storage_registry,
+                &mut store,
+            )
+        }
+        .with_context(|| {
+            format!(
+                "failed to execute action '{}' from '{}'",
+                action_name,
+                actions_path.display()
+            )
+        })?;
 
     if wants_action_patch_response(request, &input_fields) {
         return action_patch_response(&route, &result);
@@ -20011,6 +20896,7 @@ mod tests {
             root: root.to_path_buf(),
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::default(),
+            storage_registry: AxStorageRegistry::new(),
             database_required: project_uses_database_runtime(root).unwrap_or(false),
         }
     }
@@ -20903,6 +21789,13 @@ route GET "/api/posts" -> Post[]
     }
 
     #[test]
+    fn file_contracts_do_not_create_named_api_schema_dependencies() {
+        assert!(api_schema_type_names("File").is_empty());
+        assert!(api_schema_type_names("FileRef").is_empty());
+        assert!(api_schema_type_names("Optional<FileRef>").is_empty());
+    }
+
+    #[test]
     fn api_output_writer_creates_parent_directories() {
         let root = make_temp_dir("api-output-writer");
         let out = root.join("public/contracts/openapi.json");
@@ -20912,6 +21805,183 @@ route GET "/api/posts" -> Post[]
 
         let written = fs::read_to_string(&out).expect("openapi output should exist");
         assert_eq!(written, "{\"openapi\":\"3.1.0\"}\n");
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn openapi_output_defaults_to_public_file_and_supports_stdout() {
+        let root = make_temp_dir("openapi-output-default");
+
+        assert_eq!(
+            resolve_openapi_output(&root, None).expect("default output should resolve"),
+            Some(root.join("public/openapi.json"))
+        );
+        assert_eq!(
+            resolve_openapi_output(&root, Some(Path::new("-")))
+                .expect("stdout output should resolve"),
+            None
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn openapi_output_and_info_can_be_configured() {
+        let root = make_temp_dir("openapi-output-config");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"forge\"\n\n[api]\nopenapi_output = \"contracts/api.json\"\ntitle = \"Forge Public API\"\nversion = \"2026.1\"\n",
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"forge\"\nversion = \"9.9.9\"\n",
+        )
+        .expect("cargo manifest should write");
+
+        assert_eq!(
+            resolve_openapi_output(&root, None).expect("configured output should resolve"),
+            Some(root.join("contracts/api.json"))
+        );
+        assert_eq!(
+            openapi_document_info(&root),
+            ("Forge Public API".to_string(), "2026.1".to_string())
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn openapi_info_uses_app_name_and_cargo_version_by_default() {
+        let root = make_temp_dir("openapi-info-default");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"forge\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"forge\"\nversion = \"2.4.1\"\n",
+        )
+        .expect("cargo manifest should write");
+
+        assert_eq!(
+            openapi_document_info(&root),
+            ("forge API".to_string(), "2.4.1".to_string())
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn remote_api_contract_inspection_reports_stable_identity() {
+        let declared = format!("sha256:{}", "a".repeat(64));
+        let document = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "Forge API", "version": "2.4.1" },
+            "x-axonyx-contract-hash": declared,
+            "x-axonyx-response-validation": "always",
+            "paths": {
+                "/posts": {
+                    "parameters": [],
+                    "get": {},
+                    "post": {}
+                }
+            },
+            "components": { "schemas": { "Post": {} } }
+        });
+
+        let report =
+            inspect_remote_api_contract("https://api.example/openapi.json?token=secret", &document)
+                .expect("remote contract should inspect");
+
+        assert_eq!(report.source, "https://api.example/openapi.json");
+        assert_eq!(report.openapi, "3.1.0");
+        assert_eq!(report.title, "Forge API");
+        assert_eq!(report.version, "2.4.1");
+        assert_eq!(report.contract_hash, declared);
+        assert!(report.document_hash.starts_with("sha256:"));
+        assert_eq!(report.response_validation.as_deref(), Some("always"));
+        assert_eq!(report.paths, 1);
+        assert_eq!(report.operations, 2);
+        assert_eq!(report.schemas, 1);
+        verify_expected_contract_hash(Some(&report.document_hash), &report)
+            .expect("matching expected hash should pass");
+    }
+
+    #[test]
+    fn remote_api_contract_rejects_invalid_documents_and_hash_drift() {
+        let invalid = serde_json::json!({
+            "openapi": "2.0",
+            "info": { "title": "Old API", "version": "1" },
+            "paths": {}
+        });
+        assert!(inspect_remote_api_contract("old.json", &invalid)
+            .expect_err("OpenAPI 2 should fail")
+            .to_string()
+            .contains("expected OpenAPI 3.x"));
+
+        let document = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "Forge API", "version": "1" },
+            "paths": {}
+        });
+        let report =
+            inspect_remote_api_contract("forge.json", &document).expect("OpenAPI 3 should inspect");
+        let wrong = format!("sha256:{}", "f".repeat(64));
+        assert!(verify_expected_contract_hash(Some(&wrong), &report)
+            .expect_err("hash drift should fail")
+            .to_string()
+            .contains("hash mismatch"));
+    }
+
+    #[test]
+    fn remote_api_contract_url_policy_prefers_https_and_loopback_http() {
+        validate_remote_contract_url("https://api.example/openapi.json", false)
+            .expect("HTTPS should pass");
+        validate_remote_contract_url("http://127.0.0.1:3000/openapi.json", false)
+            .expect("IPv4 loopback should pass");
+        validate_remote_contract_url("http://[::1]:3000/openapi.json", false)
+            .expect("IPv6 loopback should pass");
+        validate_remote_contract_url("http://api.example/openapi.json", true)
+            .expect("explicit insecure HTTP should pass");
+
+        assert!(
+            validate_remote_contract_url("http://api.example/openapi.json", false)
+                .expect_err("remote HTTP should fail")
+                .to_string()
+                .contains("--allow-http")
+        );
+        assert!(validate_remote_contract_url(
+            "https://user:secret@api.example/openapi.json",
+            false
+        )
+        .expect_err("embedded credentials should fail")
+        .to_string()
+        .contains("embedded credentials"));
+    }
+
+    #[test]
+    fn remote_api_contract_pull_uses_safe_project_snapshot_path() {
+        let root = make_temp_dir("remote-contract-output");
+        assert_eq!(
+            resolve_remote_contract_output(
+                &root,
+                "https://api.example:8443/openapi.json",
+                None,
+                None,
+            )
+            .expect("default snapshot should resolve"),
+            root.join(".axonyx/contracts/api-example.openapi.json")
+        );
+        assert_eq!(
+            resolve_remote_contract_output(
+                &root,
+                "https://api.example/openapi.json",
+                Some("Billing V2"),
+                None,
+            )
+            .expect("named snapshot should resolve"),
+            root.join(".axonyx/contracts/billing-v2.openapi.json")
+        );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -22131,6 +23201,160 @@ component ThemeSwitch() {
     }
 
     #[test]
+    fn storage_config_builds_named_capability_registry() {
+        let root = make_temp_dir("storage-capability-registry");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"[app]
+name = "demo"
+
+[server]
+max_body_bytes = "2mb"
+
+[storage.media]
+root = "storage/uploads"
+access = "read-write"
+max_file_bytes = "1mb"
+"#,
+        )
+        .expect("config should write");
+
+        let configs = configured_storage_capabilities(&root, 2 * 1024 * 1024)
+            .expect("storage config should parse");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "media");
+        assert_eq!(configs[0].root, PathBuf::from("storage/uploads"));
+        assert_eq!(configs[0].access, AxStorageAccess::ReadWrite);
+        assert_eq!(configs[0].max_file_bytes, 1024 * 1024);
+
+        let registry = configured_storage_registry(&root, 2 * 1024 * 1024)
+            .expect("storage registry should open");
+        assert_eq!(registry.names().collect::<Vec<_>>(), vec!["media"]);
+        assert!(root.join("storage/uploads").is_dir());
+
+        drop(registry);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn check_app_sources_validates_storage_action_capabilities() {
+        let root = make_temp_dir("storage-action-contracts");
+        fs::create_dir_all(root.join("app/posts")).expect("actions dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"[app]
+name = "demo"
+
+[server]
+max_body_bytes = "2mb"
+
+[storage.media]
+root = "storage/media"
+access = "read"
+max_file_bytes = "1mb"
+"#,
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/posts/actions.ax"),
+            r#"action SaveMedia(image: File) -> FileRef {
+  data saved = Storage.save("media", input.image)
+  return json(saved)
+}
+
+action SaveMissing(image: File) -> FileRef {
+  data saved = Storage.save("documents", input.image)
+  return json(saved)
+}
+"#,
+        )
+        .expect("actions should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-storage-access"
+                && diagnostic.file.ends_with("app/posts/actions.ax")
+                && diagnostic.message.contains("read-only")
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-storage-capability"
+                && diagnostic.file.ends_with("app/posts/actions.ax")
+                && diagnostic.message.contains("[storage.documents]")
+        }));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn storage_config_rejects_roots_outside_storage_tree() {
+        for invalid_root in ["../private", "public/uploads", "storage/../private"] {
+            let value = format!(
+                r#"[storage.media]
+root = "{invalid_root}"
+access = "write"
+max_file_bytes = "512kb"
+"#
+            )
+            .parse::<toml::Value>()
+            .expect("config should parse as TOML");
+
+            let errors = parse_storage_capabilities(&value, 1024 * 1024)
+                .expect_err("unsafe storage root should fail");
+            assert!(errors[0].message.contains("inside storage/"));
+        }
+    }
+
+    #[test]
+    fn storage_config_requires_explicit_access_and_respects_body_limit() {
+        let missing_access = r#"[storage.media]
+root = "storage/uploads"
+max_file_bytes = "512kb"
+"#
+        .parse::<toml::Value>()
+        .expect("config should parse as TOML");
+        let errors = parse_storage_capabilities(&missing_access, 1024 * 1024)
+            .expect_err("missing access should fail");
+        assert!(errors[0].message.contains("access"));
+
+        let oversized = r#"[storage.media]
+root = "storage/uploads"
+access = "write"
+max_file_bytes = "2mb"
+"#
+        .parse::<toml::Value>()
+        .expect("config should parse as TOML");
+        let errors = parse_storage_capabilities(&oversized, 1024 * 1024)
+            .expect_err("write capability above request limit should fail");
+        assert!(errors[0].message.contains("cannot exceed"));
+    }
+
+    #[test]
+    fn check_reports_invalid_storage_capability_at_its_table() {
+        let root = make_temp_dir("invalid-storage-capability");
+        fs::create_dir_all(root.join("app")).expect("app dir should exist");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[app]\nname = \"demo\"\n\n[storage.media]\nroot = \"../uploads\"\naccess = \"write\"\nmax_file_bytes = \"512kb\"\n",
+        )
+        .expect("config should write");
+        fs::write(
+            root.join("app/page.asx"),
+            "page Home() { return ASX { <Copy>Home</Copy> } }\n",
+        )
+        .expect("page should write");
+
+        let diagnostics = check_app_sources(&root).expect("check should run");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "axonyx-config-storage"
+                && diagnostic.line == 4
+                && diagnostic.message.contains("inside storage/")
+        }));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn check_app_sources_reports_invalid_request_timeout_config() {
         let root = make_temp_dir("invalid-request-timeout-config");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -22208,7 +23432,7 @@ component ThemeSwitch() {
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
         fs::write(
             root.join("Axonyx.toml"),
-            "[app]\nname = \"demo\"\n\n[server]\ncompression = 12\nsecurity_headers = \"sometimes\"\nrequest_logging = []\nlog_format = \"xml\"\n",
+            "[app]\nname = \"demo\"\n\n[server]\ncompression = 12\nsecurity_headers = \"sometimes\"\nrequest_logging = []\nlog_format = \"xml\"\napi_response_validation = \"sometimes\"\n",
         )
         .expect("config should write");
         fs::write(root.join("app/page.ax"), "page Home\n<Copy>Home</Copy>\n")
@@ -22228,6 +23452,9 @@ component ThemeSwitch() {
         assert!(diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "axonyx-config-log-format"));
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.code == "axonyx-config-api-response-validation" }));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
@@ -22303,6 +23530,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -22310,6 +23538,7 @@ route GET "/api/posts"
             target: "/logo.svg".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -22365,6 +23594,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -22372,6 +23602,7 @@ route GET "/api/posts"
             target: "/_ax/state/snapshot.json".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -22392,6 +23623,7 @@ route GET "/api/posts"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -22399,6 +23631,7 @@ route GET "/api/posts"
             target: axonyx_runtime::AX_STATE_WASM_PATH.to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -24563,8 +25796,12 @@ action ValidPost
                 document_json: "{\"page\":\"posts\"}".to_string(),
                 import_sources: Vec::new(),
             }],
-            "",
-            true,
+            CompiledProductionOptions {
+                database_runtime_defaults: "",
+                database_required: true,
+                validate_api_responses: false,
+                storage_configs: &[],
+            },
         );
 
         assert!(source.contains("backend::dispatch_api_route"));
@@ -24581,8 +25818,15 @@ action ValidPost
         assert!(source.contains("let mut env = AxEnv::from_env()"));
         assert!(source.contains("let runtime = Arc::new(lazy_runtime_from_env"));
         assert_eq!(source.matches("lazy_runtime_from_env(env)").count(), 1);
-        assert!(source.contains("handle_request(&dist, runtime.as_ref(), request)"));
+        assert!(
+            source.contains("handle_request(&dist, runtime.as_ref(), storage.as_ref(), request)")
+        );
+        assert!(source.contains("let storage = Arc::new(AxUnavailableFileStorage)"));
+        assert!(source.contains("backend::dispatch_action(runtime, storage, &name, request)"));
         assert!(source.contains("const DATABASE_REQUIRED: bool = true"));
+        assert!(source.contains("const VALIDATE_API_RESPONSES: bool = false"));
+        assert!(source
+            .contains("backend::dispatch_api_route(runtime, &request, VALIDATE_API_RESPONSES)"));
         assert!(source.contains("/__axonyx/ready"));
         assert!(source.contains("AxQueryExecutor::database_health(runtime)"));
         assert!(source.contains("cross_site_action_request"));
@@ -24594,6 +25838,34 @@ action ValidPost
         );
         assert!(!source.contains("compiled actions are not enabled"));
         assert!(!source.contains("read_to_string"));
+    }
+
+    #[test]
+    fn compiled_production_source_bootstraps_configured_file_storage() {
+        let source = compiled_production_source(
+            "\"dist\"",
+            &[],
+            &[],
+            &[],
+            CompiledProductionOptions {
+                database_runtime_defaults: "",
+                database_required: false,
+                validate_api_responses: false,
+                storage_configs: &[AxStorageCapabilityConfig {
+                    name: "media".to_string(),
+                    root: PathBuf::from("storage/media"),
+                    access: AxStorageAccess::Write,
+                    max_file_bytes: 2 * 1024 * 1024,
+                }],
+            },
+        );
+
+        assert!(source.contains("fn configured_file_storage()"));
+        assert!(source.contains("AxStorageRegistry::new()"));
+        assert!(source.contains("AxCapabilityStorage::open_with_access"));
+        assert!(source.contains("\"media\", PathBuf::from(\"storage/media\")"));
+        assert!(source.contains("2097152, AxStorageAccess::Write"));
+        assert!(!source.contains("AxUnavailableFileStorage"));
     }
 
     #[test]
@@ -24665,6 +25937,66 @@ return ASX { <Copy>{posts}</Copy> }
         };
         assert_eq!(args.format, CheckFormat::Json);
         assert_eq!(args.url.as_deref(), Some("sqlite://app.db"));
+    }
+
+    #[test]
+    fn parses_fmt_file_and_stdin_commands() {
+        let file = Cli::try_parse_from(["cargo-ax", "fmt", "--file", "app/page.asx", "--check"])
+            .expect("fmt file command should parse");
+        let Commands::Fmt(file) = file.command else {
+            panic!("expected fmt command");
+        };
+        assert_eq!(file.file, Some(PathBuf::from("app/page.asx")));
+        assert!(file.check);
+        assert!(!file.stdin);
+        assert!(!file.stdout);
+
+        let stdin = Cli::try_parse_from(["cargo-ax", "fmt", "--stdin"])
+            .expect("fmt stdin command should parse");
+        let Commands::Fmt(stdin) = stdin.command else {
+            panic!("expected fmt command");
+        };
+        assert!(stdin.stdin);
+        assert!(stdin.file.is_none());
+    }
+
+    #[test]
+    fn formats_file_and_detects_format_drift() {
+        let root = make_temp_dir("fmt-file");
+        let path = root.join("page.asx");
+        let source = "page Home() {\nreturn ASX { <Copy>Ready</Copy> }\n}\n";
+        fs::write(&path, source).expect("source should write");
+
+        let formatted = format_ax_source(source);
+        let error = finish_fmt_files(
+            vec![(path.clone(), source.to_string(), formatted.clone())],
+            true,
+        )
+        .expect_err("check mode should report drift");
+        assert!(error.to_string().contains("formatting check failed"));
+        assert_eq!(
+            fs::read_to_string(&path).expect("source should remain readable"),
+            source
+        );
+
+        finish_fmt_files(
+            vec![(path.clone(), source.to_string(), formatted.clone())],
+            false,
+        )
+        .expect("write mode should format source");
+        assert_eq!(
+            fs::read_to_string(&path).expect("formatted source should read"),
+            formatted
+        );
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn file_formatter_preserves_crlf_without_false_drift() {
+        let source = "page Home() {\r\n  return ASX { <Copy>Ready</Copy> }\r\n}\r\n";
+
+        assert_eq!(format_ax_file_source(source), source);
     }
 
     #[test]
@@ -24839,6 +26171,53 @@ return ASX { <Copy>{posts}</Copy> }
     }
 
     #[test]
+    fn parses_api_contract_inspect_command() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "api",
+            "inspect",
+            "https://api.example/openapi.json",
+            "--format",
+            "json",
+            "--expect-hash",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .expect("API inspect command should parse");
+
+        let Commands::Api(args) = cli.command else {
+            panic!("expected api command");
+        };
+        let Some(ApiCommands::Inspect(inspect)) = args.command else {
+            panic!("expected inspect subcommand");
+        };
+        assert_eq!(inspect.format, CheckFormat::Json);
+        assert_eq!(inspect.source, "https://api.example/openapi.json");
+        assert!(inspect.expect_hash.is_some());
+    }
+
+    #[test]
+    fn parses_api_contract_pull_command() {
+        let cli = Cli::try_parse_from([
+            "cargo-ax",
+            "api",
+            "pull",
+            "https://api.example/openapi.json",
+            "--name",
+            "billing",
+        ])
+        .expect("API pull command should parse");
+
+        let Commands::Api(args) = cli.command else {
+            panic!("expected api command");
+        };
+        let Some(ApiCommands::Pull(pull)) = args.command else {
+            panic!("expected pull subcommand");
+        };
+        assert_eq!(pull.name.as_deref(), Some("billing"));
+        assert_eq!(pull.source, "https://api.example/openapi.json");
+    }
+
+    #[test]
     fn parses_tokio_transport_for_run_dev() {
         let cli = Cli::try_parse_from([
             "cargo-ax",
@@ -24888,6 +26267,31 @@ return ASX { <Copy>{posts}</Copy> }
         assert!(args.production_server);
         assert_eq!(args.transport, ServerTransport::Tokio);
         assert_eq!(args.effective_transport(), ServerTransport::Tokio);
+    }
+
+    #[test]
+    fn compiled_production_binary_tracks_cargo_target_directory() {
+        let root = Path::new("workspace/app");
+        let binary_name = if cfg!(windows) {
+            "axonyx-production.exe"
+        } else {
+            "axonyx-production"
+        };
+
+        assert_eq!(
+            compiled_production_binary_path_with_target(root, None),
+            root.join("target").join("release").join(binary_name)
+        );
+        assert_eq!(
+            compiled_production_binary_path_with_target(root, Some(Path::new("cargo-cache"))),
+            root.join("cargo-cache").join("release").join(binary_name)
+        );
+
+        let absolute_target = std::env::temp_dir().join("axonyx-shared-target");
+        assert_eq!(
+            compiled_production_binary_path_with_target(root, Some(&absolute_target)),
+            absolute_target.join("release").join(binary_name)
+        );
     }
 
     #[test]
@@ -25658,6 +27062,37 @@ axonyx-runtime = "0.1.14"
     }
 
     #[test]
+    fn doctor_reports_effective_storage_capabilities() {
+        let root = make_temp_dir("doctor-storage-capabilities");
+        fs::write(
+            root.join("Axonyx.toml"),
+            r#"[app]
+name = "demo"
+
+[server]
+max_body_bytes = "2mb"
+
+[storage.media]
+root = "storage/uploads"
+access = "read-write"
+max_file_bytes = "1mb"
+"#,
+        )
+        .expect("config should write");
+
+        let check = doctor_storage_capabilities_check(&root);
+        assert_eq!(check.severity, DoctorSeverity::Ok);
+        assert!(
+            check.message.contains("media=storage\\uploads")
+                || check.message.contains("media=storage/uploads")
+        );
+        assert!(check.message.contains("read-write"));
+        assert!(check.message.contains("1 MiB"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn doctor_reports_request_timeout_config() {
         let root = make_temp_dir("doctor-request-timeout");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -26376,6 +27811,95 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn dev_action_request_persists_multipart_file_through_storage_registry() {
+        let root = make_temp_dir("dev-storage-action");
+        fs::create_dir_all(root.join("app/upload")).expect("upload route should exist");
+        fs::write(
+            root.join("app/upload/page.asx"),
+            "page Upload() { return ASX { <Copy>Upload</Copy> } }\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/upload/actions.ax"),
+            r#"action UploadImage(image: File) -> FileRef {
+  data saved = Storage.save("media", input.image)
+  return json(saved)
+}
+"#,
+        )
+        .expect("actions should write");
+        let mut registry = AxStorageRegistry::new();
+        registry
+            .register(
+                AxCapabilityStorage::open_with_access(
+                    "media",
+                    root.join("storage/media"),
+                    1024,
+                    AxStorageAccess::Write,
+                )
+                .expect("storage should open"),
+            )
+            .expect("storage should register");
+        let state = DevServerState {
+            root: root.clone(),
+            preview_store: Mutex::new(AxPreviewStore::default()),
+            runtime_config: AxServerRuntimeConfig::default(),
+            storage_registry: registry,
+            database_required: false,
+        };
+        let request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/__axonyx/action?path=%2Fupload&name=UploadImage".to_string(),
+            headers: [
+                (
+                    "content-type".to_string(),
+                    "multipart/form-data; boundary=axonyx".to_string(),
+                ),
+                (
+                    "accept".to_string(),
+                    "application/ax-patch+json".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            body: Vec::new(),
+            multipart: Some(AxMultipartForm {
+                fields: [("__ax_patch".to_string(), "true".to_string())]
+                    .into_iter()
+                    .collect(),
+                files: [(
+                    "image".to_string(),
+                    vec![AxIncomingFile {
+                        field_name: "image".to_string(),
+                        file_name: "hero.txt".to_string(),
+                        content_type: Some("text/plain".to_string()),
+                        bytes: b"hello storage".to_vec(),
+                    }],
+                )]
+                .into_iter()
+                .collect(),
+            }),
+        };
+
+        let response = handle_action_request(&state, AxServerMode::Dev, &request)
+            .expect("storage action should execute");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&response.body.into_bytes()).expect("response should be JSON");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(payload["value"]["storage"], "media");
+        assert_eq!(payload["value"]["file_name"], "hero.txt");
+        assert_eq!(payload["value"]["size"], 13);
+        let object_count = fs::read_dir(root.join("storage/media/objects"))
+            .expect("objects should exist")
+            .count();
+        assert_eq!(object_count, 1);
+
+        drop(state);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn detects_oversized_request_body_from_header_or_bytes() {
         let header_request = AxHttpRequest {
             method: "POST".to_string(),
@@ -26387,12 +27911,14 @@ axonyx-runtime = "0.1.0"
             .into_iter()
             .collect(),
             body: Vec::new(),
+            multipart: None,
         };
         let body_request = AxHttpRequest {
             method: "POST".to_string(),
             target: "/api/posts".to_string(),
             headers: Default::default(),
             body: vec![0; MAX_REQUEST_BODY_BYTES + 1],
+            multipart: None,
         };
 
         assert!(request_body_exceeds_limit(
@@ -26599,6 +28125,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         assert!(suppress_response_body_for_method(&request.method));
@@ -26616,6 +28143,7 @@ axonyx-runtime = "0.1.0"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -26623,6 +28151,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -26645,6 +28174,7 @@ axonyx-runtime = "0.1.0"
             target: "/__axonyx/health?probe=1".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -26675,6 +28205,7 @@ axonyx-runtime = "0.1.0"
             target: "/__axonyx/ready?probe=1".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -26719,6 +28250,7 @@ axonyx-runtime = "0.1.0"
             target: "/__axonyx/ready".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -26755,6 +28287,7 @@ axonyx-runtime = "0.1.0"
             target: "/__axonyx/ready".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
         let response =
@@ -26785,6 +28318,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::html(200, "<main>ok</main>");
 
@@ -26815,6 +28349,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::from([("accept-encoding".to_string(), "br, gzip".to_string())]),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::html(200, "Axonyx ".repeat(512));
 
@@ -26841,6 +28376,7 @@ axonyx-runtime = "0.1.0"
             preview_store: Mutex::new(AxPreviewStore::default()),
             runtime_config: AxServerRuntimeConfig::from_root(&root)
                 .expect("runtime config should load"),
+            storage_registry: AxStorageRegistry::new(),
             database_required: false,
         };
         let request = AxHttpRequest {
@@ -26848,6 +28384,7 @@ axonyx-runtime = "0.1.0"
             target: "/".to_string(),
             headers: BTreeMap::from([("accept-encoding".to_string(), "gzip".to_string())]),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::html(200, "Axonyx ".repeat(512));
 
@@ -26866,6 +28403,7 @@ axonyx-runtime = "0.1.0"
             target: "/docs".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::html(200, "Axonyx docs");
 
@@ -26900,6 +28438,7 @@ axonyx-runtime = "0.1.0"
             target: "/api/posts".to_string(),
             headers: BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
         let response = AxHttpResponse::json(201, &serde_json::json!({ "ok": true }))
             .expect("json response should render");
@@ -28237,9 +29776,10 @@ query loadFeatured(status: String) -> Post[] {
             target: "/api/posts".to_string(),
             headers: std::collections::BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
-        let response = execute_backend_route_request(&state, &request)
+        let response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
             .expect("backend route request should succeed")
             .expect("backend route should match");
 
@@ -28325,9 +29865,10 @@ page Posts() {
             target: "/api/posts/sqlite-draft?status=draft".to_string(),
             headers: std::collections::BTreeMap::new(),
             body: Vec::new(),
+            multipart: None,
         };
 
-        let response = execute_backend_route_request(&state, &request)
+        let response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
             .expect("backend route request should succeed")
             .expect("backend route should match");
 
@@ -28355,7 +29896,7 @@ page Posts() {
             .with_header("User-Agent", "AxonyxTest")
             .with_body(b"title=Hello+Axonyx".to_vec());
 
-        let response = execute_backend_route_request(&state, &request)
+        let response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
             .expect("backend route request should succeed")
             .expect("backend route should match");
 
@@ -28371,6 +29912,30 @@ page Posts() {
         let body = String::from_utf8(response.body).expect("json response should be utf-8");
         assert_eq!(body, "\"Hello Axonyx\"");
 
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn development_server_enforces_declared_api_response_contracts() {
+        let root = make_temp_dir("api-response-validation-dev");
+        fs::create_dir_all(root.join("routes").join("api")).expect("routes dir should exist");
+        fs::write(
+            root.join("routes").join("api").join("status.ax"),
+            "route GET \"/api/status\" -> String {\n  return json(7)\n}\n",
+        )
+        .expect("route should write");
+        let state = test_dev_state(&root);
+        let request = AxHttpRequest::new("GET", "/api/status");
+
+        let dev_response = execute_backend_route_request(&state, AxServerMode::Dev, &request)
+            .expect("dev route should execute")
+            .expect("dev route should match");
+        let start_response = execute_backend_route_request(&state, AxServerMode::Start, &request)
+            .expect("start route should execute")
+            .expect("start route should match");
+
+        assert_eq!(dev_response.status, 500);
+        assert_eq!(start_response.status, 200);
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
@@ -29079,13 +30644,10 @@ page Home
     fn renders_real_foundry_components_from_framework_vendor_package() {
         let workspace = make_temp_dir("real-foundry-component-smoke");
         let root = workspace.join("axonyx-site");
-        let ui_root = std::env::current_exe()
-            .expect("test executable path should resolve")
+        let ui_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("framework root should resolve from test executable")
+            .expect("framework root should resolve from crate manifest")
             .join("vendor/axonyx-ui");
         let ui_path = ui_root.to_string_lossy().replace('\\', "\\\\");
 
