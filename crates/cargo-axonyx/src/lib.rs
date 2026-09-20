@@ -11198,6 +11198,7 @@ fn collect_env_refs_from_return(
         }
         axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NoContent
         | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NotFound
+        | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Forbidden
         | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Ok => {}
     }
 }
@@ -14826,6 +14827,9 @@ fn collect_responses_from_return(
     match name {
         "notFound" | "not_found" if args.is_empty() => {
             responses.insert(404, "Not Found");
+        }
+        "forbidden" if args.is_empty() => {
+            responses.insert(403, "Forbidden");
         }
         "noContent" | "no_content" if args.is_empty() => {
             responses.insert(204, "No Content");
@@ -21524,6 +21528,7 @@ route POST "/api/posts" -> Post
             r#"
 route GET "/api/posts/:slug" -> Post
   require params.slug else notFound()
+  require isVisible else forbidden()
   return json(post)
 
 route POST "/api/posts/:slug" -> Post
@@ -21557,10 +21562,16 @@ route DELETE "/api/posts/:slug"
             .expect("DELETE route should exist");
         assert_eq!(
             get_route.responses,
-            vec![ApiResponseReport {
-                status: 404,
-                description: "Not Found",
-            }]
+            vec![
+                ApiResponseReport {
+                    status: 403,
+                    description: "Forbidden",
+                },
+                ApiResponseReport {
+                    status: 404,
+                    description: "Not Found",
+                },
+            ]
         );
         assert_eq!(
             post_route.responses,
@@ -21590,6 +21601,10 @@ route DELETE "/api/posts/:slug"
         );
 
         let value = api_report_openapi_value(&report);
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["get"]["responses"]["403"]["description"],
+            "Forbidden"
+        );
         assert_eq!(
             value["paths"]["/api/posts/{slug}"]["get"]["responses"]["404"]["description"],
             "Not Found"
