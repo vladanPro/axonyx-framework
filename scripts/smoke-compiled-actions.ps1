@@ -182,9 +182,21 @@ return ASX {
   [System.IO.File]::WriteAllText(
     (Join-Path $apiRoot "account.ax"),
     @'
-route GET "/api/account"
+type User {
+  id: String
+  email: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+route GET "/api/account" -> User {
   require Auth.subject else redirect("/login")
-  return json(Auth.subject)
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  return json(user)
+}
 '@,
     (New-Object System.Text.UTF8Encoding($false))
   )
@@ -192,9 +204,10 @@ route GET "/api/account"
   $dbPath = Join-Path $appRoot "compiled-smoke.db"
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
-  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL)"
+  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL); CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL);"
   $seed = "INSERT INTO posts (slug,title,excerpt,status) VALUES (?,?,?,?)"
-  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published"
+  $userSeed = "INSERT INTO users (id,email) VALUES (?,?)"
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.executescript(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.execute(sys.argv[8],sys.argv[9:11]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published" $userSeed "user-42" "foundry@example.com"
   if ($LASTEXITCODE -ne 0) { throw "failed to seed compiled smoke SQLite database" }
 
   $env:AX_SECRET_DB_DIALECT = "sqlite"
@@ -309,8 +322,9 @@ route GET "/api/account"
   }
   $sessionCookie = $sessionCookieHeader.Split(';')[0]
   $account = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie }
-  if ($account.Body -ne '"user-42"') {
-    throw "Compiled protected route did not resolve Auth.subject: $($account.Body)"
+  $accountPayload = $account.Body | ConvertFrom-Json
+  if ($accountPayload.id -ne "user-42" -or $accountPayload.email -ne "foundry@example.com") {
+    throw "Compiled protected route did not resolve the typed Auth user: $($account.Body)"
   }
   $logoutUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Logout"
   $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303
