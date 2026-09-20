@@ -10720,6 +10720,10 @@ fn is_supported_backend_return_contract(ty: &str) -> bool {
         return false;
     }
 
+    if let Some(inner) = ty.strip_suffix('?') {
+        return !inner.is_empty() && is_supported_backend_return_contract(inner);
+    }
+
     if let Some(inner) = ty.strip_suffix("[]") {
         return is_supported_backend_return_contract(inner);
     }
@@ -10760,6 +10764,10 @@ fn is_supported_backend_return_contract(ty: &str) -> bool {
 
 fn backend_return_contract_named_types(ty: &str) -> Vec<&str> {
     let ty = ty.trim();
+
+    if let Some(inner) = ty.strip_suffix('?') {
+        return backend_return_contract_named_types(inner);
+    }
 
     if let Some(inner) = ty.strip_suffix("[]") {
         return backend_return_contract_named_types(inner);
@@ -10837,6 +10845,10 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
             value: AxValuePlan::Expr(expr),
             ..
         } => expr_uses_input_scope(expr),
+        AxStepPlan::Let {
+            value: AxValuePlan::Call { args, .. },
+            ..
+        } => args.iter().any(expr_uses_input_scope),
         AxStepPlan::Let {
             value: AxValuePlan::Query(query),
             ..
@@ -10950,6 +10962,12 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             AxStepPlan::Send { payload, .. } => {
                 payload.code.contains("Auth.signedSession") || payload.code.contains("Auth.subject")
             }
+            AxStepPlan::Let {
+                value: AxValuePlan::Call { args, .. },
+                ..
+            } => args.iter().any(|arg| {
+                arg.code.contains("Auth.signedSession") || arg.code.contains("Auth.subject")
+            }),
             AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy => true,
             AxStepPlan::Let {
                 value: AxValuePlan::StorageSave { .. },
@@ -11076,6 +11094,14 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
             value: AxValuePlan::Expr(expr),
             ..
         } => collect_env_refs_from_expr(expr, refs),
+        AxStepPlan::Let {
+            value: AxValuePlan::Call { args, .. },
+            ..
+        } => {
+            for arg in args {
+                collect_env_refs_from_expr(arg, refs);
+            }
+        }
         AxStepPlan::Let {
             value: AxValuePlan::Query(query),
             ..
@@ -15682,6 +15708,14 @@ fn openapi_component_schema(schema: &ApiSchemaReport) -> serde_json::Value {
 fn openapi_schema_for_ax_type(ty: &str) -> serde_json::Value {
     let ty = ty.trim();
 
+    if let Some(inner) = ty.strip_suffix('?') {
+        let mut schema = openapi_schema_for_ax_type(inner);
+        if let serde_json::Value::Object(object) = &mut schema {
+            object.insert("nullable".to_string(), serde_json::Value::Bool(true));
+        }
+        return schema;
+    }
+
     if let Some(inner) = ty.strip_suffix("[]") {
         return serde_json::json!({
             "type": "array",
@@ -15861,6 +15895,10 @@ fn ax_schema_type(input_ty: &str) -> &'static str {
 
 fn ax_return_schema_type(return_ty: &str) -> String {
     let return_ty = return_ty.trim();
+
+    if let Some(inner) = return_ty.strip_suffix('?') {
+        return format!("Optional<{}>", ax_return_schema_type(inner));
+    }
 
     if let Some(inner) = return_ty.strip_suffix("[]") {
         return format!("List<{}>", ax_return_schema_type(inner));
@@ -22959,6 +22997,7 @@ action SetDocsTheme(theme: string) {
         assert_eq!(ax_return_schema_type("string"), "String");
         assert_eq!(ax_return_schema_type("f64"), "Number");
         assert_eq!(ax_return_schema_type("Optional<Post>"), "Optional<Post>");
+        assert_eq!(ax_return_schema_type("Post?"), "Optional<Post>");
     }
 
     #[test]
@@ -31554,6 +31593,10 @@ export type Post {
 
 query loadPosts() -> Post[] {
   return posts
+}
+
+query findPost() -> Post? {
+  return post
 }
 "#,
         )
