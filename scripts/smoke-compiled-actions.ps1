@@ -177,6 +177,18 @@ return ASX {
     (New-Object System.Text.UTF8Encoding($false))
   )
 
+  $apiRoot = Join-Path $appRoot "routes/api"
+  New-Item -ItemType Directory -Path $apiRoot -Force | Out-Null
+  [System.IO.File]::WriteAllText(
+    (Join-Path $apiRoot "account.ax"),
+    @'
+route GET "/api/account"
+  require Auth.subject else redirect("/login")
+  return json(Auth.subject)
+'@,
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+
   $dbPath = Join-Path $appRoot "compiled-smoke.db"
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
@@ -296,6 +308,10 @@ return ASX {
     throw "Compiled login leaked session data into the action response"
   }
   $sessionCookie = $sessionCookieHeader.Split(';')[0]
+  $account = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie }
+  if ($account.Body -ne '"user-42"') {
+    throw "Compiled protected route did not resolve Auth.subject: $($account.Body)"
+  }
   $logoutUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Logout"
   $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303
   if ($logout.Headers["Set-Cookie"] -notmatch "Max-Age=0") {
