@@ -22,8 +22,8 @@ use axonyx_core::ax_backend_ast_prelude::{
 };
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
-    lower_backend_document, AxBackendPlan, AxFieldPlan, AxHandlerKind, AxReturnPlan, AxRustExpr,
-    AxStepPlan, AxTransactionOperationPlan, AxValuePlan,
+    ax_step_uses_auth_subject, lower_backend_document, AxBackendPlan, AxFieldPlan, AxHandlerKind,
+    AxReturnPlan, AxRustExpr, AxStepPlan, AxTransactionOperationPlan, AxValuePlan,
 };
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_formatter_prelude::format_ax_source;
@@ -10936,15 +10936,20 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             | AxStepPlan::Hook { value: expr, .. }
             | AxStepPlan::ClearCookie { name: expr }
             | AxStepPlan::Revalidate { target: expr, .. } => {
-                expr.code.contains("Auth.signedSession")
+                expr.code.contains("Auth.signedSession") || expr.code.contains("Auth.subject")
             }
-            AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => fields
-                .iter()
-                .any(|field| field.value.code.contains("Auth.signedSession")),
+            AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => {
+                fields.iter().any(|field| {
+                    field.value.code.contains("Auth.signedSession")
+                        || field.value.code.contains("Auth.subject")
+                })
+            }
             AxStepPlan::Transaction { operations } => operations
                 .iter()
                 .any(transaction_operation_uses_signed_session),
-            AxStepPlan::Send { payload, .. } => payload.code.contains("Auth.signedSession"),
+            AxStepPlan::Send { payload, .. } => {
+                payload.code.contains("Auth.signedSession") || payload.code.contains("Auth.subject")
+            }
             AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy => true,
             AxStepPlan::Let {
                 value: AxValuePlan::StorageSave { .. },
@@ -10962,22 +10967,25 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
 
 fn transaction_operation_uses_signed_session(operation: &AxTransactionOperationPlan) -> bool {
     match operation {
-        AxTransactionOperationPlan::Insert { fields, .. } => fields
-            .iter()
-            .any(|field| field.value.code.contains("Auth.signedSession")),
+        AxTransactionOperationPlan::Insert { fields, .. } => fields.iter().any(|field| {
+            field.value.code.contains("Auth.signedSession")
+                || field.value.code.contains("Auth.subject")
+        }),
         AxTransactionOperationPlan::Update {
             fields, filters, ..
         } => {
-            fields
-                .iter()
-                .any(|field| field.value.code.contains("Auth.signedSession"))
-                || filters
-                    .iter()
-                    .any(|filter| filter.value.code.contains("Auth.signedSession"))
+            fields.iter().any(|field| {
+                field.value.code.contains("Auth.signedSession")
+                    || field.value.code.contains("Auth.subject")
+            }) || filters.iter().any(|filter| {
+                filter.value.code.contains("Auth.signedSession")
+                    || filter.value.code.contains("Auth.subject")
+            })
         }
-        AxTransactionOperationPlan::Delete { filters, .. } => filters
-            .iter()
-            .any(|filter| filter.value.code.contains("Auth.signedSession")),
+        AxTransactionOperationPlan::Delete { filters, .. } => filters.iter().any(|filter| {
+            filter.value.code.contains("Auth.signedSession")
+                || filter.value.code.contains("Auth.subject")
+        }),
     }
 }
 
@@ -17703,7 +17711,8 @@ fn execute_backend_route_request(
         .iter()
         .map(|(_, source)| source.as_str())
         .collect::<Vec<_>>();
-    let uses_db_runtime = source_refs.iter().any(|source| source.contains("db."));
+    let uses_db_runtime = backend_source_refs_use_database(&source_refs)?;
+    let uses_session_runtime = backend_source_refs_use_sessions(&source_refs)?;
     let mut store = state
         .preview_store
         .lock()
@@ -17713,7 +17722,7 @@ fn execute_backend_route_request(
         .api_response_validation
         .enabled(mode == AxServerMode::Dev);
 
-    if uses_db_runtime {
+    if uses_db_runtime || uses_session_runtime {
         let env = db_env_for_root(&state.root, None)?;
         let runtime = ax_backend_runtime::runtime_from_env(env)
             .with_context(|| "failed to initialize backend runtime from environment")?;
@@ -18670,17 +18679,14 @@ fn backend_source_refs_use_sessions(sources: &[&str]) -> Result<bool> {
     for source in sources {
         let document = parse_backend_ax(source)?;
         let plan = lower_backend_document(&document)?;
-        if plan
-            .handlers
-            .iter()
-            .flat_map(|handler| handler.steps.iter())
-            .any(|step| {
+        if plan.handlers.iter().any(|handler| {
+            handler.steps.iter().any(|step| {
                 matches!(
                     step,
                     AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy
-                )
+                ) || ax_step_uses_auth_subject(step)
             })
-        {
+        }) {
             return Ok(true);
         }
     }
@@ -28004,6 +28010,15 @@ action Logout() {
 "#,
         )
         .expect("actions should write");
+        fs::create_dir_all(root.join("routes/api")).expect("API routes should exist");
+        fs::write(
+            root.join("routes/api/account.ax"),
+            r#"route GET "/api/account"
+  require Auth.subject else redirect("/login")
+  return json(Auth.subject)
+"#,
+        )
+        .expect("protected account route should write");
         let database_path = root.join("sessions.sqlite");
         fs::write(
             root.join(".env.local"),
@@ -28046,6 +28061,21 @@ action Logout() {
             .next()
             .expect("session cookie should have a value")
             .to_string();
+        let account_request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/api/account".to_string(),
+            headers: [("cookie".to_string(), cookie_pair.clone())]
+                .into_iter()
+                .collect(),
+            body: Vec::new(),
+            multipart: None,
+        };
+        let account = execute_backend_route_request(&state, AxServerMode::Dev, &account_request)
+            .expect("protected account route should execute")
+            .expect("protected account route should match");
+        assert_eq!(account.status, 200);
+        assert_eq!(account.body, br#""user-42""#);
+
         let logout_request = AxHttpRequest {
             method: "POST".to_string(),
             target: "/__axonyx/action?path=%2Faccount&name=Logout".to_string(),
