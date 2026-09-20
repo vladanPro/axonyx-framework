@@ -20,6 +20,8 @@ $serverProcess = $null
 $originalLocation = Get-Location
 $originalDbDialect = $env:AX_SECRET_DB_DIALECT
 $originalDbUrl = $env:AX_SECRET_DB_URL
+$originalSessionKey = $env:AX_SECRET_SESSION_KEY
+$originalSessionCookieSecure = $env:AX_SECRET_SESSION_COOKIE_SECURE
 
 function Invoke-AxRequest {
   param(
@@ -41,6 +43,9 @@ function Invoke-AxRequest {
       $request.Accept = [string] $header.Value
     } elseif ($header.Key -ieq "Origin") {
       $request.Headers["Origin"] = [string] $header.Value
+    } elseif ($header.Key -ieq "Cookie") {
+      $request.CookieContainer = New-Object System.Net.CookieContainer
+      $request.CookieContainer.SetCookies([uri] $Url, [string] $header.Value)
     } else {
       $request.Headers[$header.Key] = [string] $header.Value
     }
@@ -102,6 +107,16 @@ action Noop() {
 action UploadImage(image: File) -> FileRef {
   data saved = Storage.save("media", input.image)
   return json(saved)
+}
+
+action Login(userId: String) {
+  Session.create(input.userId, { role: "editor" })
+  return ok()
+}
+
+action Logout() {
+  Session.destroy()
+  return ok()
 }
 '@
   [System.IO.File]::WriteAllText(
@@ -170,6 +185,11 @@ return ASX {
   & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published"
   if ($LASTEXITCODE -ne 0) { throw "failed to seed compiled smoke SQLite database" }
 
+  $env:AX_SECRET_DB_DIALECT = "sqlite"
+  $env:AX_SECRET_DB_URL = $dbPath
+  $env:AX_SECRET_SESSION_KEY = "compiled-smoke-session-secret"
+  $env:AX_SECRET_SESSION_COOKIE_SECURE = "false"
+
   Push-Location $appRoot
   try {
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- check
@@ -193,8 +213,6 @@ return ASX {
     RedirectStandardError = $stderr
     PassThru = $true
   }
-  $env:AX_SECRET_DB_DIALECT = "sqlite"
-  $env:AX_SECRET_DB_URL = $dbPath
   if ($env:OS -eq "Windows_NT") { $processArgs.WindowStyle = "Hidden" }
   $serverProcess = Start-Process @processArgs
 
@@ -268,6 +286,27 @@ return ASX {
   $themeCookie = Invoke-AxRequest -Url $actionUrl -Body "theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
   if ($themeCookie.Headers["Set-Cookie"] -notmatch "theme=gold") { throw "Compiled action response did not emit its cookie" }
 
+  $loginUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Login"
+  $login = Invoke-AxRequest -Url $loginUrl -Body "userId=user-42&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  $sessionCookieHeader = [string] $login.Headers["Set-Cookie"]
+  if ($sessionCookieHeader -notmatch "HttpOnly" -or $sessionCookieHeader -notmatch "session=") {
+    throw "Compiled login did not emit a private session cookie: $sessionCookieHeader"
+  }
+  if ($login.Body -match "session" -or $login.Body -match "user-42") {
+    throw "Compiled login leaked session data into the action response"
+  }
+  $sessionCookie = $sessionCookieHeader.Split(';')[0]
+  $logoutUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Logout"
+  $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303
+  if ($logout.Headers["Set-Cookie"] -notmatch "Max-Age=0") {
+    throw "Compiled logout did not clear the session cookie"
+  }
+
+  $sessionCount = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from ax_sessions").fetchone()[0]);db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or [int] $sessionCount -ne 0) {
+    throw "Compiled logout did not remove the persisted session"
+  }
+
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }
   $dataPayload = $data.Body | ConvertFrom-Json
@@ -315,6 +354,16 @@ return ASX {
     Remove-Item Env:AX_SECRET_DB_URL -ErrorAction SilentlyContinue
   } else {
     $env:AX_SECRET_DB_URL = $originalDbUrl
+  }
+  if ($null -eq $originalSessionKey) {
+    Remove-Item Env:AX_SECRET_SESSION_KEY -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_SESSION_KEY = $originalSessionKey
+  }
+  if ($null -eq $originalSessionCookieSecure) {
+    Remove-Item Env:AX_SECRET_SESSION_COOKIE_SECURE -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_SESSION_COOKIE_SECURE = $originalSessionCookieSecure
   }
   if ($ownsWorkDir -and (Test-Path -LiteralPath $WorkDir)) {
     $resolved = [System.IO.Path]::GetFullPath($WorkDir)

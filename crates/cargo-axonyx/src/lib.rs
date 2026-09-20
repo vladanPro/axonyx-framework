@@ -9653,6 +9653,23 @@ fn collect_db_surface_diagnostics_from_stmts(
             AxBackendStmt::ClearCookie(expr) => {
                 collect_db_surface_diagnostics_from_expr(path, source, expr, resources, diagnostics)
             }
+            AxBackendStmt::SessionCreate(session) => {
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &session.subject,
+                    resources,
+                    diagnostics,
+                );
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &session.data,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::SessionDestroy => {}
             AxBackendStmt::Revalidate(revalidate) => collect_db_surface_diagnostics_from_expr(
                 path,
                 source,
@@ -10843,6 +10860,10 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
         }
         AxStepPlan::Hook { value, .. } => expr_uses_input_scope(value),
         AxStepPlan::ClearCookie { name } => expr_uses_input_scope(name),
+        AxStepPlan::SessionCreate { subject, data } => {
+            expr_uses_input_scope(subject) || expr_uses_input_scope(data)
+        }
+        AxStepPlan::SessionDestroy => false,
         AxStepPlan::Revalidate { target, .. } => expr_uses_input_scope(target),
         AxStepPlan::Insert { fields, .. } => fields
             .iter()
@@ -10924,6 +10945,7 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
                 .iter()
                 .any(transaction_operation_uses_signed_session),
             AxStepPlan::Send { payload, .. } => payload.code.contains("Auth.signedSession"),
+            AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy => true,
             AxStepPlan::Let {
                 value: AxValuePlan::StorageSave { .. },
                 ..
@@ -11075,6 +11097,11 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
         }
         AxStepPlan::Hook { value, .. } => collect_env_refs_from_expr(value, refs),
         AxStepPlan::ClearCookie { name } => collect_env_refs_from_expr(name, refs),
+        AxStepPlan::SessionCreate { subject, data } => {
+            collect_env_refs_from_expr(subject, refs);
+            collect_env_refs_from_expr(data, refs);
+        }
+        AxStepPlan::SessionDestroy => {}
         AxStepPlan::Revalidate { target, .. } => collect_env_refs_from_expr(target, refs),
         AxStepPlan::Transaction { operations } => {
             for operation in operations {
@@ -12149,6 +12176,7 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidAssignment { line }
         | AxBackendParseError::InvalidHeader { line }
         | AxBackendParseError::InvalidCookie { line }
+        | AxBackendParseError::InvalidSession { line }
         | AxBackendParseError::InvalidHook { line }
         | AxBackendParseError::InvalidRequirement { line }
         | AxBackendParseError::InvalidReturn { line }
@@ -18575,51 +18603,56 @@ fn handle_action_request(
         .as_ref()
         .map(|form| form.fields.clone())
         .unwrap_or_else(|| parse_form_body(&request.body));
-    let result =
-        if mode == AxServerMode::Start && backend_source_refs_use_database(&action_source_refs)? {
-            let mut store = state
-                .preview_store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
-                .clone();
-            let env = db_env_for_root(&state.root, None)?;
-            let runtime = ax_backend_runtime::runtime_from_env(env)
-                .with_context(|| "failed to initialize action database runtime from environment")?;
-            execute_preview_action_request_sources_with_runtime_and_storage(
-                &action_source_refs,
-                &action_name,
-                request,
-                &runtime,
-                &state.storage_registry,
-                &mut store,
-            )
-        } else {
-            let mut store = state
-                .preview_store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
-            execute_preview_action_request_sources_with_storage(
-                &action_source_refs,
-                &action_name,
-                request,
-                &state.storage_registry,
-                &mut store,
-            )
-        }
-        .with_context(|| {
-            format!(
-                "failed to execute action '{}' from '{}'",
-                action_name,
-                actions_path.display()
-            )
-        })?;
+    let uses_sessions = backend_source_refs_use_sessions(&action_source_refs)?;
+    let result = if uses_sessions
+        || (mode == AxServerMode::Start && backend_source_refs_use_database(&action_source_refs)?)
+    {
+        let mut store = state
+            .preview_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
+            .clone();
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)
+            .with_context(|| "failed to initialize action database runtime from environment")?;
+        execute_preview_action_request_sources_with_runtime_and_storage(
+            &action_source_refs,
+            &action_name,
+            request,
+            &runtime,
+            &state.storage_registry,
+            &mut store,
+        )
+    } else {
+        let mut store = state
+            .preview_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+        execute_preview_action_request_sources_with_storage(
+            &action_source_refs,
+            &action_name,
+            request,
+            &state.storage_registry,
+            &mut store,
+        )
+    }
+    .with_context(|| {
+        format!(
+            "failed to execute action '{}' from '{}'",
+            action_name,
+            actions_path.display()
+        )
+    })?;
 
     if wants_action_patch_response(request, &input_fields) {
         return action_patch_response(&route, &result);
     }
 
-    let redirect_to = result.redirect_to.unwrap_or(route.request_path);
-    Ok(redirect_response(303, &redirect_to))
+    let redirect_to = result.redirect_to.clone().unwrap_or(route.request_path);
+    Ok(with_action_cookies(
+        redirect_response(303, &redirect_to),
+        &result,
+    ))
 }
 
 fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
@@ -18627,6 +18660,27 @@ fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
         let document = parse_backend_ax(source)?;
         let plan = lower_backend_document(&document)?;
         if backend_plan_uses_database(&plan) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn backend_source_refs_use_sessions(sources: &[&str]) -> Result<bool> {
+    for source in sources {
+        let document = parse_backend_ax(source)?;
+        let plan = lower_backend_document(&document)?;
+        if plan
+            .handlers
+            .iter()
+            .flat_map(|handler| handler.steps.iter())
+            .any(|step| {
+                matches!(
+                    step,
+                    AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy
+                )
+            })
+        {
             return Ok(true);
         }
     }
@@ -18709,7 +18763,8 @@ fn action_patch_response(
     result: &AxPreviewActionResult,
 ) -> Result<AxHttpResponse> {
     if let Some(error) = &result.error {
-        return action_error_response(route, error);
+        return action_error_response(route, error)
+            .map(|response| with_action_cookies(response, result));
     }
 
     let patches = normalize_action_patches(route, &result.patches)?;
@@ -18730,10 +18785,21 @@ fn action_patch_response(
     }))
     .context("failed to serialize action patch response")?;
 
-    Ok(
+    Ok(with_action_cookies(
         AxHttpResponse::bytes(200, "application/ax-patch+json; charset=utf-8", body)
             .with_no_store(),
-    )
+        result,
+    ))
+}
+
+fn with_action_cookies(
+    mut response: AxHttpResponse,
+    result: &AxPreviewActionResult,
+) -> AxHttpResponse {
+    for cookie in &result.cookies {
+        response = response.with_cookie(cookie.clone());
+    }
+    response
 }
 
 fn action_error_response(
@@ -27916,6 +27982,104 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn dev_session_actions_persist_across_requests_and_emit_private_cookies() {
+        let root = make_temp_dir("dev-session-actions");
+        fs::create_dir_all(root.join("app/account")).expect("account route should exist");
+        fs::write(
+            root.join("app/account/page.asx"),
+            "page Account() { return ASX { <Copy>Account</Copy> } }\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/account/actions.ax"),
+            r#"action Login(userId: String) {
+  Session.create(input.userId, { role: "editor" })
+  return ok
+}
+
+action Logout() {
+  Session.destroy()
+  return ok
+}
+"#,
+        )
+        .expect("actions should write");
+        let database_path = root.join("sessions.sqlite");
+        fs::write(
+            root.join(".env.local"),
+            format!(
+                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=test-session-secret\nAX_SECRET_SESSION_COOKIE_SECURE=false\n",
+                database_path.display()
+            ),
+        )
+        .expect("local env should write");
+        let state = test_dev_state(&root);
+
+        let login_request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/__axonyx/action?path=%2Faccount&name=Login".to_string(),
+            headers: [
+                (
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                ),
+                (
+                    "accept".to_string(),
+                    "application/ax-patch+json".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            body: b"userId=user-42&__ax_patch=true".to_vec(),
+            multipart: None,
+        };
+        let login = handle_action_request(&state, AxServerMode::Dev, &login_request)
+            .expect("login should execute");
+        assert_eq!(login.status, 200);
+        assert_eq!(login.set_cookies.len(), 1);
+        assert!(login.set_cookies[0].contains("HttpOnly"));
+        let login_body = String::from_utf8(login.body.into_bytes()).expect("body should be UTF-8");
+        assert!(!login_body.contains("session"));
+
+        let cookie_pair = login.set_cookies[0]
+            .split(';')
+            .next()
+            .expect("session cookie should have a value")
+            .to_string();
+        let logout_request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/__axonyx/action?path=%2Faccount&name=Logout".to_string(),
+            headers: [
+                (
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                ),
+                ("cookie".to_string(), cookie_pair),
+            ]
+            .into_iter()
+            .collect(),
+            body: Vec::new(),
+            multipart: None,
+        };
+        let logout = handle_action_request(&state, AxServerMode::Dev, &logout_request)
+            .expect("logout should execute");
+        assert_eq!(logout.status, 303);
+        assert_eq!(logout.set_cookies.len(), 1);
+        assert!(logout.set_cookies[0].contains("Max-Age=0"));
+
+        let connection = rusqlite::Connection::open(&database_path)
+            .expect("session database should remain readable");
+        let session_count: i64 = connection
+            .query_row("select count(*) from ax_sessions", [], |row| row.get(0))
+            .expect("session table should exist");
+        assert_eq!(session_count, 0);
+
+        drop(connection);
+        drop(state);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn detects_oversized_request_body_from_header_or_bytes() {
         let header_request = AxHttpRequest {
             method: "POST".to_string(),
@@ -29182,6 +29346,7 @@ action SetTheme(theme: string) {
                 AxValue::from("gold"),
             )],
             invalidations: Vec::new(),
+            cookies: Vec::new(),
             error: None,
         };
         let error = action_patch_response(&route, &result).expect_err("patch should be rejected");
@@ -29450,6 +29615,7 @@ page state count: Number = 0
                 AxValue::String("not-a-number".to_string()),
             )],
             invalidations: Vec::new(),
+            cookies: Vec::new(),
             error: None,
         };
 
