@@ -188,6 +188,10 @@ type User {
   role: String
 }
 
+fn hasRole(user: User, role: String) -> Bool {
+  return user.role == role
+}
+
 query resolveUser(subject: String) -> User? {
   return db.users.where({ id: input.subject }).first()
 }
@@ -203,7 +207,8 @@ route GET "/api/admin" -> User {
   require Auth.subject else redirect("/login")
   data user = resolveUser(Auth.subject)
   require user else notFound()
-  require user.role == "admin" else forbidden()
+  data isAdmin = hasRole(user, "admin")
+  require isAdmin else forbidden()
   return json(user)
 }
 '@,
