@@ -185,14 +185,11 @@ return ASX {
 type User {
   id: String
   email: String
+  role: String
 }
 
 query resolveUser(subject: String) -> User? {
   return db.users.where({ id: input.subject }).first()
-}
-
-query resolveAdmin(subject: String) -> User? {
-  return db.users.where({ id: input.subject, role: "admin" }).first()
 }
 
 route GET "/api/account" -> User {
@@ -204,9 +201,10 @@ route GET "/api/account" -> User {
 
 route GET "/api/admin" -> User {
   require Auth.subject else redirect("/login")
-  data admin = resolveAdmin(Auth.subject)
-  require admin else forbidden()
-  return json(admin)
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  require user.role == "admin" else forbidden()
+  return json(user)
 }
 '@,
     (New-Object System.Text.UTF8Encoding($false))
@@ -341,6 +339,13 @@ route GET "/api/admin" -> User {
   $adminPayload = $admin.Body | ConvertFrom-Json
   if ($adminPayload.error -ne "forbidden") {
     throw "Compiled policy route did not return a safe forbidden response: $($admin.Body)"
+  }
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("update users set role = ? where id = ?", ("admin", "user-42"));db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "failed to promote compiled smoke user" }
+  $authorizedAdmin = Invoke-AxRequest -Url "$baseUrl/api/admin" -Method "GET" -Headers @{ Cookie = $sessionCookie }
+  $authorizedAdminPayload = $authorizedAdmin.Body | ConvertFrom-Json
+  if ($authorizedAdminPayload.id -ne "user-42" -or $authorizedAdminPayload.role -ne "admin") {
+    throw "Compiled policy route did not return its narrowed typed user: $($authorizedAdmin.Body)"
   }
   $logoutUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Logout"
   $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303
