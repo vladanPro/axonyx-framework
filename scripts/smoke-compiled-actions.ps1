@@ -20,6 +20,8 @@ $serverProcess = $null
 $originalLocation = Get-Location
 $originalDbDialect = $env:AX_SECRET_DB_DIALECT
 $originalDbUrl = $env:AX_SECRET_DB_URL
+$originalSessionKey = $env:AX_SECRET_SESSION_KEY
+$originalSessionCookieSecure = $env:AX_SECRET_SESSION_COOKIE_SECURE
 
 function Invoke-AxRequest {
   param(
@@ -41,6 +43,9 @@ function Invoke-AxRequest {
       $request.Accept = [string] $header.Value
     } elseif ($header.Key -ieq "Origin") {
       $request.Headers["Origin"] = [string] $header.Value
+    } elseif ($header.Key -ieq "Cookie") {
+      $request.CookieContainer = New-Object System.Net.CookieContainer
+      $request.CookieContainer.SetCookies([uri] $Url, [string] $header.Value)
     } else {
       $request.Headers[$header.Key] = [string] $header.Value
     }
@@ -89,6 +94,7 @@ try {
 
 action SetTheme(theme: string) {
   require input.theme in ["silver", "bronze", "gold"] else error("Theme is required.")
+  cookie "theme" = input.theme
   patch draftStatus = input.theme
   revalidate "/posts"
   return ok()
@@ -101,6 +107,16 @@ action Noop() {
 action UploadImage(image: File) -> FileRef {
   data saved = Storage.save("media", input.image)
   return json(saved)
+}
+
+action Login(userId: String) {
+  Session.create(input.userId, { role: "editor" })
+  return ok()
+}
+
+action Logout() {
+  Session.destroy()
+  return ok()
 }
 '@
   [System.IO.File]::WriteAllText(
@@ -161,13 +177,57 @@ return ASX {
     (New-Object System.Text.UTF8Encoding($false))
   )
 
+  $apiRoot = Join-Path $appRoot "routes/api"
+  New-Item -ItemType Directory -Path $apiRoot -Force | Out-Null
+  [System.IO.File]::WriteAllText(
+    (Join-Path $apiRoot "account.ax"),
+    @'
+type User {
+  id: String
+  email: String
+  role: String
+}
+
+fn hasRole(user: User, role: String) -> Bool {
+  return user.role == role
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+route GET "/api/account" -> User {
+  require Auth.subject else redirect("/login")
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  return json(user)
+}
+
+route GET "/api/admin" -> User {
+  require Auth.subject else redirect("/login")
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  data isAdmin = hasRole(user, "admin")
+  require isAdmin else forbidden()
+  return json(user)
+}
+'@,
+    (New-Object System.Text.UTF8Encoding($false))
+  )
+
   $dbPath = Join-Path $appRoot "compiled-smoke.db"
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
-  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL)"
+  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL); CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL);"
   $seed = "INSERT INTO posts (slug,title,excerpt,status) VALUES (?,?,?,?)"
-  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published"
+  $userSeed = "INSERT INTO users (id,email,role) VALUES (?,?,?)"
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.executescript(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.execute(sys.argv[8],sys.argv[9:12]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published" $userSeed "user-42" "foundry@example.com" "member"
   if ($LASTEXITCODE -ne 0) { throw "failed to seed compiled smoke SQLite database" }
+
+  $env:AX_SECRET_DB_DIALECT = "sqlite"
+  $env:AX_SECRET_DB_URL = $dbPath
+  $env:AX_SECRET_SESSION_KEY = "compiled-smoke-session-secret"
+  $env:AX_SECRET_SESSION_COOKIE_SECURE = "false"
 
   Push-Location $appRoot
   try {
@@ -192,8 +252,6 @@ return ASX {
     RedirectStandardError = $stderr
     PassThru = $true
   }
-  $env:AX_SECRET_DB_DIALECT = "sqlite"
-  $env:AX_SECRET_DB_URL = $dbPath
   if ($env:OS -eq "Windows_NT") { $processArgs.WindowStyle = "Hidden" }
   $serverProcess = Start-Process @processArgs
 
@@ -264,6 +322,47 @@ return ASX {
   $createdPayload = $created.Body | ConvertFrom-Json
   if (!$createdPayload.ok -or $createdPayload.refreshes[0].name -ne "posts") { throw "Compiled create action did not invalidate posts: $($created.Body)" }
 
+  $themeCookie = Invoke-AxRequest -Url $actionUrl -Body "theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  if ($themeCookie.Headers["Set-Cookie"] -notmatch "theme=gold") { throw "Compiled action response did not emit its cookie" }
+
+  $loginUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Login"
+  $login = Invoke-AxRequest -Url $loginUrl -Body "userId=user-42&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  $sessionCookieHeader = [string] $login.Headers["Set-Cookie"]
+  if ($sessionCookieHeader -notmatch "HttpOnly" -or $sessionCookieHeader -notmatch "session=") {
+    throw "Compiled login did not emit a private session cookie: $sessionCookieHeader"
+  }
+  if ($login.Body -match "session" -or $login.Body -match "user-42") {
+    throw "Compiled login leaked session data into the action response"
+  }
+  $sessionCookie = $sessionCookieHeader.Split(';')[0]
+  $account = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie }
+  $accountPayload = $account.Body | ConvertFrom-Json
+  if ($accountPayload.id -ne "user-42" -or $accountPayload.email -ne "foundry@example.com") {
+    throw "Compiled protected route did not resolve the typed Auth user: $($account.Body)"
+  }
+  $admin = Invoke-AxRequest -Url "$baseUrl/api/admin" -Method "GET" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 403
+  $adminPayload = $admin.Body | ConvertFrom-Json
+  if ($adminPayload.error -ne "forbidden") {
+    throw "Compiled policy route did not return a safe forbidden response: $($admin.Body)"
+  }
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("update users set role = ? where id = ?", ("admin", "user-42"));db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "failed to promote compiled smoke user" }
+  $authorizedAdmin = Invoke-AxRequest -Url "$baseUrl/api/admin" -Method "GET" -Headers @{ Cookie = $sessionCookie }
+  $authorizedAdminPayload = $authorizedAdmin.Body | ConvertFrom-Json
+  if ($authorizedAdminPayload.id -ne "user-42" -or $authorizedAdminPayload.role -ne "admin") {
+    throw "Compiled policy route did not return its narrowed typed user: $($authorizedAdmin.Body)"
+  }
+  $logoutUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Logout"
+  $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303
+  if ($logout.Headers["Set-Cookie"] -notmatch "Max-Age=0") {
+    throw "Compiled logout did not clear the session cookie"
+  }
+
+  $sessionCount = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from ax_sessions").fetchone()[0]);db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or [int] $sessionCount -ne 0) {
+    throw "Compiled logout did not remove the persisted session"
+  }
+
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }
   $dataPayload = $data.Body | ConvertFrom-Json
@@ -311,6 +410,16 @@ return ASX {
     Remove-Item Env:AX_SECRET_DB_URL -ErrorAction SilentlyContinue
   } else {
     $env:AX_SECRET_DB_URL = $originalDbUrl
+  }
+  if ($null -eq $originalSessionKey) {
+    Remove-Item Env:AX_SECRET_SESSION_KEY -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_SESSION_KEY = $originalSessionKey
+  }
+  if ($null -eq $originalSessionCookieSecure) {
+    Remove-Item Env:AX_SECRET_SESSION_COOKIE_SECURE -ErrorAction SilentlyContinue
+  } else {
+    $env:AX_SECRET_SESSION_COOKIE_SECURE = $originalSessionCookieSecure
   }
   if ($ownsWorkDir -and (Test-Path -LiteralPath $WorkDir)) {
     $resolved = [System.IO.Path]::GetFullPath($WorkDir)

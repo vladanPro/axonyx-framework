@@ -22,8 +22,8 @@ use axonyx_core::ax_backend_ast_prelude::{
 };
 use axonyx_core::ax_backend_codegen_prelude::compile_backend_sources_to_module;
 use axonyx_core::ax_backend_lowering_prelude::{
-    lower_backend_document, AxBackendPlan, AxFieldPlan, AxHandlerKind, AxReturnPlan, AxRustExpr,
-    AxStepPlan, AxTransactionOperationPlan, AxValuePlan,
+    ax_step_uses_auth_subject, lower_backend_document, AxBackendPlan, AxFieldPlan, AxHandlerKind,
+    AxReturnPlan, AxRustExpr, AxStepPlan, AxTransactionOperationPlan, AxValuePlan,
 };
 use axonyx_core::ax_backend_parser_prelude::{parse_backend_ax, AxBackendParseError};
 use axonyx_core::ax_formatter_prelude::format_ax_source;
@@ -89,7 +89,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.4.0";
+const AXONYX_RUNTIME_VERSION: &str = "0.4.1";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -9057,7 +9057,9 @@ fn check_ax_source_with_context(
 ) -> Vec<CheckDiagnostic> {
     if !is_asx_source_file(path) && looks_like_backend_ax(source) {
         return match parse_backend_ax(source) {
-            Ok(document) => check_backend_requirements(path, source, root, &document),
+            Ok(document) => {
+                check_backend_requirements(path, source, root, &document, shared_returns)
+            }
             Err(error) => vec![diagnostic_from_parse_error(
                 path,
                 source,
@@ -9128,11 +9130,18 @@ fn check_backend_requirements(
     source: &str,
     root: Option<&Path>,
     document: &AxBackendDocument,
+    shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
 ) -> Vec<CheckDiagnostic> {
     let mut diagnostics = root
         .map(|root| check_backend_imports(root, path, source, document))
         .unwrap_or_default();
     diagnostics.extend(check_backend_scope_contracts(path, source, document));
+    diagnostics.extend(check_backend_optional_access(
+        path,
+        source,
+        document,
+        shared_returns,
+    ));
     let plan = match lower_backend_document(document) {
         Ok(plan) => plan,
         Err(error) => {
@@ -9175,6 +9184,162 @@ fn check_backend_requirements(
     });
 
     diagnostics
+}
+
+fn check_backend_optional_access(
+    path: &Path,
+    source: &str,
+    document: &AxBackendDocument,
+    shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
+) -> Vec<CheckDiagnostic> {
+    let local_returns = document
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            let AxBackendBlock::Loader(loader) = block else {
+                return None;
+            };
+            Some((
+                loader.name.clone(),
+                loader
+                    .returns
+                    .as_deref()
+                    .and_then(|annotation| parse_loader_contract_type(annotation).ok()),
+            ))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let empty_shared = std::collections::BTreeMap::new();
+    let shared_returns = shared_returns.unwrap_or(&empty_shared);
+    let mut diagnostics = Vec::new();
+
+    for block in &document.blocks {
+        let AxBackendBlock::Route(route) = block else {
+            continue;
+        };
+        let mut optional_bindings = std::collections::BTreeSet::new();
+        let mut reported = std::collections::BTreeSet::new();
+
+        for statement in &route.body {
+            for expression in backend_flow_expressions(statement) {
+                let mut accesses = Vec::new();
+                collect_unguarded_optional_accesses(expression, &optional_bindings, &mut accesses);
+                for (binding, property) in accesses {
+                    let needle = format!("{binding}.{property}");
+                    let line = line_for_source_pattern(source, &needle);
+                    if !reported.insert((line, binding.clone(), property.clone())) {
+                        continue;
+                    }
+                    diagnostics.push(CheckDiagnostic {
+                        file: display_path(path),
+                        line,
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-optional-access",
+                        message: format!(
+                            "`{binding}` is optional here; add `require {binding} else ...` before accessing `{needle}`, or use `{binding}?.{property}` when an empty value is valid."
+                        ),
+                    });
+                }
+            }
+
+            match statement {
+                AxBackendStmt::Data(data) => {
+                    optional_bindings.remove(&data.name);
+                    let AxBackendValue::Expr(expression) = &data.value else {
+                        continue;
+                    };
+                    if matches!(
+                        resolve_query_return_type(expression, &local_returns, shared_returns),
+                        QueryReturnResolution::Known {
+                            ty: AxType::Optional(_),
+                            ..
+                        }
+                    ) {
+                        optional_bindings.insert(data.name.clone());
+                    }
+                }
+                AxBackendStmt::Require(requirement) => {
+                    if let AxExpr::Identifier(binding) = &requirement.value {
+                        optional_bindings.remove(binding);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn backend_flow_expressions(statement: &AxBackendStmt) -> Vec<&AxExpr> {
+    match statement {
+        AxBackendStmt::Data(data) => match &data.value {
+            AxBackendValue::Expr(expression) => vec![expression],
+            AxBackendValue::Query(_) => Vec::new(),
+        },
+        AxBackendStmt::Require(requirement) => vec![&requirement.value],
+        AxBackendStmt::Return(AxReturn::Expr(expression)) => vec![expression],
+        _ => Vec::new(),
+    }
+}
+
+fn collect_unguarded_optional_accesses(
+    expression: &AxExpr,
+    optional_bindings: &std::collections::BTreeSet<String>,
+    accesses: &mut Vec<(String, String)>,
+) {
+    match expression {
+        AxExpr::Member { object, property } => {
+            if let Some(binding) = regular_member_root(object) {
+                if optional_bindings.contains(binding) {
+                    accesses.push((binding.to_string(), property.clone()));
+                }
+            }
+            collect_unguarded_optional_accesses(object, optional_bindings, accesses);
+        }
+        AxExpr::OptionalMember { object, .. } => {
+            collect_unguarded_optional_accesses(object, optional_bindings, accesses);
+        }
+        AxExpr::Unary { expr, .. } => {
+            collect_unguarded_optional_accesses(expr, optional_bindings, accesses);
+        }
+        AxExpr::Binary { left, right, .. } => {
+            collect_unguarded_optional_accesses(left, optional_bindings, accesses);
+            collect_unguarded_optional_accesses(right, optional_bindings, accesses);
+        }
+        AxExpr::Index { object, index } => {
+            collect_unguarded_optional_accesses(object, optional_bindings, accesses);
+            collect_unguarded_optional_accesses(index, optional_bindings, accesses);
+        }
+        AxExpr::List(items) => {
+            for item in items {
+                collect_unguarded_optional_accesses(item, optional_bindings, accesses);
+            }
+        }
+        AxExpr::Object(fields) => {
+            for value in fields.values() {
+                collect_unguarded_optional_accesses(value, optional_bindings, accesses);
+            }
+        }
+        AxExpr::Call { args, .. } => {
+            for arg in args {
+                collect_unguarded_optional_accesses(arg, optional_bindings, accesses);
+            }
+        }
+        AxExpr::String(_)
+        | AxExpr::Number(_)
+        | AxExpr::Float(_)
+        | AxExpr::Bool(_)
+        | AxExpr::Identifier(_) => {}
+    }
+}
+
+fn regular_member_root(expression: &AxExpr) -> Option<&str> {
+    match expression {
+        AxExpr::Identifier(binding) => Some(binding),
+        AxExpr::Member { object, .. } => regular_member_root(object),
+        _ => None,
+    }
 }
 
 fn check_backend_scope_contracts(
@@ -9653,6 +9818,23 @@ fn collect_db_surface_diagnostics_from_stmts(
             AxBackendStmt::ClearCookie(expr) => {
                 collect_db_surface_diagnostics_from_expr(path, source, expr, resources, diagnostics)
             }
+            AxBackendStmt::SessionCreate(session) => {
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &session.subject,
+                    resources,
+                    diagnostics,
+                );
+                collect_db_surface_diagnostics_from_expr(
+                    path,
+                    source,
+                    &session.data,
+                    resources,
+                    diagnostics,
+                );
+            }
+            AxBackendStmt::SessionDestroy => {}
             AxBackendStmt::Revalidate(revalidate) => collect_db_surface_diagnostics_from_expr(
                 path,
                 source,
@@ -10703,6 +10885,10 @@ fn is_supported_backend_return_contract(ty: &str) -> bool {
         return false;
     }
 
+    if let Some(inner) = ty.strip_suffix('?') {
+        return !inner.is_empty() && is_supported_backend_return_contract(inner);
+    }
+
     if let Some(inner) = ty.strip_suffix("[]") {
         return is_supported_backend_return_contract(inner);
     }
@@ -10743,6 +10929,10 @@ fn is_supported_backend_return_contract(ty: &str) -> bool {
 
 fn backend_return_contract_named_types(ty: &str) -> Vec<&str> {
     let ty = ty.trim();
+
+    if let Some(inner) = ty.strip_suffix('?') {
+        return backend_return_contract_named_types(inner);
+    }
 
     if let Some(inner) = ty.strip_suffix("[]") {
         return backend_return_contract_named_types(inner);
@@ -10821,6 +11011,10 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
             ..
         } => expr_uses_input_scope(expr),
         AxStepPlan::Let {
+            value: AxValuePlan::Call { args, .. },
+            ..
+        } => args.iter().any(expr_uses_input_scope),
+        AxStepPlan::Let {
             value: AxValuePlan::Query(query),
             ..
         } => query_uses_input_scope(query),
@@ -10843,6 +11037,10 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
         }
         AxStepPlan::Hook { value, .. } => expr_uses_input_scope(value),
         AxStepPlan::ClearCookie { name } => expr_uses_input_scope(name),
+        AxStepPlan::SessionCreate { subject, data } => {
+            expr_uses_input_scope(subject) || expr_uses_input_scope(data)
+        }
+        AxStepPlan::SessionDestroy => false,
         AxStepPlan::Revalidate { target, .. } => expr_uses_input_scope(target),
         AxStepPlan::Insert { fields, .. } => fields
             .iter()
@@ -10915,15 +11113,27 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             | AxStepPlan::Hook { value: expr, .. }
             | AxStepPlan::ClearCookie { name: expr }
             | AxStepPlan::Revalidate { target: expr, .. } => {
-                expr.code.contains("Auth.signedSession")
+                expr.code.contains("Auth.signedSession") || expr.code.contains("Auth.subject")
             }
-            AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => fields
-                .iter()
-                .any(|field| field.value.code.contains("Auth.signedSession")),
+            AxStepPlan::Insert { fields, .. } | AxStepPlan::Update { fields, .. } => {
+                fields.iter().any(|field| {
+                    field.value.code.contains("Auth.signedSession")
+                        || field.value.code.contains("Auth.subject")
+                })
+            }
             AxStepPlan::Transaction { operations } => operations
                 .iter()
                 .any(transaction_operation_uses_signed_session),
-            AxStepPlan::Send { payload, .. } => payload.code.contains("Auth.signedSession"),
+            AxStepPlan::Send { payload, .. } => {
+                payload.code.contains("Auth.signedSession") || payload.code.contains("Auth.subject")
+            }
+            AxStepPlan::Let {
+                value: AxValuePlan::Call { args, .. },
+                ..
+            } => args.iter().any(|arg| {
+                arg.code.contains("Auth.signedSession") || arg.code.contains("Auth.subject")
+            }),
+            AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy => true,
             AxStepPlan::Let {
                 value: AxValuePlan::StorageSave { .. },
                 ..
@@ -10940,22 +11150,25 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
 
 fn transaction_operation_uses_signed_session(operation: &AxTransactionOperationPlan) -> bool {
     match operation {
-        AxTransactionOperationPlan::Insert { fields, .. } => fields
-            .iter()
-            .any(|field| field.value.code.contains("Auth.signedSession")),
+        AxTransactionOperationPlan::Insert { fields, .. } => fields.iter().any(|field| {
+            field.value.code.contains("Auth.signedSession")
+                || field.value.code.contains("Auth.subject")
+        }),
         AxTransactionOperationPlan::Update {
             fields, filters, ..
         } => {
-            fields
-                .iter()
-                .any(|field| field.value.code.contains("Auth.signedSession"))
-                || filters
-                    .iter()
-                    .any(|filter| filter.value.code.contains("Auth.signedSession"))
+            fields.iter().any(|field| {
+                field.value.code.contains("Auth.signedSession")
+                    || field.value.code.contains("Auth.subject")
+            }) || filters.iter().any(|filter| {
+                filter.value.code.contains("Auth.signedSession")
+                    || filter.value.code.contains("Auth.subject")
+            })
         }
-        AxTransactionOperationPlan::Delete { filters, .. } => filters
-            .iter()
-            .any(|filter| filter.value.code.contains("Auth.signedSession")),
+        AxTransactionOperationPlan::Delete { filters, .. } => filters.iter().any(|filter| {
+            filter.value.code.contains("Auth.signedSession")
+                || filter.value.code.contains("Auth.subject")
+        }),
     }
 }
 
@@ -11047,6 +11260,14 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
             ..
         } => collect_env_refs_from_expr(expr, refs),
         AxStepPlan::Let {
+            value: AxValuePlan::Call { args, .. },
+            ..
+        } => {
+            for arg in args {
+                collect_env_refs_from_expr(arg, refs);
+            }
+        }
+        AxStepPlan::Let {
             value: AxValuePlan::Query(query),
             ..
         } => {
@@ -11075,6 +11296,11 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
         }
         AxStepPlan::Hook { value, .. } => collect_env_refs_from_expr(value, refs),
         AxStepPlan::ClearCookie { name } => collect_env_refs_from_expr(name, refs),
+        AxStepPlan::SessionCreate { subject, data } => {
+            collect_env_refs_from_expr(subject, refs);
+            collect_env_refs_from_expr(data, refs);
+        }
+        AxStepPlan::SessionDestroy => {}
         AxStepPlan::Revalidate { target, .. } => collect_env_refs_from_expr(target, refs),
         AxStepPlan::Transaction { operations } => {
             for operation in operations {
@@ -11137,6 +11363,7 @@ fn collect_env_refs_from_return(
         }
         axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NoContent
         | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::NotFound
+        | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Forbidden
         | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Ok => {}
     }
 }
@@ -12149,6 +12376,7 @@ fn line_from_backend_parse_error(error: &AxBackendParseError) -> Option<usize> {
         | AxBackendParseError::InvalidAssignment { line }
         | AxBackendParseError::InvalidHeader { line }
         | AxBackendParseError::InvalidCookie { line }
+        | AxBackendParseError::InvalidSession { line }
         | AxBackendParseError::InvalidHook { line }
         | AxBackendParseError::InvalidRequirement { line }
         | AxBackendParseError::InvalidReturn { line }
@@ -13198,7 +13426,7 @@ use std::path::{{Component, Path, PathBuf}};
 use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
-use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxHttpRequest, AxHttpResponse}};
+use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxCookie, AxHttpRequest, AxHttpResponse}};
 {storage_import}use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
 
@@ -13358,7 +13586,8 @@ fn handle_compiled_action(
     let dispatched = backend::dispatch_action(runtime, storage, &name, request);
 
     match dispatched {{
-        Ok(Some(mut payload)) => {{
+        Ok(Some(output)) => {{
+            let mut payload = output.payload;
             if payload.get("redirect").is_none_or(Value::is_null) {{
                 if let Value::Object(fields) = &mut payload {{
                     fields.insert("redirect".to_string(), Value::String(route.clone()));
@@ -13366,7 +13595,7 @@ fn handle_compiled_action(
             }}
             normalize_action_payload(&route, &mut payload);
             let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
-            if wants_action_patch_response(request) || !ok {{
+            let response = if wants_action_patch_response(request) || !ok {{
                 let status = if ok {{
                     200
                 }} else {{
@@ -13388,7 +13617,8 @@ fn handle_compiled_action(
             }} else {{
                 let redirect = payload.get("redirect").and_then(Value::as_str).unwrap_or(&route);
                 AxHttpResponse::redirect_with_status(303, redirect).with_no_store()
-            }}
+            }};
+            with_action_cookies(response, output.cookies)
         }}
         Ok(None) => AxHttpResponse::text(404, "action not found").with_no_store(),
         Err(error) => {{
@@ -13407,6 +13637,16 @@ fn handle_compiled_action(
             }}
         }}
     }}
+}}
+
+fn with_action_cookies(
+    mut response: AxHttpResponse,
+    cookies: impl IntoIterator<Item = AxCookie>,
+) -> AxHttpResponse {{
+    for cookie in cookies {{
+        response = response.with_cookie(cookie);
+    }}
+    response
 }}
 
 fn normalize_action_payload(route: &str, payload: &mut Value) {{
@@ -14753,6 +14993,9 @@ fn collect_responses_from_return(
         "notFound" | "not_found" if args.is_empty() => {
             responses.insert(404, "Not Found");
         }
+        "forbidden" if args.is_empty() => {
+            responses.insert(403, "Forbidden");
+        }
         "noContent" | "no_content" if args.is_empty() => {
             responses.insert(204, "No Content");
         }
@@ -15634,6 +15877,14 @@ fn openapi_component_schema(schema: &ApiSchemaReport) -> serde_json::Value {
 fn openapi_schema_for_ax_type(ty: &str) -> serde_json::Value {
     let ty = ty.trim();
 
+    if let Some(inner) = ty.strip_suffix('?') {
+        let mut schema = openapi_schema_for_ax_type(inner);
+        if let serde_json::Value::Object(object) = &mut schema {
+            object.insert("nullable".to_string(), serde_json::Value::Bool(true));
+        }
+        return schema;
+    }
+
     if let Some(inner) = ty.strip_suffix("[]") {
         return serde_json::json!({
             "type": "array",
@@ -15813,6 +16064,10 @@ fn ax_schema_type(input_ty: &str) -> &'static str {
 
 fn ax_return_schema_type(return_ty: &str) -> String {
     let return_ty = return_ty.trim();
+
+    if let Some(inner) = return_ty.strip_suffix('?') {
+        return format!("Optional<{}>", ax_return_schema_type(inner));
+    }
 
     if let Some(inner) = return_ty.strip_suffix("[]") {
         return format!("List<{}>", ax_return_schema_type(inner));
@@ -17663,7 +17918,8 @@ fn execute_backend_route_request(
         .iter()
         .map(|(_, source)| source.as_str())
         .collect::<Vec<_>>();
-    let uses_db_runtime = source_refs.iter().any(|source| source.contains("db."));
+    let uses_db_runtime = backend_source_refs_use_database(&source_refs)?;
+    let uses_session_runtime = backend_source_refs_use_sessions(&source_refs)?;
     let mut store = state
         .preview_store
         .lock()
@@ -17673,7 +17929,7 @@ fn execute_backend_route_request(
         .api_response_validation
         .enabled(mode == AxServerMode::Dev);
 
-    if uses_db_runtime {
+    if uses_db_runtime || uses_session_runtime {
         let env = db_env_for_root(&state.root, None)?;
         let runtime = ax_backend_runtime::runtime_from_env(env)
             .with_context(|| "failed to initialize backend runtime from environment")?;
@@ -18563,51 +18819,56 @@ fn handle_action_request(
         .as_ref()
         .map(|form| form.fields.clone())
         .unwrap_or_else(|| parse_form_body(&request.body));
-    let result =
-        if mode == AxServerMode::Start && backend_source_refs_use_database(&action_source_refs)? {
-            let mut store = state
-                .preview_store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
-                .clone();
-            let env = db_env_for_root(&state.root, None)?;
-            let runtime = ax_backend_runtime::runtime_from_env(env)
-                .with_context(|| "failed to initialize action database runtime from environment")?;
-            execute_preview_action_request_sources_with_runtime_and_storage(
-                &action_source_refs,
-                &action_name,
-                request,
-                &runtime,
-                &state.storage_registry,
-                &mut store,
-            )
-        } else {
-            let mut store = state
-                .preview_store
-                .lock()
-                .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
-            execute_preview_action_request_sources_with_storage(
-                &action_source_refs,
-                &action_name,
-                request,
-                &state.storage_registry,
-                &mut store,
-            )
-        }
-        .with_context(|| {
-            format!(
-                "failed to execute action '{}' from '{}'",
-                action_name,
-                actions_path.display()
-            )
-        })?;
+    let uses_sessions = backend_source_refs_use_sessions(&action_source_refs)?;
+    let result = if uses_sessions
+        || (mode == AxServerMode::Start && backend_source_refs_use_database(&action_source_refs)?)
+    {
+        let mut store = state
+            .preview_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
+            .clone();
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)
+            .with_context(|| "failed to initialize action database runtime from environment")?;
+        execute_preview_action_request_sources_with_runtime_and_storage(
+            &action_source_refs,
+            &action_name,
+            request,
+            &runtime,
+            &state.storage_registry,
+            &mut store,
+        )
+    } else {
+        let mut store = state
+            .preview_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?;
+        execute_preview_action_request_sources_with_storage(
+            &action_source_refs,
+            &action_name,
+            request,
+            &state.storage_registry,
+            &mut store,
+        )
+    }
+    .with_context(|| {
+        format!(
+            "failed to execute action '{}' from '{}'",
+            action_name,
+            actions_path.display()
+        )
+    })?;
 
     if wants_action_patch_response(request, &input_fields) {
         return action_patch_response(&route, &result);
     }
 
-    let redirect_to = result.redirect_to.unwrap_or(route.request_path);
-    Ok(redirect_response(303, &redirect_to))
+    let redirect_to = result.redirect_to.clone().unwrap_or(route.request_path);
+    Ok(with_action_cookies(
+        redirect_response(303, &redirect_to),
+        &result,
+    ))
 }
 
 fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
@@ -18615,6 +18876,24 @@ fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
         let document = parse_backend_ax(source)?;
         let plan = lower_backend_document(&document)?;
         if backend_plan_uses_database(&plan) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn backend_source_refs_use_sessions(sources: &[&str]) -> Result<bool> {
+    for source in sources {
+        let document = parse_backend_ax(source)?;
+        let plan = lower_backend_document(&document)?;
+        if plan.handlers.iter().any(|handler| {
+            handler.steps.iter().any(|step| {
+                matches!(
+                    step,
+                    AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy
+                ) || ax_step_uses_auth_subject(step)
+            })
+        }) {
             return Ok(true);
         }
     }
@@ -18697,7 +18976,8 @@ fn action_patch_response(
     result: &AxPreviewActionResult,
 ) -> Result<AxHttpResponse> {
     if let Some(error) = &result.error {
-        return action_error_response(route, error);
+        return action_error_response(route, error)
+            .map(|response| with_action_cookies(response, result));
     }
 
     let patches = normalize_action_patches(route, &result.patches)?;
@@ -18718,10 +18998,21 @@ fn action_patch_response(
     }))
     .context("failed to serialize action patch response")?;
 
-    Ok(
+    Ok(with_action_cookies(
         AxHttpResponse::bytes(200, "application/ax-patch+json; charset=utf-8", body)
             .with_no_store(),
-    )
+        result,
+    ))
+}
+
+fn with_action_cookies(
+    mut response: AxHttpResponse,
+    result: &AxPreviewActionResult,
+) -> AxHttpResponse {
+    for cookie in &result.cookies {
+        response = response.with_cookie(cookie.clone());
+    }
+    response
 }
 
 fn action_error_response(
@@ -21402,6 +21693,7 @@ route POST "/api/posts" -> Post
             r#"
 route GET "/api/posts/:slug" -> Post
   require params.slug else notFound()
+  require isVisible else forbidden()
   return json(post)
 
 route POST "/api/posts/:slug" -> Post
@@ -21435,10 +21727,16 @@ route DELETE "/api/posts/:slug"
             .expect("DELETE route should exist");
         assert_eq!(
             get_route.responses,
-            vec![ApiResponseReport {
-                status: 404,
-                description: "Not Found",
-            }]
+            vec![
+                ApiResponseReport {
+                    status: 403,
+                    description: "Forbidden",
+                },
+                ApiResponseReport {
+                    status: 404,
+                    description: "Not Found",
+                },
+            ]
         );
         assert_eq!(
             post_route.responses,
@@ -21468,6 +21766,10 @@ route DELETE "/api/posts/:slug"
         );
 
         let value = api_report_openapi_value(&report);
+        assert_eq!(
+            value["paths"]["/api/posts/{slug}"]["get"]["responses"]["403"]["description"],
+            "Forbidden"
+        );
         assert_eq!(
             value["paths"]["/api/posts/{slug}"]["get"]["responses"]["404"]["description"],
             "Not Found"
@@ -22875,6 +23177,7 @@ action SetDocsTheme(theme: string) {
         assert_eq!(ax_return_schema_type("string"), "String");
         assert_eq!(ax_return_schema_type("f64"), "Number");
         assert_eq!(ax_return_schema_type("Optional<Post>"), "Optional<Post>");
+        assert_eq!(ax_return_schema_type("Post?"), "Optional<Post>");
     }
 
     #[test]
@@ -25823,6 +26126,10 @@ action ValidPost
         );
         assert!(source.contains("let storage = Arc::new(AxUnavailableFileStorage)"));
         assert!(source.contains("backend::dispatch_action(runtime, storage, &name, request)"));
+        assert!(source.contains("let mut payload = output.payload"));
+        assert!(source.contains("with_action_cookies(response, output.cookies)"));
+        assert!(source.contains("response = response.with_cookie(cookie)"));
+        assert!(source.contains("AxCompiledHandler, AxCookie, AxHttpRequest"));
         assert!(source.contains("const DATABASE_REQUIRED: bool = true"));
         assert!(source.contains("const VALIDATE_API_RESPONSES: bool = false"));
         assert!(source
@@ -27900,6 +28207,128 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn dev_session_actions_persist_across_requests_and_emit_private_cookies() {
+        let root = make_temp_dir("dev-session-actions");
+        fs::create_dir_all(root.join("app/account")).expect("account route should exist");
+        fs::write(
+            root.join("app/account/page.asx"),
+            "page Account() { return ASX { <Copy>Account</Copy> } }\n",
+        )
+        .expect("page should write");
+        fs::write(
+            root.join("app/account/actions.ax"),
+            r#"action Login(userId: String) {
+  Session.create(input.userId, { role: "editor" })
+  return ok
+}
+
+action Logout() {
+  Session.destroy()
+  return ok
+}
+"#,
+        )
+        .expect("actions should write");
+        fs::create_dir_all(root.join("routes/api")).expect("API routes should exist");
+        fs::write(
+            root.join("routes/api/account.ax"),
+            r#"route GET "/api/account"
+  require Auth.subject else redirect("/login")
+  return json(Auth.subject)
+"#,
+        )
+        .expect("protected account route should write");
+        let database_path = root.join("sessions.sqlite");
+        fs::write(
+            root.join(".env.local"),
+            format!(
+                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=test-session-secret\nAX_SECRET_SESSION_COOKIE_SECURE=false\n",
+                database_path.display()
+            ),
+        )
+        .expect("local env should write");
+        let state = test_dev_state(&root);
+
+        let login_request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/__axonyx/action?path=%2Faccount&name=Login".to_string(),
+            headers: [
+                (
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                ),
+                (
+                    "accept".to_string(),
+                    "application/ax-patch+json".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            body: b"userId=user-42&__ax_patch=true".to_vec(),
+            multipart: None,
+        };
+        let login = handle_action_request(&state, AxServerMode::Dev, &login_request)
+            .expect("login should execute");
+        assert_eq!(login.status, 200);
+        assert_eq!(login.set_cookies.len(), 1);
+        assert!(login.set_cookies[0].contains("HttpOnly"));
+        let login_body = String::from_utf8(login.body.into_bytes()).expect("body should be UTF-8");
+        assert!(!login_body.contains("session"));
+
+        let cookie_pair = login.set_cookies[0]
+            .split(';')
+            .next()
+            .expect("session cookie should have a value")
+            .to_string();
+        let account_request = AxHttpRequest {
+            method: "GET".to_string(),
+            target: "/api/account".to_string(),
+            headers: [("cookie".to_string(), cookie_pair.clone())]
+                .into_iter()
+                .collect(),
+            body: Vec::new(),
+            multipart: None,
+        };
+        let account = execute_backend_route_request(&state, AxServerMode::Dev, &account_request)
+            .expect("protected account route should execute")
+            .expect("protected account route should match");
+        assert_eq!(account.status, 200);
+        assert_eq!(account.body, br#""user-42""#);
+
+        let logout_request = AxHttpRequest {
+            method: "POST".to_string(),
+            target: "/__axonyx/action?path=%2Faccount&name=Logout".to_string(),
+            headers: [
+                (
+                    "content-type".to_string(),
+                    "application/x-www-form-urlencoded".to_string(),
+                ),
+                ("cookie".to_string(), cookie_pair),
+            ]
+            .into_iter()
+            .collect(),
+            body: Vec::new(),
+            multipart: None,
+        };
+        let logout = handle_action_request(&state, AxServerMode::Dev, &logout_request)
+            .expect("logout should execute");
+        assert_eq!(logout.status, 303);
+        assert_eq!(logout.set_cookies.len(), 1);
+        assert!(logout.set_cookies[0].contains("Max-Age=0"));
+
+        let connection = rusqlite::Connection::open(&database_path)
+            .expect("session database should remain readable");
+        let session_count: i64 = connection
+            .query_row("select count(*) from ax_sessions", [], |row| row.get(0))
+            .expect("session table should exist");
+        assert_eq!(session_count, 0);
+
+        drop(connection);
+        drop(state);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn detects_oversized_request_body_from_header_or_bytes() {
         let header_request = AxHttpRequest {
             method: "POST".to_string(),
@@ -29166,6 +29595,7 @@ action SetTheme(theme: string) {
                 AxValue::from("gold"),
             )],
             invalidations: Vec::new(),
+            cookies: Vec::new(),
             error: None,
         };
         let error = action_patch_response(&route, &result).expect_err("patch should be rejected");
@@ -29434,6 +29864,7 @@ page state count: Number = 0
                 AxValue::String("not-a-number".to_string()),
             )],
             invalidations: Vec::new(),
+            cookies: Vec::new(),
             error: None,
         };
 
@@ -31343,6 +31774,10 @@ export type Post {
 query loadPosts() -> Post[] {
   return posts
 }
+
+query findPost() -> Post? {
+  return post
+}
 "#,
         )
         .expect("loader should write");
@@ -32499,6 +32934,97 @@ route GET "/api/admin"
         if let Some(value) = secret_prev {
             std::env::set_var("AX_SECRET_SESSION_KEY", value);
         }
+    }
+
+    #[test]
+    fn check_ax_source_reports_optional_query_field_access_before_guard() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/account.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+type User {
+  id: String
+  role: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+route GET "/api/admin" -> User {
+  data user = resolveUser(Auth.subject)
+  require user.role == "admin" else forbidden()
+  return json(user)
+}
+"#,
+            None,
+        );
+
+        let optional = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "axonyx-optional-access")
+            .collect::<Vec<_>>();
+        assert_eq!(optional.len(), 1, "{diagnostics:#?}");
+        assert_eq!(optional[0].line, 13);
+        assert!(optional[0].message.contains("require user"));
+        assert!(optional[0].message.contains("user?.role"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_guarded_and_optional_query_field_access() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/account.ax");
+        let guarded = check_ax_source_with_root(
+            &path,
+            r#"
+type User {
+  id: String
+  role: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+route GET "/api/admin" -> User {
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  require user.role == "admin" else forbidden()
+  return json(user)
+}
+"#,
+            None,
+        );
+        assert!(
+            guarded
+                .iter()
+                .all(|diagnostic| diagnostic.code != "axonyx-optional-access"),
+            "{guarded:#?}"
+        );
+
+        let optional = check_ax_source_with_root(
+            &path,
+            r#"
+type User {
+  role: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+route GET "/api/account" {
+  data user = resolveUser(Auth.subject)
+  return json(user?.role)
+}
+"#,
+            None,
+        );
+        assert!(
+            optional
+                .iter()
+                .all(|diagnostic| diagnostic.code != "axonyx-optional-access"),
+            "{optional:#?}"
+        );
     }
 
     #[test]
