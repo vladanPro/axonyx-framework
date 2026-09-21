@@ -9057,7 +9057,9 @@ fn check_ax_source_with_context(
 ) -> Vec<CheckDiagnostic> {
     if !is_asx_source_file(path) && looks_like_backend_ax(source) {
         return match parse_backend_ax(source) {
-            Ok(document) => check_backend_requirements(path, source, root, &document),
+            Ok(document) => {
+                check_backend_requirements(path, source, root, &document, shared_returns)
+            }
             Err(error) => vec![diagnostic_from_parse_error(
                 path,
                 source,
@@ -9128,11 +9130,18 @@ fn check_backend_requirements(
     source: &str,
     root: Option<&Path>,
     document: &AxBackendDocument,
+    shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
 ) -> Vec<CheckDiagnostic> {
     let mut diagnostics = root
         .map(|root| check_backend_imports(root, path, source, document))
         .unwrap_or_default();
     diagnostics.extend(check_backend_scope_contracts(path, source, document));
+    diagnostics.extend(check_backend_optional_access(
+        path,
+        source,
+        document,
+        shared_returns,
+    ));
     let plan = match lower_backend_document(document) {
         Ok(plan) => plan,
         Err(error) => {
@@ -9175,6 +9184,162 @@ fn check_backend_requirements(
     });
 
     diagnostics
+}
+
+fn check_backend_optional_access(
+    path: &Path,
+    source: &str,
+    document: &AxBackendDocument,
+    shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
+) -> Vec<CheckDiagnostic> {
+    let local_returns = document
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            let AxBackendBlock::Loader(loader) = block else {
+                return None;
+            };
+            Some((
+                loader.name.clone(),
+                loader
+                    .returns
+                    .as_deref()
+                    .and_then(|annotation| parse_loader_contract_type(annotation).ok()),
+            ))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let empty_shared = std::collections::BTreeMap::new();
+    let shared_returns = shared_returns.unwrap_or(&empty_shared);
+    let mut diagnostics = Vec::new();
+
+    for block in &document.blocks {
+        let AxBackendBlock::Route(route) = block else {
+            continue;
+        };
+        let mut optional_bindings = std::collections::BTreeSet::new();
+        let mut reported = std::collections::BTreeSet::new();
+
+        for statement in &route.body {
+            for expression in backend_flow_expressions(statement) {
+                let mut accesses = Vec::new();
+                collect_unguarded_optional_accesses(expression, &optional_bindings, &mut accesses);
+                for (binding, property) in accesses {
+                    let needle = format!("{binding}.{property}");
+                    let line = line_for_source_pattern(source, &needle);
+                    if !reported.insert((line, binding.clone(), property.clone())) {
+                        continue;
+                    }
+                    diagnostics.push(CheckDiagnostic {
+                        file: display_path(path),
+                        line,
+                        column: 1,
+                        severity: "error",
+                        code: "axonyx-optional-access",
+                        message: format!(
+                            "`{binding}` is optional here; add `require {binding} else ...` before accessing `{needle}`, or use `{binding}?.{property}` when an empty value is valid."
+                        ),
+                    });
+                }
+            }
+
+            match statement {
+                AxBackendStmt::Data(data) => {
+                    optional_bindings.remove(&data.name);
+                    let AxBackendValue::Expr(expression) = &data.value else {
+                        continue;
+                    };
+                    if matches!(
+                        resolve_query_return_type(expression, &local_returns, shared_returns),
+                        QueryReturnResolution::Known {
+                            ty: AxType::Optional(_),
+                            ..
+                        }
+                    ) {
+                        optional_bindings.insert(data.name.clone());
+                    }
+                }
+                AxBackendStmt::Require(requirement) => {
+                    if let AxExpr::Identifier(binding) = &requirement.value {
+                        optional_bindings.remove(binding);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn backend_flow_expressions(statement: &AxBackendStmt) -> Vec<&AxExpr> {
+    match statement {
+        AxBackendStmt::Data(data) => match &data.value {
+            AxBackendValue::Expr(expression) => vec![expression],
+            AxBackendValue::Query(_) => Vec::new(),
+        },
+        AxBackendStmt::Require(requirement) => vec![&requirement.value],
+        AxBackendStmt::Return(AxReturn::Expr(expression)) => vec![expression],
+        _ => Vec::new(),
+    }
+}
+
+fn collect_unguarded_optional_accesses(
+    expression: &AxExpr,
+    optional_bindings: &std::collections::BTreeSet<String>,
+    accesses: &mut Vec<(String, String)>,
+) {
+    match expression {
+        AxExpr::Member { object, property } => {
+            if let Some(binding) = regular_member_root(object) {
+                if optional_bindings.contains(binding) {
+                    accesses.push((binding.to_string(), property.clone()));
+                }
+            }
+            collect_unguarded_optional_accesses(object, optional_bindings, accesses);
+        }
+        AxExpr::OptionalMember { object, .. } => {
+            collect_unguarded_optional_accesses(object, optional_bindings, accesses);
+        }
+        AxExpr::Unary { expr, .. } => {
+            collect_unguarded_optional_accesses(expr, optional_bindings, accesses);
+        }
+        AxExpr::Binary { left, right, .. } => {
+            collect_unguarded_optional_accesses(left, optional_bindings, accesses);
+            collect_unguarded_optional_accesses(right, optional_bindings, accesses);
+        }
+        AxExpr::Index { object, index } => {
+            collect_unguarded_optional_accesses(object, optional_bindings, accesses);
+            collect_unguarded_optional_accesses(index, optional_bindings, accesses);
+        }
+        AxExpr::List(items) => {
+            for item in items {
+                collect_unguarded_optional_accesses(item, optional_bindings, accesses);
+            }
+        }
+        AxExpr::Object(fields) => {
+            for value in fields.values() {
+                collect_unguarded_optional_accesses(value, optional_bindings, accesses);
+            }
+        }
+        AxExpr::Call { args, .. } => {
+            for arg in args {
+                collect_unguarded_optional_accesses(arg, optional_bindings, accesses);
+            }
+        }
+        AxExpr::String(_)
+        | AxExpr::Number(_)
+        | AxExpr::Float(_)
+        | AxExpr::Bool(_)
+        | AxExpr::Identifier(_) => {}
+    }
+}
+
+fn regular_member_root(expression: &AxExpr) -> Option<&str> {
+    match expression {
+        AxExpr::Identifier(binding) => Some(binding),
+        AxExpr::Member { object, .. } => regular_member_root(object),
+        _ => None,
+    }
 }
 
 fn check_backend_scope_contracts(
@@ -32769,6 +32934,97 @@ route GET "/api/admin"
         if let Some(value) = secret_prev {
             std::env::set_var("AX_SECRET_SESSION_KEY", value);
         }
+    }
+
+    #[test]
+    fn check_ax_source_reports_optional_query_field_access_before_guard() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/account.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+type User {
+  id: String
+  role: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+route GET "/api/admin" -> User {
+  data user = resolveUser(Auth.subject)
+  require user.role == "admin" else forbidden()
+  return json(user)
+}
+"#,
+            None,
+        );
+
+        let optional = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "axonyx-optional-access")
+            .collect::<Vec<_>>();
+        assert_eq!(optional.len(), 1, "{diagnostics:#?}");
+        assert_eq!(optional[0].line, 13);
+        assert!(optional[0].message.contains("require user"));
+        assert!(optional[0].message.contains("user?.role"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_guarded_and_optional_query_field_access() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/account.ax");
+        let guarded = check_ax_source_with_root(
+            &path,
+            r#"
+type User {
+  id: String
+  role: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+route GET "/api/admin" -> User {
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  require user.role == "admin" else forbidden()
+  return json(user)
+}
+"#,
+            None,
+        );
+        assert!(
+            guarded
+                .iter()
+                .all(|diagnostic| diagnostic.code != "axonyx-optional-access"),
+            "{guarded:#?}"
+        );
+
+        let optional = check_ax_source_with_root(
+            &path,
+            r#"
+type User {
+  role: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+route GET "/api/account" {
+  data user = resolveUser(Auth.subject)
+  return json(user?.role)
+}
+"#,
+            None,
+        );
+        assert!(
+            optional
+                .iter()
+                .all(|diagnostic| diagnostic.code != "axonyx-optional-access"),
+            "{optional:#?}"
+        );
     }
 
     #[test]
