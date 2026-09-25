@@ -39,6 +39,47 @@ return {
 
 `loader PostsList` and `load PostsList` remain supported for compatibility, but new templates prefer `query loadPosts()` and `data posts = loadPosts()`.
 
+## Permission Policy
+
+Keep permissions in application-owned tables. `Auth.subject` identifies a valid
+server-side session; it is not a role or permission claim. Resolve the user and
+then look up a grant on each protected request:
+
+```ax
+type User {
+  id: String
+  email: String
+}
+
+type UserPermission {
+  id: Int
+  user_id: String
+  permission: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+query resolvePermission(userId: String, permission: String) -> UserPermission? {
+  return db.user_permissions.where({ user_id: input.userId, permission: input.permission }).first()
+}
+
+route GET "/api/publish" -> User {
+  require Auth.subject
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  data grant = resolvePermission(user.id, "articles.publish")
+  require grant else forbidden()
+  return json(user)
+}
+```
+
+Without a session, the route returns `401`. A signed-in user without the grant
+gets `403`. Grant changes take effect on the next request because the database,
+not the cookie, owns the permission. This is a route-level pattern, not a
+built-in RBAC engine; the app owns its permission schema and assignment rules.
+
 ## Current Query Clauses
 
 - `where`

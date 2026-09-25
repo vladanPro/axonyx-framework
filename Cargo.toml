@@ -28,6 +28,8 @@ toml = "0.8.23"
 semver = "1.0.27"
 ureq = { version = "=3.2.1", default-features = false, features = ["rustls"] }
 axum = "0.8.9"
+# Keep Axum's transitive HTTP adapter on a Cargo 1.82-compatible release.
+hyper-util = "=0.1.20"
 flate2 = "1.0.35"
 chrono = "0.4.42"
 sha2 = "0.10.9"
