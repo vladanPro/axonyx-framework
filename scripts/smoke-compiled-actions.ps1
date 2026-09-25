@@ -188,12 +188,22 @@ type User {
   role: String
 }
 
+type UserPermission {
+  id: Int
+  user_id: String
+  permission: String
+}
+
 fn hasRole(user: User, role: String) -> Bool {
   return user.role == role
 }
 
 query resolveUser(subject: String) -> User? {
   return db.users.where({ id: input.subject }).first()
+}
+
+query resolvePermission(userId: String, permission: String) -> UserPermission? {
+  return db.user_permissions.where({ user_id: input.userId, permission: input.permission }).first()
 }
 
 route GET "/api/account" -> User {
@@ -211,6 +221,15 @@ route GET "/api/admin" -> User {
   require isAdmin else forbidden()
   return json(user)
 }
+
+route GET "/api/publish" -> User {
+  require Auth.subject
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  data grant = resolvePermission(user.id, "articles.publish")
+  require grant else forbidden()
+  return json(user)
+}
 '@,
     (New-Object System.Text.UTF8Encoding($false))
   )
@@ -218,7 +237,7 @@ route GET "/api/admin" -> User {
   $dbPath = Join-Path $appRoot "compiled-smoke.db"
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
-  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL); CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL);"
+  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL); CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL); CREATE TABLE user_permissions (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, permission TEXT NOT NULL, UNIQUE(user_id, permission));"
   $seed = "INSERT INTO posts (slug,title,excerpt,status) VALUES (?,?,?,?)"
   $userSeed = "INSERT INTO users (id,email,role) VALUES (?,?,?)"
   & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.executescript(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.execute(sys.argv[8],sys.argv[9:12]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published" $userSeed "user-42" "foundry@example.com" "member"
@@ -335,6 +354,10 @@ route GET "/api/admin" -> User {
     throw "Compiled login leaked session data into the action response"
   }
   $sessionCookie = $sessionCookieHeader.Split(';')[0]
+  $anonymousPublish = Invoke-AxRequest -Url "$baseUrl/api/publish" -Method "GET" -ExpectedStatus 401
+  if (($anonymousPublish.Body | ConvertFrom-Json).error -ne "unauthorized") {
+    throw "Permission route did not reject an anonymous request"
+  }
   $account = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie }
   $accountPayload = $account.Body | ConvertFrom-Json
   if ($accountPayload.id -ne "user-42" -or $accountPayload.email -ne "foundry@example.com") {
@@ -345,6 +368,21 @@ route GET "/api/admin" -> User {
   if ($adminPayload.error -ne "forbidden") {
     throw "Compiled policy route did not return a safe forbidden response: $($admin.Body)"
   }
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("insert into user_permissions (user_id, permission) values (?, ?)", ("other-user", "articles.publish"));db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "failed to seed another user's permission" }
+  $deniedPublish = Invoke-AxRequest -Url "$baseUrl/api/publish" -Method "GET" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 403
+  if (($deniedPublish.Body | ConvertFrom-Json).error -ne "forbidden") {
+    throw "Permission route accepted another user's grant"
+  }
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("insert into user_permissions (user_id, permission) values (?, ?)", ("user-42", "articles.publish"));db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "failed to grant compiled smoke permission" }
+  $authorizedPublish = Invoke-AxRequest -Url "$baseUrl/api/publish" -Method "GET" -Headers @{ Cookie = $sessionCookie }
+  if (($authorizedPublish.Body | ConvertFrom-Json).id -ne "user-42") {
+    throw "Permission route did not allow a persisted grant"
+  }
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("delete from user_permissions where user_id = ? and permission = ?", ("user-42", "articles.publish"));db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "failed to revoke compiled smoke permission" }
+  Invoke-AxRequest -Url "$baseUrl/api/publish" -Method "GET" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 403 | Out-Null
   & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("update users set role = ? where id = ?", ("admin", "user-42"));db.commit();db.close()' $dbPath
   if ($LASTEXITCODE -ne 0) { throw "failed to promote compiled smoke user" }
   $authorizedAdmin = Invoke-AxRequest -Url "$baseUrl/api/admin" -Method "GET" -Headers @{ Cookie = $sessionCookie }
