@@ -36,6 +36,11 @@ Good for:
 - internal guides
 - example libraries
 
+### `blog`
+
+This starter indexes Markdown posts as a content collection and prerenders
+article routes without requiring a database.
+
 ## Example Commands
 
 ```bash
@@ -48,6 +53,10 @@ cargo run -p create-axonyx -- demo-site --yes --template site
 
 ```bash
 cargo run -p create-axonyx -- demo-docs --yes --template docs
+```
+
+```bash
+cargo run -p create-axonyx -- demo-blog --yes --template blog
 ```
 
 ## Planned Templates

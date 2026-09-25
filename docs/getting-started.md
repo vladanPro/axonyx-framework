@@ -4,32 +4,35 @@ This is the practical starting point for Axonyx development today.
 
 ## Local Scaffold
 
-From the framework repo:
+For a new project, install the published CLI tools:
 
 ```bash
-git submodule update --init --recursive
-cargo run -p create-axonyx -- my-app --yes
+cargo install create-axonyx
+cargo install cargo-axonyx
+create-axonyx my-app --yes --template site
 ```
 
-By default the generated app uses the shared `axonyx-runtime` Git repository, so regular users do not need the framework submodule setup after scaffolding.
+The default starter uses published crates.io packages. You do not need to clone
+the framework repository or initialize its runtime submodule.
 
 Then:
 
 ```bash
 cd my-app
-cargo run
+cargo ax run dev
 ```
 
-If `cargo-axonyx` is installed, the first framework-shaped local loop is:
+From another terminal in the app root, verify the project:
 
 ```bash
 cargo ax check
 cargo ax doctor
-cargo ax schema pull ./sample-posts.json --name Post
-cargo ax content
-cargo ax build
-cargo ax run dev
+cargo ax build --clean
 ```
+
+The `site` starter is static and needs no database. Use `--template blog` for a
+content collection or `--template docs` for a docs shell. `--template minimal`
+is the full-stack playground for loaders, actions, API routes, and jobs.
 
 `cargo ax build` regenerates `src/generated/backend.rs` from:
 
@@ -38,9 +41,9 @@ cargo ax run dev
 - `routes/**/*.ax`
 - `jobs/**/*.ax`
 
-`cargo ax run dev` now runs that backend sync once before starting the local route-aware dev server with live reload polling.
+`cargo ax run dev` runs backend sync before starting the route-aware dev server.
 
-`cargo ax doctor` checks the app shape, runtime dependency, UI package wiring, package CSS, and `.ax` diagnostics before you start chasing browser issues.
+`cargo ax doctor` checks the app shape, runtime dependency, UI package wiring, package CSS, and `.asx`/`.ax` diagnostics before you start chasing browser issues.
 
 `cargo ax content` indexes configured content collections, which is the first filesystem/content layer for future docs, blog, and CMS flows.
 `cargo ax build` writes that manifest to `dist/_ax/content/manifest.json` when collections are configured.
@@ -96,9 +99,12 @@ type Post {
 
 ## Typed Data And Each
 
-Axonyx now has an early typed data path for JSX-like `.asx` files. Define a record shape, bind query data to a typed list, and `cargo ax check` can catch wrong field access before render:
+Axonyx now has an early typed data path for JSX-like `.asx` files. Define a record shape, bind query data to a typed list, and `cargo ax check` can catch wrong field access before render. For example, in `app/posts/page.asx`:
 
 ```ax
+import { Card } from "@axonyx/ui/foundry/Card.asx"
+import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+
 page Blog() -> ASX {
 
 type Post {
@@ -129,16 +135,19 @@ query loadPosts() -> Post[] {
 }
 ```
 
-If the page uses `post.summary` instead of a declared field, `cargo ax check` reports an `axonyx-type` diagnostic. This is the first bridge between `.ax` primitives like `String` / `List<Post>` and Rust-side Axonyx types.
+If the page uses an undeclared field such as `post.subtitle`, `cargo ax check`
+reports an `axonyx-type` diagnostic. This bridges Axonyx primitives like
+`String` and `List<Post>` to Rust-side Axonyx types.
 
-For intentionally optional data, use safe member access:
+When the record itself may be absent, use safe member access:
 
 ```ax
 <Copy>{post?.summary}</Copy>
 ```
 
-If `summary` is missing at runtime, it lowers to an empty string instead of failing the render.
-If a field is optional in the type itself, regular access is allowed and resolves to `Optional<T>`:
+If `post` is absent, the expression renders as an empty string instead of
+failing. If only a field is optional in the type, regular access is allowed and
+resolves to `Optional<T>`:
 
 ```ax
 type Post {
@@ -159,17 +168,17 @@ cargo ax run start --host 0.0.0.0 --port 3000
 
 ## Runtime Source Defaults
 
-The default scaffold flow now uses `--runtime-source git`.
+The default scaffold flow uses `--runtime-source registry`.
 
-- `git`
-  - best default for current public use
+- `registry`
+  - published crates.io packages; best default for current public use
 - `path`
   - best for Axonyx contributors working inside the framework repo
-- `registry`
-  - best once the runtime crates are published
+- `git`
+  - test an unreleased runtime branch
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes
+create-axonyx my-app --yes
 ```
 
 ## First Useful Variants
@@ -177,26 +186,26 @@ cargo run -p create-axonyx -- my-app --yes
 Minimal starter:
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes --template minimal
+create-axonyx my-app --yes --template minimal
 ```
 
 Site starter:
 
 ```bash
-cargo run -p create-axonyx -- my-site --yes --template site
+create-axonyx my-site --yes --template site
 ```
 
 Docs starter:
 
 ```bash
-cargo run -p create-axonyx -- my-docs --yes --template docs
+create-axonyx my-docs --yes --template docs
 ```
 
 ## What You Get
 
 Generated apps currently include:
 
-- `app/` for `.ax` UI authoring
+- `app/` for `.asx` pages, layouts, and components, with route-local `.ax` backend modules
 - `routes/` for route-style backend authoring
 - `jobs/` for scheduled or background-style backend authoring
 - `src/generated/` for generated backend Rust output
