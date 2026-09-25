@@ -16,9 +16,12 @@ That means:
 
 ## Example
 
+In `app/page.asx`:
+
 ```ax
+use "@axonyx/ui"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
-import { SiteHero } from "@/components/SiteHero.ax"
+import { Copy } from "@axonyx/ui/foundry/Copy.asx"
 
 page Home() {
   data title = "Hello Axonyx"
@@ -26,11 +29,8 @@ page Home() {
   return ASX {
     <Head>
       <Title>{title}</Title>
-      <Theme>silver</Theme>
-      <Link rel="stylesheet" href="/_ax/pkg/axonyx-ui/index.css" />
+      <Theme storageKey="my-app-theme" default="silver" preflight="true" />
     </Head>
-
-    <SiteHero />
 
     <SectionCard title={title}>
       <Copy>Rust-first authoring with a cleaner page shape.</Copy>
@@ -40,12 +40,14 @@ page Home() {
 ```
 
 When the page explicitly declares an ASX return type, the inner return can use
-the shorter form:
+the shorter form (with the same component import):
 
 ```ax
+import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
+
 page Home() -> ASX {
   return {
-    <SiteHero />
+    <SectionCard title="Hello Axonyx" />
   }
 }
 ```

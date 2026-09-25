@@ -7,13 +7,13 @@ Generated Axonyx apps can point at the runtime in three different ways. The defa
 Best for current public use.
 
 ```bash
-cargo run -p create-axonyx -- my-app --yes
+create-axonyx my-app --yes
 ```
 
 This points the generated app at:
 
 ```toml
-axonyx-runtime = "0.1.14"
+axonyx-runtime = { version = "0.4.1", features = ["axum"] }
 ```
 
 ## 2. `path`
@@ -53,7 +53,7 @@ Think of it like this:
 
 Runtime source and UI package source are separate concerns.
 
-The framework can resolve `.ax` imports such as:
+The framework can resolve `.asx` imports such as:
 
 ```ax
 import { Button } from "@axonyx/ui/foundry/Button.asx"
@@ -66,8 +66,8 @@ so apps can customize or dogfood UI components without changing the public impor
 The default generated UI setup is now:
 
 ```toml
-axonyx-ui = "0.0.48"
+axonyx-ui = "0.0.71"
 ```
 
-That gives the app a normal Cargo dependency while Axonyx resolves `.ax`
+That gives the app a normal Cargo dependency while Axonyx resolves `.asx`
 components and package CSS through Cargo metadata.

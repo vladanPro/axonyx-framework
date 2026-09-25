@@ -23,6 +23,6 @@ This folder is the first structured documentation layer for the Axonyx framework
 
 The files above are deeper design drafts, while the docs in this index should become the developer-facing entrypoint.
 
-For the current framework direction, treat JSX-like `.ax` authoring as the recommended path.
-The older indentation-first syntax should be read as legacy or compatibility material unless a
-specific doc says otherwise.
+For new work, use JSX-like `.asx` for pages, layouts, and components; use `.ax`
+for loaders, actions, routes, jobs, and domain helpers. Older indentation-first
+frontend `.ax` syntax is migration compatibility, not a second recommended path.
