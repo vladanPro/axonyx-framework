@@ -13,7 +13,7 @@ create-axonyx my-app --yes
 This points the generated app at:
 
 ```toml
-axonyx-runtime = { version = "0.4.1", features = ["axum"] }
+axonyx-runtime = { version = "0.5.1", features = ["axum"] }
 ```
 
 ## 2. `path`
