@@ -380,6 +380,10 @@ route POST "/api/password-probe" {
   if ($themeCookie.Headers["Set-Cookie"] -notmatch "theme=gold") { throw "Compiled action response did not emit its cookie" }
 
   $loginUrl = "$baseUrl/api/login"
+  $crossSite = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://attacker.example" } -ExpectedStatus 403
+  if ($crossSite.Headers["Set-Cookie"] -or $crossSite.Headers["Cache-Control"] -ne "no-store") {
+    throw "Cross-site API login must not issue a cookie or be cached"
+  }
   $wrongPassword = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=wrong" -ExpectedStatus 401
   $unknownUser = Invoke-AxRequest -Url $loginUrl -Body "email=unknown%40example.com&password=wrong" -ExpectedStatus 401
   if ($wrongPassword.Body -ne $unknownUser.Body -or $wrongPassword.Headers["Set-Cookie"] -or $unknownUser.Headers["Set-Cookie"]) {

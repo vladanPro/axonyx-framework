@@ -105,6 +105,16 @@ This removes the missing-account hashing shortcut, not all end-to-end timing dif
 
 ## Permission Policy
 
+### Browser mutation boundary (unreleased)
+
+Actions and unsafe backend HTTP requests reject mismatched Origin/Referer or
+cross-site Fetch Metadata with 403 and no-store before handler execution.
+GET, HEAD and OPTIONS are exempt: do not implement mutations in GET handlers.
+CLI clients without origin metadata remain supported. This is a first origin
+guard, not complete CSRF protection: missing metadata is currently allowed and
+forwarded host trust still needs an explicit proxy policy. Cookie-authenticated
+production applications require a complete CSRF strategy before rollout.
+
 Keep permissions in application-owned tables. `Auth.subject` identifies a valid
 server-side session; it is not a role or permission claim. Resolve the user and
 then look up a grant on each protected request:
