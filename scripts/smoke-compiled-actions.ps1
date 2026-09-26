@@ -90,6 +90,11 @@ try {
   }
 
   $actionsPath = Join-Path $appRoot "app/posts/actions.ax"
+  [System.IO.File]::AppendAllText(
+    (Join-Path $appRoot "app/backend.ax"),
+    ("`n" + '  data themes = ["silver", "bronze", "gold"]' + "`n  data noOptions = 42`n"),
+    (New-Object System.Text.UTF8Encoding($false))
+  )
   New-Item -ItemType Directory -Path (Join-Path $appRoot "app/login") -Force | Out-Null
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/login/page.asx"), @'
 page Login() {
@@ -112,6 +117,24 @@ action SetTheme(theme: string) {
 }
 
 action Noop() {
+  return ok()
+}
+
+action GuardProbe(id: Int, ratio: Float, flag: Bool, theme: String) {
+  require input.id in [1, 2] else error "Choose 1, or 2."
+  require input.ratio in [1.5, 2.5] else error("Choose 1.5, or 2.5.")
+  require input.flag in [true] else error("Flag must be true, not false.")
+  require input.theme in themes else error("Choose silver, bronze, or gold.")
+  return ok()
+}
+
+action EmptyGuard(value: String) {
+  require input.value in [] else error("No values, allowed.")
+  return ok()
+}
+
+action NonArrayGuard(value: String) {
+  require input.value in noOptions else error("Not a list, reject.")
   return ok()
 }
 
@@ -271,6 +294,13 @@ route POST "/api/password-probe" {
   require verified
   return json("ok")
 }
+
+route POST "/api/theme-guard" {
+  input:
+    theme: String
+  require input.theme in themes else error "Choose silver, bronze, or gold."
+  return json(input.theme)
+}
 '@,
     (New-Object System.Text.UTF8Encoding($false))
   )
@@ -353,6 +383,24 @@ route POST "/api/password-probe" {
   }
 
   $actionUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=SetTheme"
+  $probeUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=GuardProbe"
+  Invoke-AxRequest -Url $probeUrl -Body "id=1&ratio=1.5&flag=true&theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } | Out-Null
+  foreach ($case in @(
+    @{ Body = "id=9&ratio=1.5&flag=true&theme=gold"; Message = "Choose 1, or 2." },
+    @{ Body = "id=1&ratio=9.5&flag=true&theme=gold"; Message = "Choose 1.5, or 2.5." },
+    @{ Body = "id=1&ratio=1.5&flag=false&theme=gold"; Message = "Flag must be true, not false." },
+    @{ Body = "id=1&ratio=1.5&flag=true&theme=unknown"; Message = "Choose silver, bronze, or gold." }
+  )) {
+    $rejected = Invoke-AxRequest -Url $probeUrl -Body ($case.Body + "&__ax_patch=true") -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
+    if (($rejected.Body | ConvertFrom-Json).error.message -ne $case.Message) { throw "Generated guard changed its error message: $($rejected.Body)" }
+  }
+  foreach ($name in @("EmptyGuard", "NonArrayGuard")) {
+    Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=$name" -Body "value=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422 | Out-Null
+  }
+  $guardResult = Invoke-AxRequest -Url "$baseUrl/api/theme-guard" -Body "theme=gold"
+  if (($guardResult.Body | ConvertFrom-Json) -ne "gold") { throw "Global membership rejected a valid route input" }
+  $guardError = Invoke-AxRequest -Url "$baseUrl/api/theme-guard" -Body "theme=unknown" -ExpectedStatus 401
+  if (($guardError.Body | ConvertFrom-Json).error -ne "Choose silver, bronze, or gold.") { throw "Route guard changed its comma message" }
   $success = Invoke-AxRequest -Url $actionUrl -Body "theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
   if ($success.Headers["Content-Type"] -notmatch "application/ax-patch\+json") { throw "Missing patch content type" }
   $payload = $success.Body | ConvertFrom-Json
