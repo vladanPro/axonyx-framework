@@ -13849,21 +13849,7 @@ fn url_decode(value: &str) -> String {{
 }}
 
 fn cross_site_action_request(request: &AxHttpRequest) -> bool {{
-    if request.header_value("Sec-Fetch-Site").is_some_and(|value| value.eq_ignore_ascii_case("cross-site")) {{
-        return true;
-    }}
-    let Some(origin) = request.header_value("Origin").or_else(|| request.header_value("Referer")) else {{
-        return false;
-    }};
-    let Some(host) = request.header_value("X-Forwarded-Host")
-        .and_then(|value| value.split(',').next()).map(str::trim).filter(|value| !value.is_empty())
-        .or_else(|| request.header_value("Host"))
-    else {{
-        return true;
-    }};
-    let Some((scheme, remainder)) = origin.trim().split_once("://") else {{ return true; }};
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {{ return true; }}
-    !remainder.split('/').next().unwrap_or("").eq_ignore_ascii_case(host.trim())
+    axonyx_runtime::mutation_security::rejects_mutation_request(request)
 }}
 
 fn static_response(dist: &Path, target: &str) -> Option<AxHttpResponse> {{
@@ -18927,47 +18913,10 @@ fn reject_cross_site_mutation_request(request: &AxHttpRequest) -> Option<AxHttpR
 }
 
 fn reject_cross_site_action_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
-    if request
-        .header_value("Sec-Fetch-Site")
-        .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
-    {
+    if axonyx_runtime::mutation_security::rejects_mutation_request(request) {
         return Some(forbidden_action_response());
     }
-
-    let claimed_origin = request
-        .header_value("Origin")
-        .or_else(|| request.header_value("Referer"));
-    let Some(claimed_origin) = claimed_origin else {
-        // Non-browser clients do not necessarily send browser origin metadata.
-        return None;
-    };
-    let expected_host = request
-        .header_value("X-Forwarded-Host")
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| request.header_value("Host"));
-
-    if !origin_matches_host(claimed_origin, expected_host) {
-        return Some(forbidden_action_response());
-    }
-
     None
-}
-
-fn origin_matches_host(origin: &str, expected_host: Option<&str>) -> bool {
-    let Some(expected_host) = expected_host else {
-        return false;
-    };
-    let origin = origin.trim();
-    let Some((scheme, remainder)) = origin.split_once("://") else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        return false;
-    }
-    let authority = remainder.split('/').next().unwrap_or("").trim();
-    !authority.is_empty() && authority.eq_ignore_ascii_case(expected_host.trim())
 }
 
 fn forbidden_action_response() -> AxHttpResponse {

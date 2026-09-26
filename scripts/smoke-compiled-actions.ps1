@@ -380,6 +380,7 @@ route POST "/api/password-probe" {
   if ($themeCookie.Headers["Set-Cookie"] -notmatch "theme=gold") { throw "Compiled action response did not emit its cookie" }
 
   $loginUrl = "$baseUrl/api/login"
+  Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://attacker.example"; "X-Forwarded-Host" = "attacker.example" } -ExpectedStatus 403 | Out-Null
   $crossSite = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://attacker.example" } -ExpectedStatus 403
   if ($crossSite.Headers["Set-Cookie"] -or $crossSite.Headers["Cache-Control"] -ne "no-store") {
     throw "Cross-site API login must not issue a cookie or be cached"
@@ -447,7 +448,10 @@ route POST "/api/password-probe" {
     throw "Compiled policy route did not return its narrowed typed user: $($authorizedAdmin.Body)"
   }
   $logoutUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Logout"
-  $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303
+  Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 403 | Out-Null
+  $stillAuthenticated = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie }
+  if (($stillAuthenticated.Body | ConvertFrom-Json).id -ne "user-42") { throw "Rejected logout changed the session" }
+  $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl } -ExpectedStatus 303
   if ($logout.Headers["Set-Cookie"] -notmatch "Max-Age=0") {
     throw "Compiled logout did not clear the session cookie"
   }
