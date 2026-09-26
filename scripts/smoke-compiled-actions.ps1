@@ -121,7 +121,8 @@ action Noop() {
 }
 
 action GuardProbe(id: Int, ratio: Float, flag: Bool, theme: String) {
-  require input.id in [1, 2] else error "Choose 1, or 2."
+  data idAllowed = input.id in [1, 2]
+  require idAllowed else error "Choose 1, or 2."
   require input.ratio in [1.5, 2.5] else error("Choose 1.5, or 2.5.")
   require input.flag in [true] else error("Flag must be true, not false.")
   require input.theme in themes else error("Choose silver, bronze, or gold.")
