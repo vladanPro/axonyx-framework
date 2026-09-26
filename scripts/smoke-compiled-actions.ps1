@@ -90,6 +90,17 @@ try {
   }
 
   $actionsPath = Join-Path $appRoot "app/posts/actions.ax"
+  New-Item -ItemType Directory -Path (Join-Path $appRoot "app/login") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/login/page.asx"), @'
+page Login() {
+  return ASX {
+    <form method="post" action="/__axonyx/action?path=%2Fposts&name=Logout">
+      <input type="hidden" name="__ax_patch" value="1" />
+      <button type="submit">Logout without JavaScript</button>
+    </form>
+  }
+}
+'@)
   $actionSource = [System.IO.File]::ReadAllText($actionsPath) + @'
 
 action SetTheme(theme: string) {
@@ -383,20 +394,29 @@ route POST "/api/password-probe" {
   if ($themeCookie.Headers["Set-Cookie"] -notmatch "theme=gold") { throw "Compiled action response did not emit its cookie" }
 
   $loginUrl = "$baseUrl/api/login"
+  $nativeForm = Invoke-AxRequest -Url "$baseUrl/login" -Method "GET"
+  if ($nativeForm.Body -notmatch 'name="__ax_csrf" value="axcsrf1\.[a-f0-9]{64}"' -or $nativeForm.Body.Contains('<!--axonyx:csrf-field-->') -or $nativeForm.Headers["Cache-Control"] -ne "no-store") { throw "Native form did not receive a private anonymous proof" }
+  $builtForm = [System.IO.File]::ReadAllText((Join-Path $appRoot "dist/login/index.html"))
+  if (!$builtForm.Contains('<!--axonyx:csrf-field-->') -or $builtForm.Contains('name="__ax_csrf"')) { throw "Build artifact must not contain a personalized CSRF proof" }
+  Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = $baseUrl } -ExpectedStatus 403 | Out-Null
+  $anonymousProof = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Origin = $baseUrl }
+  $anonymousToken = ($anonymousProof.Body | ConvertFrom-Json).token
+  $anonymousCookie = ([string] $anonymousProof.Headers["Set-Cookie"]).Split(';')[0]
+  $anonymousHeaders = @{ Origin = $baseUrl; Cookie = $anonymousCookie; "X-Axonyx-CSRF" = $anonymousToken }
   Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://127.0.0.1:$Port" } -ExpectedStatus 403 | Out-Null
   Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://attacker.example"; "X-Forwarded-Host" = "attacker.example" } -ExpectedStatus 403 | Out-Null
   $crossSite = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://attacker.example" } -ExpectedStatus 403
   if ($crossSite.Headers["Set-Cookie"] -or $crossSite.Headers["Cache-Control"] -ne "no-store") {
     throw "Cross-site API login must not issue a cookie or be cached"
   }
-  $wrongPassword = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=wrong" -ExpectedStatus 401
-  $unknownUser = Invoke-AxRequest -Url $loginUrl -Body "email=unknown%40example.com&password=wrong" -ExpectedStatus 401
+  $wrongPassword = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=wrong" -Headers $anonymousHeaders -ExpectedStatus 401
+  $unknownUser = Invoke-AxRequest -Url $loginUrl -Body "email=unknown%40example.com&password=wrong" -Headers $anonymousHeaders -ExpectedStatus 401
   if ($wrongPassword.Body -ne $unknownUser.Body -or $wrongPassword.Headers["Set-Cookie"] -or $unknownUser.Headers["Set-Cookie"]) {
     throw "Failed login must use a generic response and must not create a session"
   }
   $failedSessions = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);exists=db.execute("select 1 from sqlite_master where type = ? and name = ?", ("table", "ax_sessions")).fetchone();print(db.execute("select count(*) from ax_sessions").fetchone()[0] if exists else 0);db.close()' $dbPath
   if ($LASTEXITCODE -ne 0 -or [int] $failedSessions -ne 0) { throw "Failed login persisted a session" }
-  $login = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password"
+  $login = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers $anonymousHeaders
   $sessionCookieHeader = [string] $login.Headers["Set-Cookie"]
   if ($sessionCookieHeader -notmatch "HttpOnly" -or $sessionCookieHeader -notmatch "session=") {
     throw "Compiled login did not emit a private session cookie: $sessionCookieHeader"
@@ -463,7 +483,10 @@ route POST "/api/password-probe" {
   Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl; "X-Axonyx-CSRF" = "invalid" } -ExpectedStatus 403 | Out-Null
   $stillAuthenticated = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie }
   if (($stillAuthenticated.Body | ConvertFrom-Json).id -ne "user-42") { throw "Rejected logout changed the session" }
-  $logout = Invoke-AxRequest -Url $logoutUrl -Body "__ax_csrf=$csrfToken" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl; "X-Forwarded-Host" = "ignored.invalid" } -ExpectedStatus 303
+  $sessionForm = Invoke-AxRequest -Url "$baseUrl/login" -Method "GET" -Headers @{ Cookie = $sessionCookie }
+  if ($sessionForm.Body -notmatch 'name="__ax_csrf" value="(axcsrf1\.[a-f0-9]{64})"') { throw "Native form did not receive a session proof" }
+  $nativeToken = $Matches[1]
+  $logout = Invoke-AxRequest -Url $logoutUrl -Body "__ax_csrf=$nativeToken&__ax_patch=1" -Headers @{ Accept = "text/html"; Cookie = $sessionCookie; Origin = $baseUrl; "X-Forwarded-Host" = "ignored.invalid" } -ExpectedStatus 303
   if ($logout.Headers["Set-Cookie"] -notmatch "Max-Age=0") {
     throw "Compiled logout did not clear the session cookie"
   }
@@ -474,7 +497,7 @@ route POST "/api/password-probe" {
   }
   Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303 | Out-Null
   $expiredToken = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl }
-  if (($expiredToken.Body | ConvertFrom-Json).token) { throw "Revoked session still issued a CSRF proof" }
+  if (($expiredToken.Body | ConvertFrom-Json).token -eq $csrfToken) { throw "Revoked session still issued its previous CSRF proof" }
 
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }

@@ -13490,6 +13490,20 @@ fn handle_request(
     storage: &impl AxFileStorage,
     request: AxHttpRequest,
 ) -> AxHttpResponse {{
+    let response = handle_request_inner(dist, runtime, storage, request.clone());
+    if SESSIONS_REQUIRED {{
+        return secure(axonyx_runtime::csrf_http::protect_form_response(runtime, &request, response)
+            .unwrap_or_else(|_| AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()));
+    }}
+    response
+}}
+
+fn handle_request_inner(
+    dist: &Path,
+    runtime: &impl AxBackendRuntime,
+    storage: &impl AxFileStorage,
+    request: AxHttpRequest,
+) -> AxHttpResponse {{
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/health") {{
         return secure(AxHttpResponse::text(200, "ok"));
     }}
@@ -13836,6 +13850,7 @@ fn route_params(pattern: &str, target: &str) -> Option<BTreeMap<String, String>>
 }}
 
 fn wants_action_patch_response(request: &AxHttpRequest) -> bool {{
+    if request.header_value("Accept").is_some_and(|value| value.contains("text/html") && !value.contains("application/ax-patch+json")) {{ return false; }}
     request.header_value("Accept")
         .is_some_and(|value| value.contains("application/ax-patch+json"))
         || form_value(&request.body, "__ax_patch").is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
@@ -17369,6 +17384,33 @@ fn handle_http_request(
     mode: AxServerMode,
     request: AxHttpRequest,
 ) -> Result<AxHttpResponse> {
+    let response = handle_http_request_inner(state, mode, request.clone())?;
+    if response.content_type.starts_with("text/html")
+        && response
+            .body
+            .clone()
+            .into_bytes()
+            .windows(axonyx_runtime::csrf_http::FORM_MARKER.len())
+            .any(|window| window == axonyx_runtime::csrf_http::FORM_MARKER.as_bytes())
+        && project_uses_session_runtime(&state.root)?
+    {
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)?;
+        return Ok(
+            axonyx_runtime::csrf_http::protect_form_response(&runtime, &request, response)
+                .unwrap_or_else(|_| {
+                    AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()
+                }),
+        );
+    }
+    Ok(response)
+}
+
+fn handle_http_request_inner(
+    state: &DevServerState,
+    mode: AxServerMode,
+    request: AxHttpRequest,
+) -> Result<AxHttpResponse> {
     let max_body_bytes = state.runtime_config.max_body_bytes;
     if request_body_exceeds_limit(&request, max_body_bytes) {
         return Ok(AxHttpResponse::text(
@@ -18968,7 +19010,7 @@ fn session_csrf_http_response(
     let mutation = !matches!(
         request.method.to_ascii_uppercase().as_str(),
         "GET" | "HEAD" | "OPTIONS"
-    ) && request.header_value("Cookie").is_some();
+    );
     if !token_request && !mutation {
         return Ok(None);
     }
@@ -19057,6 +19099,11 @@ fn wants_action_patch_response(
     request: &AxHttpRequest,
     input_fields: &std::collections::BTreeMap<String, String>,
 ) -> bool {
+    if request.header_value("Accept").is_some_and(|value| {
+        value.contains("text/html") && !value.contains("application/ax-patch+json")
+    }) {
+        return false;
+    }
     input_fields
         .get("__ax_patch")
         .is_some_and(|value| parse_boolish(value))
@@ -28311,7 +28358,7 @@ axonyx-runtime = "0.1.0"
         fs::create_dir_all(root.join("app/account")).expect("account route should exist");
         fs::write(
             root.join("app/account/page.asx"),
-            "page Account() { return ASX { <Copy>Account</Copy> } }\n",
+            "page Account() {\n  return ASX {\n    <form method=\"post\" action=\"/__axonyx/action?path=%2Faccount&name=Logout\"><Copy>Account</Copy></form>\n  }\n}\n",
         )
         .expect("page should write");
         fs::write(
@@ -28422,6 +28469,43 @@ action Logout() {
         let csrf_payload: serde_json::Value =
             serde_json::from_slice(&csrf_response.body.into_bytes()).unwrap();
         let token = csrf_payload["token"].as_str().unwrap();
+        let form_response = handle_http_request(
+            &state,
+            AxServerMode::Dev,
+            AxHttpRequest::new("GET", "/account")
+                .with_header("Host", "axonyx.dev")
+                .with_header("Cookie", &cookie_pair),
+        )
+        .unwrap();
+        assert_eq!(
+            form_response.header_value("Cache-Control"),
+            Some("no-store")
+        );
+        let form_html = String::from_utf8(form_response.body.into_bytes()).unwrap();
+        assert_eq!(
+            form_response.status,
+            200,
+            "{}",
+            form_html
+                .split("<body>")
+                .nth(1)
+                .unwrap_or(&form_html)
+                .split("<script>")
+                .next()
+                .unwrap()
+        );
+        assert!(
+            form_html.contains(&format!("name=\"__ax_csrf\" value=\"{token}\"")),
+            "{}",
+            form_html
+                .split("<body>")
+                .nth(1)
+                .unwrap_or(&form_html)
+                .split("<script>")
+                .next()
+                .unwrap()
+        );
+        assert!(!form_html.contains(axonyx_runtime::csrf_http::FORM_MARKER));
         let logout_request = logout_request
             .with_header("Host", "axonyx.dev")
             .with_header("Origin", "https://axonyx.dev");
