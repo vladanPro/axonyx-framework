@@ -109,11 +109,6 @@ action UploadImage(image: File) -> FileRef {
   return json(saved)
 }
 
-action Login(userId: String) {
-  Session.create(input.userId, { role: "editor" })
-  return ok()
-}
-
 action Logout() {
   Session.destroy()
   return ok()
@@ -194,6 +189,28 @@ type UserPermission {
   permission: String
 }
 
+type Credential {
+  user_id: String
+  email: String
+  password_hash: String
+}
+
+query resolveCredential(email: String) -> Credential? {
+  return db.credentials.where({ email: input.email }).first()
+}
+
+route POST "/api/login" {
+  input:
+    email: String
+    password: String
+  data credential = resolveCredential(input.email)
+  require credential
+  data verified = Password.verify(input.password, credential.password_hash)
+  require verified
+  Session.create(credential.user_id, {})
+  return json("ok")
+}
+
 fn hasRole(user: User, role: String) -> Bool {
   return user.role == role
 }
@@ -243,11 +260,16 @@ route POST "/api/password-probe" {
   $dbPath = Join-Path $appRoot "compiled-smoke.db"
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
-  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL); CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL); CREATE TABLE user_permissions (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, permission TEXT NOT NULL, UNIQUE(user_id, permission));"
+  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL); CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL); CREATE TABLE user_permissions (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, permission TEXT NOT NULL, UNIQUE(user_id, permission)); CREATE TABLE credentials (user_id TEXT NOT NULL REFERENCES users(id), email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL);"
   $seed = "INSERT INTO posts (slug,title,excerpt,status) VALUES (?,?,?,?)"
   $userSeed = "INSERT INTO users (id,email,role) VALUES (?,?,?)"
   & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.executescript(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.execute(sys.argv[8],sys.argv[9:12]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published" $userSeed "user-42" "foundry@example.com" "member"
   if ($LASTEXITCODE -ne 0) { throw "failed to seed compiled smoke SQLite database" }
+
+  $passwordHash = cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --example password_fixture --quiet
+  if ($LASTEXITCODE -ne 0) { throw "failed to hash fixture password" }
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("insert into credentials (user_id,email,password_hash) values (?,?,?)", ("user-42", "foundry@example.com", sys.argv[2]));db.commit();db.close()' $dbPath ([string] $passwordHash)
+  if ($LASTEXITCODE -ne 0) { throw "failed to seed fixture credential" }
 
   $env:AX_SECRET_DB_DIALECT = "sqlite"
   $env:AX_SECRET_DB_URL = $dbPath
@@ -356,13 +378,20 @@ route POST "/api/password-probe" {
   $themeCookie = Invoke-AxRequest -Url $actionUrl -Body "theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
   if ($themeCookie.Headers["Set-Cookie"] -notmatch "theme=gold") { throw "Compiled action response did not emit its cookie" }
 
-  $loginUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Login"
-  $login = Invoke-AxRequest -Url $loginUrl -Body "userId=user-42&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  $loginUrl = "$baseUrl/api/login"
+  $wrongPassword = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=wrong" -ExpectedStatus 401
+  $unknownUser = Invoke-AxRequest -Url $loginUrl -Body "email=unknown%40example.com&password=wrong" -ExpectedStatus 401
+  if ($wrongPassword.Body -ne $unknownUser.Body -or $wrongPassword.Headers["Set-Cookie"] -or $unknownUser.Headers["Set-Cookie"]) {
+    throw "Failed login must use a generic response and must not create a session"
+  }
+  $failedSessions = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);exists=db.execute("select 1 from sqlite_master where type = ? and name = ?", ("table", "ax_sessions")).fetchone();print(db.execute("select count(*) from ax_sessions").fetchone()[0] if exists else 0);db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or [int] $failedSessions -ne 0) { throw "Failed login persisted a session" }
+  $login = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password"
   $sessionCookieHeader = [string] $login.Headers["Set-Cookie"]
   if ($sessionCookieHeader -notmatch "HttpOnly" -or $sessionCookieHeader -notmatch "session=") {
     throw "Compiled login did not emit a private session cookie: $sessionCookieHeader"
   }
-  if ($login.Body -match "session" -or $login.Body -match "user-42") {
+  if ($login.Body -match "session" -or $login.Body -match "user-42" -or $login.Body.Contains([string] $passwordHash) -or $login.Body -match "compiled-smoke-password") {
     throw "Compiled login leaked session data into the action response"
   }
   $sessionCookie = $sessionCookieHeader.Split(';')[0]
@@ -412,6 +441,7 @@ route POST "/api/password-probe" {
   if ($LASTEXITCODE -ne 0 -or [int] $sessionCount -ne 0) {
     throw "Compiled logout did not remove the persisted session"
   }
+  Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303 | Out-Null
 
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }
