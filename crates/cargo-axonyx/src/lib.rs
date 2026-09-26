@@ -13482,6 +13482,9 @@ fn handle_request(
     }}
 
     if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
+        if !matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS") && cross_site_action_request(&request) {{
+            return secure(AxHttpResponse::text(403, "Forbidden: cross-site Axonyx mutation request").with_no_store());
+        }}
         let response = backend::dispatch_api_route(runtime, &request, VALIDATE_API_RESPONSES);
         return secure(match response {{
             Ok(Some(response)) => response,
@@ -17427,6 +17430,9 @@ fn handle_http_request(
         return Ok(AxHttpResponse::text(200, version).with_no_store());
     }
 
+    if let Some(response) = reject_cross_site_mutation_request(&request) {
+        return Ok(response);
+    }
     if let Some(response) = execute_backend_route_request(state, mode, &request)? {
         return Ok(preview_response_to_http(response));
     }
@@ -18908,6 +18914,16 @@ fn project_uses_database_runtime(root: &Path) -> Result<bool> {
         .map(|(_, source)| source.as_str())
         .collect::<Vec<_>>();
     backend_source_refs_use_database(&source_refs)
+}
+
+fn reject_cross_site_mutation_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
+    if matches!(
+        request.method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    ) {
+        return None;
+    }
+    reject_cross_site_action_request(request)
 }
 
 fn reject_cross_site_action_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
@@ -29170,6 +29186,43 @@ action Logout() {
         assert!(!raw.contains("Root error"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn backend_http_boundary_rejects_cross_site_mutation_before_execution() {
+        let root = make_temp_dir("api-origin-boundary");
+        fs::create_dir_all(root.join("routes/api")).unwrap();
+        fs::write(
+            root.join("routes/api/probe.ax"),
+            "route POST \"/api/probe\" {\n  return json(\"executed\")\n}\n",
+        )
+        .unwrap();
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let request = AxHttpRequest::new("POST", "/api/probe")
+                .with_header("Host", "axonyx.dev")
+                .with_header("Origin", "https://attacker.example");
+            let response = handle_http_request(&state, mode, request).unwrap();
+            assert_eq!(response.status, 403);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mutation_origin_guard_covers_api_methods_without_blocking_reads() {
+        for method in ["POST", "PUT", "PATCH", "DELETE", "post"] {
+            let request = AxHttpRequest::new(method, "/api/login")
+                .with_header("Host", "axonyx.dev")
+                .with_header("Origin", "https://attacker.example");
+            let response = reject_cross_site_mutation_request(&request).unwrap();
+            assert_eq!(response.status, 403);
+            assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+        }
+        for method in ["GET", "HEAD", "OPTIONS"] {
+            let request = AxHttpRequest::new(method, "/api/posts")
+                .with_header("Sec-Fetch-Site", "cross-site");
+            assert!(reject_cross_site_mutation_request(&request).is_none());
+        }
     }
 
     #[test]
