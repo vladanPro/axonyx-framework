@@ -124,6 +124,12 @@ action Logout() {
   Session.destroy()
   return ok()
 }
+
+action RefreshSession() {
+  require Auth.subject else error("Authentication required")
+  Session.refresh()
+  return ok()
+}
 '@
   [System.IO.File]::WriteAllText(
     $actionsPath,
@@ -429,6 +435,12 @@ route POST "/api/password-probe" {
   $csrfToken = ($tokenResponse.Body | ConvertFrom-Json).token
   if ($csrfToken -notmatch '^axcsrf1\.[a-f0-9]{64}$' -or $tokenResponse.Headers["Cache-Control"] -ne "no-store" -or $tokenResponse.Headers["Vary"] -ne "Cookie") { throw "Invalid private CSRF token response" }
   if ($tokenResponse.Body -match "user-42" -or $tokenResponse.Body.Contains($sessionCookie.Split('=')[1])) { throw "CSRF response leaked session identity" }
+  $refreshUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=RefreshSession"
+  Invoke-AxRequest -Url $refreshUrl -Body "" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl } -ExpectedStatus 403 | Out-Null
+  $refreshed = Invoke-AxRequest -Url $refreshUrl -Body "__ax_csrf=$csrfToken" -Headers @{ Accept = "text/html"; Cookie = $sessionCookie; Origin = $baseUrl } -ExpectedStatus 303
+  if (([string] $refreshed.Headers["Set-Cookie"]).Split(';')[0] -ne $sessionCookie) { throw "Refresh unexpectedly rotated session identity" }
+  $refreshedProof = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl }
+  if (($refreshedProof.Body | ConvertFrom-Json).token -ne $csrfToken) { throw "Refresh invalidated the live session CSRF proof" }
   Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = "https://attacker.example" } -ExpectedStatus 403 | Out-Null
   Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl } -ExpectedStatus 403 | Out-Null
   $limited = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -ExpectedStatus 429

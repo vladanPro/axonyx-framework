@@ -9848,7 +9848,7 @@ fn collect_db_surface_diagnostics_from_stmts(
                     diagnostics,
                 );
             }
-            AxBackendStmt::SessionDestroy => {}
+            AxBackendStmt::SessionDestroy | AxBackendStmt::SessionRefresh => {}
             AxBackendStmt::Revalidate(revalidate) => collect_db_surface_diagnostics_from_expr(
                 path,
                 source,
@@ -11054,7 +11054,7 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
         AxStepPlan::SessionCreate { subject, data } => {
             expr_uses_input_scope(subject) || expr_uses_input_scope(data)
         }
-        AxStepPlan::SessionDestroy => false,
+        AxStepPlan::SessionDestroy | AxStepPlan::SessionRefresh => false,
         AxStepPlan::Revalidate { target, .. } => expr_uses_input_scope(target),
         AxStepPlan::Insert { fields, .. } => fields
             .iter()
@@ -11147,7 +11147,9 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             } => args.iter().any(|arg| {
                 arg.code.contains("Auth.signedSession") || arg.code.contains("Auth.subject")
             }),
-            AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy => true,
+            AxStepPlan::SessionCreate { .. }
+            | AxStepPlan::SessionDestroy
+            | AxStepPlan::SessionRefresh => true,
             AxStepPlan::Let {
                 value: AxValuePlan::StorageSave { .. },
                 ..
@@ -11314,7 +11316,7 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
             collect_env_refs_from_expr(subject, refs);
             collect_env_refs_from_expr(data, refs);
         }
-        AxStepPlan::SessionDestroy => {}
+        AxStepPlan::SessionDestroy | AxStepPlan::SessionRefresh => {}
         AxStepPlan::Revalidate { target, .. } => collect_env_refs_from_expr(target, refs),
         AxStepPlan::Transaction { operations } => {
             for operation in operations {
@@ -18981,7 +18983,9 @@ fn backend_source_refs_use_sessions(sources: &[&str]) -> Result<bool> {
             handler.steps.iter().any(|step| {
                 matches!(
                     step,
-                    AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy
+                    AxStepPlan::SessionCreate { .. }
+                        | AxStepPlan::SessionDestroy
+                        | AxStepPlan::SessionRefresh
                 ) || ax_step_uses_auth_subject(step)
             })
         }) {
@@ -28372,6 +28376,11 @@ action Logout() {
   Session.destroy()
   return ok
 }
+action RefreshSession() {
+  require Auth.subject else redirect("/login")
+  Session.refresh()
+  return ok
+}
 "#,
         )
         .expect("actions should write");
@@ -28469,6 +28478,31 @@ action Logout() {
         let csrf_payload: serde_json::Value =
             serde_json::from_slice(&csrf_response.body.into_bytes()).unwrap();
         let token = csrf_payload["token"].as_str().unwrap();
+        let refresh_request = AxHttpRequest::new(
+            "POST",
+            "/__axonyx/action?path=%2Faccount&name=RefreshSession",
+        )
+        .with_header("Content-Type", "application/x-www-form-urlencoded")
+        .with_header("Host", "axonyx.dev")
+        .with_header("Origin", "https://axonyx.dev")
+        .with_header("Cookie", &cookie_pair);
+        assert_eq!(
+            handle_http_request(&state, AxServerMode::Dev, refresh_request.clone())
+                .unwrap()
+                .status,
+            403
+        );
+        let refreshed = handle_http_request(
+            &state,
+            AxServerMode::Dev,
+            refresh_request.with_header("X-Axonyx-CSRF", token),
+        )
+        .unwrap();
+        assert_eq!(refreshed.status, 303);
+        assert_eq!(
+            refreshed.set_cookies[0].split(';').next(),
+            Some(cookie_pair.as_str())
+        );
         let form_response = handle_http_request(
             &state,
             AxServerMode::Dev,

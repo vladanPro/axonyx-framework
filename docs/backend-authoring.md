@@ -133,6 +133,27 @@ cross-origin integrations and token policy remain follow-up work.
 
 ### Session-bound CSRF foundation (unreleased)
 
+Managed session refresh is an explicit mutation, not an automatic request hook:
+
+```ax
+action RefreshSession() {
+  require Auth.subject else redirect("/login")
+  Session.refresh()
+  return ok()
+}
+```
+
+The same session ID and CSRF proof remain valid; refresh reissues the HttpOnly
+cookie. Missing, expired or revoked sessions cannot be refreshed. Browser refresh
+requests must pass origin and CSRF guards. GET/HEAD/OPTIONS cannot refresh.
+`AX_SECRET_SESSION_TTL_SECONDS` controls sliding expiry;
+`AX_SECRET_SESSION_ABSOLUTE_TTL_SECONDS` caps lifetime from creation (default
+30 days). Refresh cannot move that absolute deadline. Cookie Max-Age is capped
+to the remaining lifetime. This is not JWT refresh or session-ID rotation.
+Built-in memory, SQLite and Postgres stores update live rows atomically rather
+than upserting, so a delayed refresh cannot recreate a deleted session. Custom
+session stores must implement atomic `refresh_live`; the default fails closed.
+
 The Rust `AxSessionManager` now provides `csrf_token(request, secret, now)` and
 `verify_csrf(request, token, secret, now)`. Proofs are HMAC-signed and checked
 against the active server-side session. Logout, expiration, session replacement
