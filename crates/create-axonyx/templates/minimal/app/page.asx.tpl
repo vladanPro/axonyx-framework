@@ -4,13 +4,13 @@ return ASX {
     <Card title="Hello Axonyx" recipe="hero-card">
       <Copy tone="eyebrow">{{APP_NAME}}</Copy>
       <Copy tone="lead">
-        Start with one clean .ax page, keep JavaScript small, and let Rust stay
+        Start with one clean .asx page, keep JavaScript small, and let Rust stay
         underneath the framework.
       </Copy>
       <Button tone="primary">Edit app/page.asx</Button>
     </Card>
     <Grid cols={3} gap="md">
-      <Card title="Write in .ax">
+      <Card title="Write in .asx">
         <Copy>
           Keep pages readable with JSX-like authoring instead of framework
           boilerplate.

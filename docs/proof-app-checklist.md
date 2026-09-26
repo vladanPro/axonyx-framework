@@ -69,7 +69,7 @@ Expected:
 
 ## 7) Local Component Import
 
-Create `app/components/HeroCard.ax`, import it in `app/page.asx`.
+Create `app/components/HeroCard.asx`, import it in `app/page.asx`.
 
 Expected:
 

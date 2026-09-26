@@ -89,7 +89,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.4.1";
+const AXONYX_RUNTIME_VERSION: &str = "0.5.0";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -784,8 +784,9 @@ struct AxStorageConfigError {
     message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AxServerRuntimeConfig {
+    public_origin: Option<String>,
     max_body_bytes: usize,
     request_timeout: Duration,
     shutdown_grace: Duration,
@@ -869,6 +870,7 @@ impl Drop for TokioConnectionGuard {
 impl AxServerRuntimeConfig {
     fn from_root(root: &Path) -> std::result::Result<Self, String> {
         Ok(Self {
+            public_origin: configured_public_origin(root)?,
             max_body_bytes: configured_max_request_body_bytes(root)?,
             request_timeout: configured_request_timeout_duration(root)?,
             shutdown_grace: configured_shutdown_grace_duration(root)?,
@@ -893,6 +895,7 @@ impl AxServerRuntimeConfig {
 impl Default for AxServerRuntimeConfig {
     fn default() -> Self {
         Self {
+            public_origin: None,
             max_body_bytes: MAX_REQUEST_BODY_BYTES,
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
             shutdown_grace: Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS),
@@ -8778,6 +8781,17 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     }
 
+    if let Err(message) = configured_public_origin(root) {
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(&path),
+            line: line_for_config_key(&source, "public_origin"),
+            column: 1,
+            severity: "error",
+            code: "axonyx-config-public-origin",
+            message,
+        });
+    }
+
     for key in ["compression", "security_headers", "request_logging"] {
         if let Some(value) = value
             .get("server")
@@ -9834,7 +9848,7 @@ fn collect_db_surface_diagnostics_from_stmts(
                     diagnostics,
                 );
             }
-            AxBackendStmt::SessionDestroy => {}
+            AxBackendStmt::SessionDestroy | AxBackendStmt::SessionRefresh => {}
             AxBackendStmt::Revalidate(revalidate) => collect_db_surface_diagnostics_from_expr(
                 path,
                 source,
@@ -11040,7 +11054,7 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
         AxStepPlan::SessionCreate { subject, data } => {
             expr_uses_input_scope(subject) || expr_uses_input_scope(data)
         }
-        AxStepPlan::SessionDestroy => false,
+        AxStepPlan::SessionDestroy | AxStepPlan::SessionRefresh => false,
         AxStepPlan::Revalidate { target, .. } => expr_uses_input_scope(target),
         AxStepPlan::Insert { fields, .. } => fields
             .iter()
@@ -11133,7 +11147,9 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
             } => args.iter().any(|arg| {
                 arg.code.contains("Auth.signedSession") || arg.code.contains("Auth.subject")
             }),
-            AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy => true,
+            AxStepPlan::SessionCreate { .. }
+            | AxStepPlan::SessionDestroy
+            | AxStepPlan::SessionRefresh => true,
             AxStepPlan::Let {
                 value: AxValuePlan::StorageSave { .. },
                 ..
@@ -11300,7 +11316,7 @@ fn collect_env_refs_from_step(step: &AxStepPlan, refs: &mut std::collections::BT
             collect_env_refs_from_expr(subject, refs);
             collect_env_refs_from_expr(data, refs);
         }
-        AxStepPlan::SessionDestroy => {}
+        AxStepPlan::SessionDestroy | AxStepPlan::SessionRefresh => {}
         AxStepPlan::Revalidate { target, .. } => collect_env_refs_from_expr(target, refs),
         AxStepPlan::Transaction { operations } => {
             for operation in operations {
@@ -12170,6 +12186,8 @@ fn looks_like_backend_ax(source: &str) -> bool {
             || line.starts_with("fn ")
             || line.starts_with("scope ")
             || line.starts_with("job ")
+            || line.starts_with("type ")
+            || line.starts_with("enum ")
     })
 }
 
@@ -12881,7 +12899,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(preview_store),
-        runtime_config,
+        runtime_config: runtime_config.clone(),
         storage_registry,
         database_required,
     });
@@ -13078,6 +13096,8 @@ fn build_compiled_production_binary(
         &data_bindings,
         &page_renderers,
         CompiledProductionOptions {
+            sessions_required: project_uses_session_runtime(root)?,
+            public_origin: runtime_config.public_origin.as_deref(),
             database_runtime_defaults: &database_runtime_defaults,
             database_required,
             validate_api_responses,
@@ -13314,6 +13334,8 @@ fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
 
 #[derive(Debug, Clone, Copy)]
 struct CompiledProductionOptions<'a> {
+    sessions_required: bool,
+    public_origin: Option<&'a str>,
     database_runtime_defaults: &'a str,
     database_required: bool,
     validate_api_responses: bool,
@@ -13328,11 +13350,17 @@ fn compiled_production_source(
     options: CompiledProductionOptions<'_>,
 ) -> String {
     let CompiledProductionOptions {
+        sessions_required,
+        public_origin,
         database_runtime_defaults,
         database_required,
         validate_api_responses,
         storage_configs,
     } = options;
+    let public_origin_literal = match public_origin {
+        Some(origin) => format!("Some({origin:?})"),
+        None => "None".to_string(),
+    };
     let storage_import = if storage_configs.is_empty() {
         "use axonyx_runtime::server_prelude::{AxFileStorage, AxUnavailableFileStorage};\n"
             .to_string()
@@ -13443,6 +13471,7 @@ struct CompiledBinding {{
 }}
 
 const DATABASE_REQUIRED: bool = {database_required};
+const SESSIONS_REQUIRED: bool = {sessions_required};
 const VALIDATE_API_RESPONSES: bool = {validate_api_responses};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
@@ -13465,12 +13494,42 @@ fn handle_request(
     storage: &impl AxFileStorage,
     request: AxHttpRequest,
 ) -> AxHttpResponse {{
+    let response = handle_request_inner(dist, runtime, storage, request.clone());
+    if SESSIONS_REQUIRED {{
+        return secure(axonyx_runtime::csrf_http::protect_form_response(runtime, &request, response)
+            .unwrap_or_else(|_| AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()));
+    }}
+    response
+}}
+
+fn handle_request_inner(
+    dist: &Path,
+    runtime: &impl AxBackendRuntime,
+    storage: &impl AxFileStorage,
+    request: AxHttpRequest,
+) -> AxHttpResponse {{
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/health") {{
         return secure(AxHttpResponse::text(200, "ok"));
     }}
 
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/ready") {{
         return secure(readiness_response(runtime));
+    }}
+
+    if request.target.split('?').next() == Some("/__axonyx/csrf") {{
+        if request.method != "GET" {{ return secure(AxHttpResponse::text(405, "Method Not Allowed").with_header("Allow", "GET").with_no_store()); }}
+        if axonyx_runtime::csrf_http::rejects_token_source(&request, {public_origin_literal}) {{ return secure(AxHttpResponse::text(403, "Forbidden").with_no_store()); }}
+        let response = if SESSIONS_REQUIRED {{ axonyx_runtime::csrf_http::token_response(runtime, &request) }} else {{ AxHttpResponse::json(200, &json!({{"token": null}})).map(|response| response.with_no_store()).map_err(|_| axonyx_runtime::backend_prelude::AxRuntimeError::message("CSRF response failed")) }};
+        return secure(response.unwrap_or_else(|_| AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()));
+    }}
+
+    if SESSIONS_REQUIRED && (request.target.split('?').next() == Some("/__axonyx/action") || request.target.starts_with("/api/")) {{
+        if cross_site_action_request(&request) {{ return secure(AxHttpResponse::text(403, "Forbidden").with_no_store()); }}
+        match axonyx_runtime::csrf_http::reject_mutation(runtime, &request) {{
+            Ok(Some(response)) => return secure(response),
+            Ok(None) => {{}},
+            Err(_) => return secure(AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()),
+        }}
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/action") {{
@@ -13482,6 +13541,9 @@ fn handle_request(
     }}
 
     if request.target.split('?').next().is_some_and(|path| path.starts_with("/api/")) {{
+        if !matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "HEAD" | "OPTIONS") && cross_site_action_request(&request) {{
+            return secure(AxHttpResponse::text(403, "Forbidden: cross-site Axonyx mutation request").with_no_store());
+        }}
         let response = backend::dispatch_api_route(runtime, &request, VALIDATE_API_RESPONSES);
         return secure(match response {{
             Ok(Some(response)) => response,
@@ -13792,6 +13854,7 @@ fn route_params(pattern: &str, target: &str) -> Option<BTreeMap<String, String>>
 }}
 
 fn wants_action_patch_response(request: &AxHttpRequest) -> bool {{
+    if request.header_value("Accept").is_some_and(|value| value.contains("text/html") && !value.contains("application/ax-patch+json")) {{ return false; }}
     request.header_value("Accept")
         .is_some_and(|value| value.contains("application/ax-patch+json"))
         || form_value(&request.body, "__ax_patch").is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
@@ -13846,21 +13909,7 @@ fn url_decode(value: &str) -> String {{
 }}
 
 fn cross_site_action_request(request: &AxHttpRequest) -> bool {{
-    if request.header_value("Sec-Fetch-Site").is_some_and(|value| value.eq_ignore_ascii_case("cross-site")) {{
-        return true;
-    }}
-    let Some(origin) = request.header_value("Origin").or_else(|| request.header_value("Referer")) else {{
-        return false;
-    }};
-    let Some(host) = request.header_value("X-Forwarded-Host")
-        .and_then(|value| value.split(',').next()).map(str::trim).filter(|value| !value.is_empty())
-        .or_else(|| request.header_value("Host"))
-    else {{
-        return true;
-    }};
-    let Some((scheme, remainder)) = origin.trim().split_once("://") else {{ return true; }};
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {{ return true; }}
-    !remainder.split('/').next().unwrap_or("").eq_ignore_ascii_case(host.trim())
+    axonyx_runtime::mutation_security::rejects_mutation_request_with_origin(request, {public_origin_literal})
 }}
 
 fn static_response(dist: &Path, target: &str) -> Option<AxHttpResponse> {{
@@ -17339,6 +17388,33 @@ fn handle_http_request(
     mode: AxServerMode,
     request: AxHttpRequest,
 ) -> Result<AxHttpResponse> {
+    let response = handle_http_request_inner(state, mode, request.clone())?;
+    if response.content_type.starts_with("text/html")
+        && response
+            .body
+            .clone()
+            .into_bytes()
+            .windows(axonyx_runtime::csrf_http::FORM_MARKER.len())
+            .any(|window| window == axonyx_runtime::csrf_http::FORM_MARKER.as_bytes())
+        && project_uses_session_runtime(&state.root)?
+    {
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)?;
+        return Ok(
+            axonyx_runtime::csrf_http::protect_form_response(&runtime, &request, response)
+                .unwrap_or_else(|_| {
+                    AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()
+                }),
+        );
+    }
+    Ok(response)
+}
+
+fn handle_http_request_inner(
+    state: &DevServerState,
+    mode: AxServerMode,
+    request: AxHttpRequest,
+) -> Result<AxHttpResponse> {
     let max_body_bytes = state.runtime_config.max_body_bytes;
     if request_body_exceeds_limit(&request, max_body_bytes) {
         return Ok(AxHttpResponse::text(
@@ -17351,6 +17427,9 @@ fn handle_http_request(
         .with_no_store());
     }
 
+    if let Some(response) = session_csrf_http_response(state, &request)? {
+        return Ok(response);
+    }
     if request.method == "GET" && is_health_target(&request.target) {
         return health_response(mode);
     }
@@ -17400,7 +17479,10 @@ fn handle_http_request(
     }
 
     if request.method == "POST" && request.target.starts_with("/__axonyx/action") {
-        if let Some(response) = reject_cross_site_action_request(&request) {
+        if let Some(response) = reject_cross_site_action_request(
+            &request,
+            state.runtime_config.public_origin.as_deref(),
+        ) {
             return Ok(response);
         }
         return handle_action_request(state, mode, &request);
@@ -17427,6 +17509,11 @@ fn handle_http_request(
         return Ok(AxHttpResponse::text(200, version).with_no_store());
     }
 
+    if let Some(response) =
+        reject_cross_site_mutation_request(&request, state.runtime_config.public_origin.as_deref())
+    {
+        return Ok(response);
+    }
     if let Some(response) = execute_backend_route_request(state, mode, &request)? {
         return Ok(preview_response_to_http(response));
     }
@@ -17605,7 +17692,7 @@ where
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("failed to bind Axonyx Axum/Tokio server at {bind}"))?;
-    let runtime_config = state.runtime_config;
+    let runtime_config = state.runtime_config.clone();
     let tracker = TokioConnectionTracker::new(
         runtime_config.shutdown_grace,
         runtime_config.max_connections,
@@ -17655,7 +17742,7 @@ async fn axum_tokio_handler(
         );
     };
 
-    let runtime_config = state.dev.runtime_config;
+    let runtime_config = state.dev.runtime_config.clone();
     match axum_request_to_dev_request(
         request,
         runtime_config.max_body_bytes,
@@ -18608,6 +18695,14 @@ fn configured_server_bool(
     }
 }
 
+fn configured_public_origin(root: &Path) -> std::result::Result<Option<String>, String> {
+    match axonyx_config_value(root, "server", "public_origin") {
+        None => Ok(None),
+        Some(toml::Value::String(value)) if axonyx_runtime::mutation_security::valid_public_origin(&value) => Ok(Some(value)),
+        Some(_) => Err("[server].public_origin must be an http(s) origin without path, query or credentials (for example https://axonyx.dev).".to_string()),
+    }
+}
+
 fn configured_server_log_format(root: &Path) -> std::result::Result<AxServerLogFormat, String> {
     match axonyx_config_value(root, "server", "log_format") {
         Some(value) => parse_server_log_format_value(&value),
@@ -18890,7 +18985,9 @@ fn backend_source_refs_use_sessions(sources: &[&str]) -> Result<bool> {
             handler.steps.iter().any(|step| {
                 matches!(
                     step,
-                    AxStepPlan::SessionCreate { .. } | AxStepPlan::SessionDestroy
+                    AxStepPlan::SessionCreate { .. }
+                        | AxStepPlan::SessionDestroy
+                        | AxStepPlan::SessionRefresh
                 ) || ax_step_uses_auth_subject(step)
             })
         }) {
@@ -18910,48 +19007,94 @@ fn project_uses_database_runtime(root: &Path) -> Result<bool> {
     backend_source_refs_use_database(&source_refs)
 }
 
-fn reject_cross_site_action_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
-    if request
-        .header_value("Sec-Fetch-Site")
-        .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
-    {
-        return Some(forbidden_action_response());
+fn session_csrf_http_response(
+    state: &DevServerState,
+    request: &AxHttpRequest,
+) -> Result<Option<AxHttpResponse>> {
+    let path = request.target.split('?').next().unwrap_or("");
+    let token_request = path == axonyx_runtime::csrf_http::CSRF_PATH;
+    let mutation = !matches!(
+        request.method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    );
+    if !token_request && !mutation {
+        return Ok(None);
     }
-
-    let claimed_origin = request
-        .header_value("Origin")
-        .or_else(|| request.header_value("Referer"));
-    let Some(claimed_origin) = claimed_origin else {
-        // Non-browser clients do not necessarily send browser origin metadata.
-        return None;
-    };
-    let expected_host = request
-        .header_value("X-Forwarded-Host")
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| request.header_value("Host"));
-
-    if !origin_matches_host(claimed_origin, expected_host) {
-        return Some(forbidden_action_response());
+    let origin = state.runtime_config.public_origin.as_deref();
+    if token_request {
+        if request.method != "GET" {
+            return Ok(Some(
+                AxHttpResponse::text(405, "Method Not Allowed")
+                    .with_header("Allow", "GET")
+                    .with_no_store(),
+            ));
+        }
+        if axonyx_runtime::csrf_http::rejects_token_source(request, origin) {
+            return Ok(Some(forbidden_action_response()));
+        }
+    } else if let Some(response) = reject_cross_site_mutation_request(request, origin) {
+        return Ok(Some(response));
     }
-
-    None
+    if !project_uses_session_runtime(&state.root)? {
+        return if token_request {
+            Ok(Some(
+                AxHttpResponse::json(200, &serde_json::json!({ "token": null }))?.with_no_store(),
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    let result = (|| {
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)?;
+        if token_request {
+            axonyx_runtime::csrf_http::token_response(&runtime, request)
+                .map(Some)
+                .map_err(anyhow::Error::from)
+        } else {
+            axonyx_runtime::csrf_http::reject_mutation(&runtime, request)
+                .map_err(anyhow::Error::from)
+        }
+    })();
+    Ok(result.unwrap_or_else(|_: anyhow::Error| {
+        Some(AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store())
+    }))
 }
 
-fn origin_matches_host(origin: &str, expected_host: Option<&str>) -> bool {
-    let Some(expected_host) = expected_host else {
-        return false;
-    };
-    let origin = origin.trim();
-    let Some((scheme, remainder)) = origin.split_once("://") else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-        return false;
+fn project_uses_session_runtime(root: &Path) -> Result<bool> {
+    let mut sources = Vec::new();
+    collect_backend_sources(root, &mut sources)?;
+    let refs = sources
+        .iter()
+        .map(|(_, source)| source.as_str())
+        .collect::<Vec<_>>();
+    backend_source_refs_use_sessions(&refs)
+}
+
+fn reject_cross_site_mutation_request(
+    request: &AxHttpRequest,
+    public_origin: Option<&str>,
+) -> Option<AxHttpResponse> {
+    if matches!(
+        request.method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    ) {
+        return None;
     }
-    let authority = remainder.split('/').next().unwrap_or("").trim();
-    !authority.is_empty() && authority.eq_ignore_ascii_case(expected_host.trim())
+    reject_cross_site_action_request(request, public_origin)
+}
+
+fn reject_cross_site_action_request(
+    request: &AxHttpRequest,
+    public_origin: Option<&str>,
+) -> Option<AxHttpResponse> {
+    if axonyx_runtime::mutation_security::rejects_mutation_request_with_origin(
+        request,
+        public_origin,
+    ) {
+        return Some(forbidden_action_response());
+    }
+    None
 }
 
 fn forbidden_action_response() -> AxHttpResponse {
@@ -18962,6 +19105,11 @@ fn wants_action_patch_response(
     request: &AxHttpRequest,
     input_fields: &std::collections::BTreeMap<String, String>,
 ) -> bool {
+    if request.header_value("Accept").is_some_and(|value| {
+        value.contains("text/html") && !value.contains("application/ax-patch+json")
+    }) {
+        return false;
+    }
     input_fields
         .get("__ax_patch")
         .is_some_and(|value| parse_boolish(value))
@@ -21417,6 +21565,22 @@ page SectionCard
 
         let diagnostics = check_ax_source_with_root(&path, source, None);
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn generated_type_only_modules_are_backend_sources() {
+        let root = make_temp_dir("generated-type-module");
+        fs::create_dir_all(root.join("app/generated")).unwrap();
+        fs::write(
+            root.join("app/generated/db.ax"),
+            "export type PostsRow {\n  id: Int\n  title: String\n}\n",
+        )
+        .unwrap();
+        assert!(check_app_sources(&root).unwrap().is_empty());
+        assert!(looks_like_backend_ax(
+            "export enum Status {\n  Draft\n  Published\n}\n"
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -26100,6 +26264,8 @@ action ValidPost
                 import_sources: Vec::new(),
             }],
             CompiledProductionOptions {
+                sessions_required: true,
+                public_origin: Some("https://axonyx.dev"),
                 database_runtime_defaults: "",
                 database_required: true,
                 validate_api_responses: false,
@@ -26155,6 +26321,8 @@ action ValidPost
             &[],
             &[],
             CompiledProductionOptions {
+                sessions_required: false,
+                public_origin: None,
                 database_runtime_defaults: "",
                 database_required: false,
                 validate_api_responses: false,
@@ -28212,7 +28380,7 @@ axonyx-runtime = "0.1.0"
         fs::create_dir_all(root.join("app/account")).expect("account route should exist");
         fs::write(
             root.join("app/account/page.asx"),
-            "page Account() { return ASX { <Copy>Account</Copy> } }\n",
+            "page Account() {\n  return ASX {\n    <form method=\"post\" action=\"/__axonyx/action?path=%2Faccount&name=Logout\"><Copy>Account</Copy></form>\n  }\n}\n",
         )
         .expect("page should write");
         fs::write(
@@ -28224,6 +28392,11 @@ axonyx-runtime = "0.1.0"
 
 action Logout() {
   Session.destroy()
+  return ok
+}
+action RefreshSession() {
+  require Auth.subject else redirect("/login")
+  Session.refresh()
   return ok
 }
 "#,
@@ -28242,7 +28415,7 @@ action Logout() {
         fs::write(
             root.join(".env.local"),
             format!(
-                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=test-session-secret\nAX_SECRET_SESSION_COOKIE_SECURE=false\n",
+                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=test-session-secret-at-least-32-bytes\nAX_SECRET_SESSION_COOKIE_SECURE=false\n",
                 database_path.display()
             ),
         )
@@ -28303,15 +28476,115 @@ action Logout() {
                     "content-type".to_string(),
                     "application/x-www-form-urlencoded".to_string(),
                 ),
-                ("cookie".to_string(), cookie_pair),
+                ("cookie".to_string(), cookie_pair.clone()),
             ]
             .into_iter()
             .collect(),
             body: Vec::new(),
             multipart: None,
         };
-        let logout = handle_action_request(&state, AxServerMode::Dev, &logout_request)
-            .expect("logout should execute");
+        let csrf_request = AxHttpRequest::new("GET", "/__axonyx/csrf")
+            .with_header("Cookie", &cookie_pair)
+            .with_header("Host", "axonyx.dev")
+            .with_header("Origin", "https://axonyx.dev");
+        let csrf_response = handle_http_request(&state, AxServerMode::Dev, csrf_request).unwrap();
+        assert_eq!(csrf_response.status, 200);
+        assert_eq!(
+            csrf_response.header_value("Cache-Control"),
+            Some("no-store")
+        );
+        let csrf_payload: serde_json::Value =
+            serde_json::from_slice(&csrf_response.body.into_bytes()).unwrap();
+        let token = csrf_payload["token"].as_str().unwrap();
+        let refresh_request = AxHttpRequest::new(
+            "POST",
+            "/__axonyx/action?path=%2Faccount&name=RefreshSession",
+        )
+        .with_header("Content-Type", "application/x-www-form-urlencoded")
+        .with_header("Host", "axonyx.dev")
+        .with_header("Origin", "https://axonyx.dev")
+        .with_header("Cookie", &cookie_pair);
+        assert_eq!(
+            handle_http_request(&state, AxServerMode::Dev, refresh_request.clone())
+                .unwrap()
+                .status,
+            403
+        );
+        let refreshed = handle_http_request(
+            &state,
+            AxServerMode::Dev,
+            refresh_request.with_header("X-Axonyx-CSRF", token),
+        )
+        .unwrap();
+        assert_eq!(refreshed.status, 303);
+        assert_eq!(
+            refreshed.set_cookies[0].split(';').next(),
+            Some(cookie_pair.as_str())
+        );
+        let form_response = handle_http_request(
+            &state,
+            AxServerMode::Dev,
+            AxHttpRequest::new("GET", "/account")
+                .with_header("Host", "axonyx.dev")
+                .with_header("Cookie", &cookie_pair),
+        )
+        .unwrap();
+        assert_eq!(
+            form_response.header_value("Cache-Control"),
+            Some("no-store")
+        );
+        let form_html = String::from_utf8(form_response.body.into_bytes()).unwrap();
+        assert_eq!(
+            form_response.status,
+            200,
+            "{}",
+            form_html
+                .split("<body>")
+                .nth(1)
+                .unwrap_or(&form_html)
+                .split("<script>")
+                .next()
+                .unwrap()
+        );
+        assert!(
+            form_html.contains(&format!("name=\"__ax_csrf\" value=\"{token}\"")),
+            "{}",
+            form_html
+                .split("<body>")
+                .nth(1)
+                .unwrap_or(&form_html)
+                .split("<script>")
+                .next()
+                .unwrap()
+        );
+        assert!(!form_html.contains(axonyx_runtime::csrf_http::FORM_MARKER));
+        let logout_request = logout_request
+            .with_header("Host", "axonyx.dev")
+            .with_header("Origin", "https://axonyx.dev");
+        assert_eq!(
+            handle_http_request(&state, AxServerMode::Dev, logout_request.clone())
+                .unwrap()
+                .status,
+            403
+        );
+        assert_eq!(
+            handle_http_request(
+                &state,
+                AxServerMode::Dev,
+                logout_request
+                    .clone()
+                    .with_header("X-Axonyx-CSRF", "invalid")
+            )
+            .unwrap()
+            .status,
+            403
+        );
+        let logout = handle_http_request(
+            &state,
+            AxServerMode::Dev,
+            logout_request.with_header("X-Axonyx-CSRF", token),
+        )
+        .expect("logout should execute");
         assert_eq!(logout.status, 303);
         assert_eq!(logout.set_cookies.len(), 1);
         assert!(logout.set_cookies[0].contains("Max-Age=0"));
@@ -29173,13 +29446,98 @@ action Logout() {
     }
 
     #[test]
+    fn backend_http_boundary_rejects_cross_site_mutation_before_execution() {
+        let root = make_temp_dir("api-origin-boundary");
+        fs::create_dir_all(root.join("routes/api")).unwrap();
+        fs::write(
+            root.join("routes/api/probe.ax"),
+            "route POST \"/api/probe\" {\n  return json(\"executed\")\n}\n",
+        )
+        .unwrap();
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let request = AxHttpRequest::new("POST", "/api/probe")
+                .with_header("Host", "axonyx.dev")
+                .with_header("Origin", "https://attacker.example");
+            let response = handle_http_request(&state, mode, request).unwrap();
+            assert_eq!(response.status, 403);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn public_origin_config_validates_before_build_and_controls_dev_mutations() {
+        let root = make_temp_dir("public-origin-config");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[server]\npublic_origin = \"https://axonyx.dev\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            AxServerRuntimeConfig::from_root(&root)
+                .unwrap()
+                .public_origin
+                .as_deref(),
+            Some("https://axonyx.dev")
+        );
+        fs::create_dir_all(root.join("routes/api")).unwrap();
+        fs::write(
+            root.join("routes/api/probe.ax"),
+            "route POST \"/api/probe\" {\n  return json(\"ok\")\n}\n",
+        )
+        .unwrap();
+        let mut state = test_dev_state(&root);
+        state.runtime_config = AxServerRuntimeConfig::from_root(&root).unwrap();
+        for (origin, expected) in [("https://axonyx.dev", 200), ("http://axonyx.dev", 403)] {
+            let request = AxHttpRequest::new("POST", "/api/probe")
+                .with_header("Host", "internal:3000")
+                .with_header("Origin", origin);
+            assert_eq!(
+                handle_http_request(&state, AxServerMode::Dev, request)
+                    .unwrap()
+                    .status,
+                expected
+            );
+        }
+        for invalid in [
+            "public_origin = 1",
+            "public_origin = \"https://axonyx.dev/path\"",
+        ] {
+            fs::write(root.join("Axonyx.toml"), format!("[server]\n{invalid}\n")).unwrap();
+            assert!(AxServerRuntimeConfig::from_root(&root).is_err());
+            assert!(check_axonyx_config(&root)
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "axonyx-config-public-origin"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mutation_origin_guard_covers_api_methods_without_blocking_reads() {
+        for method in ["POST", "PUT", "PATCH", "DELETE", "post"] {
+            let request = AxHttpRequest::new(method, "/api/login")
+                .with_header("Host", "axonyx.dev")
+                .with_header("Origin", "https://attacker.example");
+            let response = reject_cross_site_mutation_request(&request, None).unwrap();
+            assert_eq!(response.status, 403);
+            assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+        }
+        for method in ["GET", "HEAD", "OPTIONS"] {
+            let request = AxHttpRequest::new(method, "/api/posts")
+                .with_header("Sec-Fetch-Site", "cross-site");
+            assert!(reject_cross_site_mutation_request(&request, None).is_none());
+        }
+    }
+
+    #[test]
     fn action_origin_guard_rejects_cross_site_browser_posts() {
         let request = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=Save")
             .with_header("Host", "axonyx.dev")
             .with_header("Origin", "https://attacker.example")
             .with_header("Sec-Fetch-Site", "cross-site");
 
-        let response = reject_cross_site_action_request(&request)
+        let response = reject_cross_site_action_request(&request, None)
             .expect("cross-site browser action should be rejected");
         assert_eq!(response.status, 403);
     }
@@ -29190,10 +29548,10 @@ action Logout() {
             .with_header("Host", "axonyx.dev")
             .with_header("Origin", "https://axonyx.dev")
             .with_header("Sec-Fetch-Site", "same-origin");
-        assert!(reject_cross_site_action_request(&browser).is_none());
+        assert!(reject_cross_site_action_request(&browser, None).is_none());
 
         let cli = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=Save");
-        assert!(reject_cross_site_action_request(&cli).is_none());
+        assert!(reject_cross_site_action_request(&cli, None).is_none());
     }
 
     #[test]

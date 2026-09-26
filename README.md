@@ -1,13 +1,13 @@
 # Axonyx Framework
 
-Axonyx is a Rust-first web framework and language layer for building low-JavaScript sites, docs, and future CMS-style applications with `.ax` files, Cargo-native tooling, and Foundry UI.
+Axonyx is a Rust-first web framework and language layer for building low-JavaScript sites, docs, and future CMS-style applications with `.asx` pages, `.ax` backend modules, Cargo-native tooling, and Foundry UI.
 
 Status: public beta loop.
 
-Axonyx can already scaffold apps, render `.ax` pages, build static output, serve route-aware local previews, import Foundry UI from `axonyx-ui`, and publish deployable sites. It is not yet a full replacement for React, Next.js, or mature CMS platforms. The next runtime work is tracked in the GitHub issues and Wiki.
+Axonyx can already scaffold apps, render `.asx` pages, build static output, serve route-aware local previews, import Foundry UI from `axonyx-ui`, and publish deployable sites. It is not yet a full replacement for React, Next.js, or mature CMS platforms. The next runtime work is tracked in the GitHub issues and Wiki.
 
 Current builds emit framework inspection artifacts under `dist/_ax`, including
-the Melt graph, content manifests, and state manifests when `.ax` files declare
+the Melt graph, content manifests, and state manifests when Axonyx sources declare
 state signals.
 
 ## What Works Today
@@ -24,7 +24,7 @@ state signals.
 - strict project diagnostics through `cargo ax doctor --deny-warnings`
 - early typed data checks for `type Post`, `List<Post>`, and `<Each>` field access
 - first state bridge contracts through stable `SignalId`, `data-ax-signal`, and typed patch events
-- first Melt state manifest for `.ax` `state` declarations
+- first Melt state manifest for `state` declarations
 - reusable Foundry UI imports through `@axonyx/ui/...`
 - atomic SQLite/Postgres migrations through `cargo ax db ...`
 - generated apps consuming published crates from crates.io
@@ -41,7 +41,7 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.4.1"
+axonyx-runtime = "0.5.0"
 axonyx-ui = "0.0.71"
 ```
 
@@ -54,9 +54,8 @@ cargo install create-axonyx
 cargo install cargo-axonyx
 ```
 
-Framework contributors can install the unreleased language server locally with
-`cargo install --path crates/axonyx-lsp`. The VS Code adapter will own this
-setup after the LSP package is released.
+Install the published language server with `cargo install axonyx-lsp`, or use
+`cargo install --path crates/axonyx-lsp` when developing it in this workspace.
 
 Create and run a site:
 
@@ -132,8 +131,8 @@ validates compiled production responses, and `off` disables the check. A
 mismatch is logged with its exact JSON path while clients receive a redacted
 JSON `500` response.
 
-This is intentionally a runtime choice, not an authoring burden: `.ax` pages,
-loaders, actions, and state patches keep the same shape while Axonyx chooses the
+This is intentionally a runtime choice, not an authoring burden: `.asx` pages,
+`.ax` loaders and actions, and state patches keep the same shape while Axonyx chooses the
 transport layer underneath.
 
 The Tokio server path also exposes the first SSE probe:
@@ -354,7 +353,7 @@ for one file, `--stdout` for a non-mutating preview, `--stdin` for editor pipes,
 or `--check` in CI. Formatter V0 owns whitespace only and does not rewrite
 expressions, strings, imports, or embedded client code.
 
-Axonyx 0.2 uses `.asx` for pages, layouts, boundaries, and UI components while
+Axonyx uses `.asx` for pages, layouts, boundaries, and UI components while
 keeping `.ax` for loaders, actions, API routes, domain code, and jobs. Existing
 projects can preview and apply the mechanical migration with:
 
@@ -598,7 +597,7 @@ Today, `cargo ax add ui` and the `site` / `docs` templates use the published `ax
 
 Generated apps can target:
 
-- the published crates.io package, `axonyx-runtime = "0.4.1"`
+- the published crates.io package, `axonyx-runtime = "0.5.0"`
 - a local Cargo `path` dependency into a checked-out runtime workspace
 - the standalone Git repo at `https://github.com/vladanPro/axonyx-runtime`
 

@@ -2,7 +2,7 @@
 
 Project scaffolding CLI for Axonyx apps.
 
-Use it to create a new Axonyx project with working `.ax` pages, runtime wiring, optional Foundry UI setup, and the `cargo ax` developer loop.
+Use it to create a new Axonyx project with `.asx` pages, `.ax` backend modules when needed, runtime wiring, Foundry UI, and the `cargo ax` developer loop.
 
 ## Install
 
@@ -49,7 +49,7 @@ https://github.com/vladanPro/axonyx-framework/wiki/Next.js-vs-Axonyx
 The default scaffold uses the published crates.io runtime:
 
 ```toml
-axonyx-runtime = "0.1.14"
+axonyx-runtime = { version = "0.5.0", features = ["axum"] }
 ```
 
 For framework development, use:

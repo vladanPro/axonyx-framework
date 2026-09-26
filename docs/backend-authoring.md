@@ -39,6 +39,188 @@ return {
 
 `loader PostsList` and `load PostsList` remain supported for compatibility, but new templates prefer `query loadPosts()` and `data posts = loadPosts()`.
 
+## Credential Login (Unreleased)
+
+Credentials belong to the application database, separately from the public
+user contract. Never accept a caller-supplied user ID as proof of identity or
+return a credential record in an HTTP response.
+
+```ax
+type Credential {
+  user_id: String
+  email: String
+  password_hash: String
+}
+
+query resolveCredential(email: String) -> Credential? {
+  return db.credentials.where({ email: input.email }).first()
+}
+
+route POST "/api/login" {
+  input:
+    email: String
+    password: String
+  before Login.throttle(input.email, 5, 60)
+  data credential = resolveCredential(input.email)
+  data verified = Password.verifyOptional(input.password, credential?.password_hash)
+  require verified
+  require credential
+  Session.create(credential.user_id, {})
+  return json("ok")
+}
+
+action Logout() {
+  Session.destroy()
+  return ok()
+}
+```
+
+Missing accounts and wrong passwords return the same `401` response, without
+issuing a session. A corrupt stored hash is an operational failure, not a
+successful login. Generate stored hashes server-side with
+`axonyx_runtime::password::AxPassword::hash`; `.ax` hashing is not exposed yet.
+
+This tested SQLite pattern is not complete production authentication. Add
+login rate limiting, account-enumeration timing protection, CSRF protection,
+password policy/reset flows, and secure-cookie configuration for deployment.
+The smoke fixture uses a known test password and must never provision real users.
+
+`before Login.throttle(key, attempts, seconds)` is a route-only admission guard.
+Place it before data lookups or other operations. Attempts and seconds must be
+integer literals in `1..1000` and `1..86400`. Each guard shares a process-local
+fixed-window limiter across requests with at most 4096 keys. Every admitted
+attempt counts, including success. A blocked request returns generic `429`,
+`Retry-After` rounded up to whole seconds and `Cache-Control: no-store`.
+
+The key must be a String selected by server policy. Do not use passwords,
+sessions or untrusted forwarded headers. Account-only limits can be abused to
+deny access to a victim. Canonicalize keys consistently with account lookup;
+case-insensitive account lookup must not use a case-sensitive throttle key to
+allow spelling variations to bypass the budget. This example is not a complete
+multi-dimensional login policy. Limits reset on process restart and are not shared across replicas.
+`Password.verifyOptional` runs dummy verification when the credential is absent.
+Its second argument must be a String field on a typed optional record, before
+`require credential` narrows it. Existing `Password.verify` behavior is unchanged.
+This removes the missing-account hashing shortcut, not all end-to-end timing differences.
+
+## Permission Policy
+
+### Browser mutation boundary (unreleased)
+
+Actions and unsafe backend HTTP requests reject mismatched Origin/Referer or
+cross-site Fetch Metadata with 403 and no-store before handler execution.
+GET, HEAD and OPTIONS are exempt: do not implement mutations in GET handlers.
+Cookie-less CLI clients without origin metadata remain supported. Cookie-bearing
+mutations must provide matching Origin/Referer or same-origin Fetch Metadata.
+Same-site requests are not trusted as same-origin. Forwarded host headers are
+ignored: reverse proxies must preserve the public Host including explicit port.
+Both server modes use `axonyx_runtime::mutation_security::rejects_mutation_request`.
+For production proxies, configure a canonical public origin:
+
+```toml
+[server]
+public_origin = "https://axonyx.dev"
+```
+
+With this setting, Origin/Referer must match scheme, host and effective port;
+default ports (HTTPS 443, HTTP 80) normalize consistently. Internal Host and
+forwarded headers cannot change the configured target. Browser mutations need
+Origin/Referer even with same-origin Fetch Metadata. Cookie-less metadata-free
+CLI requests remain permitted. Invalid configuration fails check/build/start.
+Rebuild compiled applications after changing this build-time setting.
+This is not a session-bound CSRF token API or authentication. Explicit
+cross-origin integrations and token policy remain follow-up work.
+
+### Session-bound CSRF foundation (unreleased)
+
+Managed session refresh is an explicit mutation, not an automatic request hook:
+
+```ax
+action RefreshSession() {
+  require Auth.subject else redirect("/login")
+  Session.refresh()
+  return ok()
+}
+```
+
+The same session ID and CSRF proof remain valid; refresh reissues the HttpOnly
+cookie. Missing, expired or revoked sessions cannot be refreshed. Browser refresh
+requests must pass origin and CSRF guards. GET/HEAD/OPTIONS cannot refresh.
+`AX_SECRET_SESSION_TTL_SECONDS` controls sliding expiry;
+`AX_SECRET_SESSION_ABSOLUTE_TTL_SECONDS` caps lifetime from creation (default
+30 days). Refresh cannot move that absolute deadline. Cookie Max-Age is capped
+to the remaining lifetime. This is not JWT refresh or session-ID rotation.
+Built-in memory, SQLite and Postgres stores update live rows atomically rather
+than upserting, so a delayed refresh cannot recreate a deleted session. Custom
+session stores must implement atomic `refresh_live`; the default fails closed.
+
+The Rust `AxSessionManager` now provides `csrf_token(request, secret, now)` and
+`verify_csrf(request, token, secret, now)`. Proofs are HMAC-signed and checked
+against the active server-side session. Logout, expiration, session replacement
+and key rotation invalidate old proofs; refresh of the same session preserves
+them. Use a cryptographically random signing secret with at least 32 bytes.
+
+Projects using managed sessions now expose `GET /__axonyx/csrf`, returning a
+private `no-store` response with `{ "token": "axcsrf1...." }` for an active session
+or a signed anonymous proof before login. Cross-site token reads are rejected. Unsafe
+requests with an active session require `X-Axonyx-CSRF` or an explicit `__ax_csrf`
+form/JSON field before executing the action/API handler. Header proof takes
+precedence; URLs and cookies are never proof sources. Errors fail closed.
+
+The action bridge loads a fresh proof before submission and only sends it to a
+same-origin action; requests carrying proofs do not follow redirects. Session
+uploads use fetch rather than redirect-following XHR (upload progress is limited
+on this path). Local action forms rendered by Axonyx receive a hidden `__ax_csrf`
+field at HTTP delivery, including without JavaScript. Build artifacts contain only
+a placeholder; personalized responses are no-store. Anonymous proofs use a signed,
+30-minute HttpOnly, SameSite=Strict cookie (`__Host-axonyx-csrf`, Secure, Path=/,
+no Domain in production; a separate non-Secure name on loopback development).
+Browser mutations require this proof before login too. Metadata-free, cookie-free
+API clients keep their existing authentication path. Legacy signed-cookie auth
+and arbitrary raw-HTML forms are not automatically integrated. Form-containing
+streamed responses are buffered for injection. Refresh an expired anonymous form.
+Custom Rust servers must call the helpers themselves. Keep origin checking and
+authorization; never place proofs in URLs, logs, public snapshots or shared caches.
+
+Keep permissions in application-owned tables. `Auth.subject` identifies a valid
+server-side session; it is not a role or permission claim. Resolve the user and
+then look up a grant on each protected request:
+
+```ax
+type User {
+  id: String
+  email: String
+}
+
+type UserPermission {
+  id: Int
+  user_id: String
+  permission: String
+}
+
+query resolveUser(subject: String) -> User? {
+  return db.users.where({ id: input.subject }).first()
+}
+
+query resolvePermission(userId: String, permission: String) -> UserPermission? {
+  return db.user_permissions.where({ user_id: input.userId, permission: input.permission }).first()
+}
+
+route GET "/api/publish" -> User {
+  require Auth.subject
+  data user = resolveUser(Auth.subject)
+  require user else notFound()
+  data grant = resolvePermission(user.id, "articles.publish")
+  require grant else forbidden()
+  return json(user)
+}
+```
+
+Without a session, the route returns `401`. A signed-in user without the grant
+gets `403`. Grant changes take effect on the next request because the database,
+not the cookie, owns the permission. This is a route-level pattern, not a
+built-in RBAC engine; the app owns its permission schema and assignment rules.
+
 ## Current Query Clauses
 
 - `where`
