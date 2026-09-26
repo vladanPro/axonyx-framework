@@ -230,6 +230,12 @@ route GET "/api/publish" -> User {
   require grant else forbidden()
   return json(user)
 }
+
+route POST "/api/password-probe" {
+  data verified = Password.verify(request.form.password, request.form.hash)
+  require verified
+  return json("ok")
+}
 '@,
     (New-Object System.Text.UTF8Encoding($false))
   )
@@ -290,6 +296,12 @@ route GET "/api/publish" -> User {
     }
   }
   if (!$ready) { throw "Compiled server did not become ready" }
+
+  # Test-only probe; real login must load the hash from server-owned storage.
+  $badHash = Invoke-AxRequest -Url "$baseUrl/api/password-probe" -Body "password=example&hash=invalid-secret-hash" -ExpectedStatus 500
+  if ($badHash.Body -match "invalid-secret-hash" -or $badHash.Body -match "password=example") {
+    throw "Password verification failure exposed secret input"
+  }
 
   $readiness = Invoke-AxRequest -Url "$baseUrl/__axonyx/ready" -Method "GET"
   $readinessPayload = $readiness.Body | ConvertFrom-Json
