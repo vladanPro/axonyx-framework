@@ -205,9 +205,9 @@ route POST "/api/login" {
     password: String
   before Login.throttle(input.email, 2, 60)
   data credential = resolveCredential(input.email)
-  require credential
-  data verified = Password.verify(input.password, credential.password_hash)
+  data verified = Password.verifyOptional(input.password, credential?.password_hash)
   require verified
+  require credential
   Session.create(credential.user_id, {})
   return json("ok")
 }

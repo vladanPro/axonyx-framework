@@ -62,9 +62,9 @@ route POST "/api/login" {
     password: String
   before Login.throttle(input.email, 5, 60)
   data credential = resolveCredential(input.email)
-  require credential
-  data verified = Password.verify(input.password, credential.password_hash)
+  data verified = Password.verifyOptional(input.password, credential?.password_hash)
   require verified
+  require credential
   Session.create(credential.user_id, {})
   return json("ok")
 }
@@ -98,7 +98,10 @@ deny access to a victim. Canonicalize keys consistently with account lookup;
 case-insensitive account lookup must not use a case-sensitive throttle key to
 allow spelling variations to bypass the budget. This example is not a complete
 multi-dimensional login policy. Limits reset on process restart and are not shared across replicas.
-The Rust dummy-verification helper is not connected to this `.ax` flow yet.
+`Password.verifyOptional` runs dummy verification when the credential is absent.
+Its second argument must be a String field on a typed optional record, before
+`require credential` narrows it. Existing `Password.verify` behavior is unchanged.
+This removes the missing-account hashing shortcut, not all end-to-end timing differences.
 
 ## Permission Policy
 
