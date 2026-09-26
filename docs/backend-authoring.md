@@ -131,6 +131,19 @@ Rebuild compiled applications after changing this build-time setting.
 This is not a session-bound CSRF token API or authentication. Explicit
 cross-origin integrations and token policy remain follow-up work.
 
+### Session-bound CSRF foundation (unreleased)
+
+The Rust `AxSessionManager` now provides `csrf_token(request, secret, now)` and
+`verify_csrf(request, token, secret, now)`. Proofs are HMAC-signed and checked
+against the active server-side session. Logout, expiration, session replacement
+and key rotation invalidate old proofs; refresh of the same session preserves
+them. Use a cryptographically random signing secret with at least 32 bytes.
+
+This is not automatic HTTP enforcement yet. Forms, the action bridge and API
+mutations still need token delivery/extraction/validation wiring. Keep origin
+checks and authorization. Do not expose proofs through URLs, logs, public state
+snapshots or shared caches. Anonymous/login-CSRF requires its own policy.
+
 Keep permissions in application-owned tables. `Auth.subject` identifies a valid
 server-side session; it is not a role or permission claim. Resolve the user and
 then look up a grant on each protected request:
