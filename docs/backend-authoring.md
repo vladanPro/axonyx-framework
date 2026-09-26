@@ -141,7 +141,7 @@ them. Use a cryptographically random signing secret with at least 32 bytes.
 
 Projects using managed sessions now expose `GET /__axonyx/csrf`, returning a
 private `no-store` response with `{ "token": "axcsrf1...." }` for an active session
-or `{ "token": null }` anonymously. Cross-site token reads are rejected. Unsafe
+or a signed anonymous proof before login. Cross-site token reads are rejected. Unsafe
 requests with an active session require `X-Axonyx-CSRF` or an explicit `__ax_csrf`
 form/JSON field before executing the action/API handler. Header proof takes
 precedence; URLs and cookies are never proof sources. Errors fail closed.
@@ -149,9 +149,15 @@ precedence; URLs and cookies are never proof sources. Errors fail closed.
 The action bridge loads a fresh proof before submission and only sends it to a
 same-origin action; requests carrying proofs do not follow redirects. Session
 uploads use fetch rather than redirect-following XHR (upload progress is limited
-on this path). Native no-JS forms must supply their hidden proof explicitly;
-automatic server-rendered hidden fields remain follow-up work. Anonymous/login
-CSRF and legacy signed-cookie auth are not covered by the managed-session proof.
+on this path). Local action forms rendered by Axonyx receive a hidden `__ax_csrf`
+field at HTTP delivery, including without JavaScript. Build artifacts contain only
+a placeholder; personalized responses are no-store. Anonymous proofs use a signed,
+30-minute HttpOnly, SameSite=Strict cookie (`__Host-axonyx-csrf`, Secure, Path=/,
+no Domain in production; a separate non-Secure name on loopback development).
+Browser mutations require this proof before login too. Metadata-free, cookie-free
+API clients keep their existing authentication path. Legacy signed-cookie auth
+and arbitrary raw-HTML forms are not automatically integrated. Form-containing
+streamed responses are buffered for injection. Refresh an expired anonymous form.
 Custom Rust servers must call the helpers themselves. Keep origin checking and
 authorization; never place proofs in URLs, logs, public snapshots or shared caches.
 
