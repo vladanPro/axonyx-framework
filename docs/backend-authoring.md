@@ -39,6 +39,51 @@ return {
 
 `loader PostsList` and `load PostsList` remain supported for compatibility, but new templates prefer `query loadPosts()` and `data posts = loadPosts()`.
 
+## Credential Login (Unreleased)
+
+Credentials belong to the application database, separately from the public
+user contract. Never accept a caller-supplied user ID as proof of identity or
+return a credential record in an HTTP response.
+
+```ax
+type Credential {
+  user_id: String
+  email: String
+  password_hash: String
+}
+
+query resolveCredential(email: String) -> Credential? {
+  return db.credentials.where({ email: input.email }).first()
+}
+
+route POST "/api/login" {
+  input:
+    email: String
+    password: String
+  data credential = resolveCredential(input.email)
+  require credential
+  data verified = Password.verify(input.password, credential.password_hash)
+  require verified
+  Session.create(credential.user_id, {})
+  return json("ok")
+}
+
+action Logout() {
+  Session.destroy()
+  return ok()
+}
+```
+
+Missing accounts and wrong passwords return the same `401` response, without
+issuing a session. A corrupt stored hash is an operational failure, not a
+successful login. Generate stored hashes server-side with
+`axonyx_runtime::password::AxPassword::hash`; `.ax` hashing is not exposed yet.
+
+This tested SQLite pattern is not complete production authentication. Add
+login rate limiting, account-enumeration timing protection, CSRF protection,
+password policy/reset flows, and secure-cookie configuration for deployment.
+The smoke fixture uses a known test password and must never provision real users.
+
 ## Permission Policy
 
 Keep permissions in application-owned tables. `Auth.subject` identifies a valid
