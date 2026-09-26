@@ -60,6 +60,7 @@ route POST "/api/login" {
   input:
     email: String
     password: String
+  before Login.throttle(input.email, 5, 60)
   data credential = resolveCredential(input.email)
   require credential
   data verified = Password.verify(input.password, credential.password_hash)
@@ -83,6 +84,21 @@ This tested SQLite pattern is not complete production authentication. Add
 login rate limiting, account-enumeration timing protection, CSRF protection,
 password policy/reset flows, and secure-cookie configuration for deployment.
 The smoke fixture uses a known test password and must never provision real users.
+
+`before Login.throttle(key, attempts, seconds)` is a route-only admission guard.
+Place it before data lookups or other operations. Attempts and seconds must be
+integer literals in `1..1000` and `1..86400`. Each guard shares a process-local
+fixed-window limiter across requests with at most 4096 keys. Every admitted
+attempt counts, including success. A blocked request returns generic `429`,
+`Retry-After` rounded up to whole seconds and `Cache-Control: no-store`.
+
+The key must be a String selected by server policy. Do not use passwords,
+sessions or untrusted forwarded headers. Account-only limits can be abused to
+deny access to a victim. Canonicalize keys consistently with account lookup;
+case-insensitive account lookup must not use a case-sensitive throttle key to
+allow spelling variations to bypass the budget. This example is not a complete
+multi-dimensional login policy. Limits reset on process restart and are not shared across replicas.
+The Rust dummy-verification helper is not connected to this `.ax` flow yet.
 
 ## Permission Policy
 
