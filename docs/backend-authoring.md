@@ -139,10 +139,21 @@ against the active server-side session. Logout, expiration, session replacement
 and key rotation invalidate old proofs; refresh of the same session preserves
 them. Use a cryptographically random signing secret with at least 32 bytes.
 
-This is not automatic HTTP enforcement yet. Forms, the action bridge and API
-mutations still need token delivery/extraction/validation wiring. Keep origin
-checks and authorization. Do not expose proofs through URLs, logs, public state
-snapshots or shared caches. Anonymous/login-CSRF requires its own policy.
+Projects using managed sessions now expose `GET /__axonyx/csrf`, returning a
+private `no-store` response with `{ "token": "axcsrf1...." }` for an active session
+or `{ "token": null }` anonymously. Cross-site token reads are rejected. Unsafe
+requests with an active session require `X-Axonyx-CSRF` or an explicit `__ax_csrf`
+form/JSON field before executing the action/API handler. Header proof takes
+precedence; URLs and cookies are never proof sources. Errors fail closed.
+
+The action bridge loads a fresh proof before submission and only sends it to a
+same-origin action; requests carrying proofs do not follow redirects. Session
+uploads use fetch rather than redirect-following XHR (upload progress is limited
+on this path). Native no-JS forms must supply their hidden proof explicitly;
+automatic server-rendered hidden fields remain follow-up work. Anonymous/login
+CSRF and legacy signed-cookie auth are not covered by the managed-session proof.
+Custom Rust servers must call the helpers themselves. Keep origin checking and
+authorization; never place proofs in URLs, logs, public snapshots or shared caches.
 
 Keep permissions in application-owned tables. `Auth.subject` identifies a valid
 server-side session; it is not a role or permission claim. Resolve the user and
