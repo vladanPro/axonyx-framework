@@ -13092,6 +13092,7 @@ fn build_compiled_production_binary(
         &data_bindings,
         &page_renderers,
         CompiledProductionOptions {
+            sessions_required: project_uses_session_runtime(root)?,
             public_origin: runtime_config.public_origin.as_deref(),
             database_runtime_defaults: &database_runtime_defaults,
             database_required,
@@ -13329,6 +13330,7 @@ fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
 
 #[derive(Debug, Clone, Copy)]
 struct CompiledProductionOptions<'a> {
+    sessions_required: bool,
     public_origin: Option<&'a str>,
     database_runtime_defaults: &'a str,
     database_required: bool,
@@ -13344,6 +13346,7 @@ fn compiled_production_source(
     options: CompiledProductionOptions<'_>,
 ) -> String {
     let CompiledProductionOptions {
+        sessions_required,
         public_origin,
         database_runtime_defaults,
         database_required,
@@ -13464,6 +13467,7 @@ struct CompiledBinding {{
 }}
 
 const DATABASE_REQUIRED: bool = {database_required};
+const SESSIONS_REQUIRED: bool = {sessions_required};
 const VALIDATE_API_RESPONSES: bool = {validate_api_responses};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
@@ -13492,6 +13496,22 @@ fn handle_request(
 
     if request.method.eq_ignore_ascii_case("GET") && request.target.split('?').next() == Some("/__axonyx/ready") {{
         return secure(readiness_response(runtime));
+    }}
+
+    if request.target.split('?').next() == Some("/__axonyx/csrf") {{
+        if request.method != "GET" {{ return secure(AxHttpResponse::text(405, "Method Not Allowed").with_header("Allow", "GET").with_no_store()); }}
+        if axonyx_runtime::csrf_http::rejects_token_source(&request, {public_origin_literal}) {{ return secure(AxHttpResponse::text(403, "Forbidden").with_no_store()); }}
+        let response = if SESSIONS_REQUIRED {{ axonyx_runtime::csrf_http::token_response(runtime, &request) }} else {{ AxHttpResponse::json(200, &json!({{"token": null}})).map(|response| response.with_no_store()).map_err(|_| axonyx_runtime::backend_prelude::AxRuntimeError::message("CSRF response failed")) }};
+        return secure(response.unwrap_or_else(|_| AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()));
+    }}
+
+    if SESSIONS_REQUIRED && (request.target.split('?').next() == Some("/__axonyx/action") || request.target.starts_with("/api/")) {{
+        if cross_site_action_request(&request) {{ return secure(AxHttpResponse::text(403, "Forbidden").with_no_store()); }}
+        match axonyx_runtime::csrf_http::reject_mutation(runtime, &request) {{
+            Ok(Some(response)) => return secure(response),
+            Ok(None) => {{}},
+            Err(_) => return secure(AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()),
+        }}
     }}
 
     if request.target.split('?').next() == Some("/__axonyx/action") {{
@@ -17361,6 +17381,9 @@ fn handle_http_request(
         .with_no_store());
     }
 
+    if let Some(response) = session_csrf_http_response(state, &request)? {
+        return Ok(response);
+    }
     if request.method == "GET" && is_health_target(&request.target) {
         return health_response(mode);
     }
@@ -18934,6 +18957,70 @@ fn project_uses_database_runtime(root: &Path) -> Result<bool> {
         .map(|(_, source)| source.as_str())
         .collect::<Vec<_>>();
     backend_source_refs_use_database(&source_refs)
+}
+
+fn session_csrf_http_response(
+    state: &DevServerState,
+    request: &AxHttpRequest,
+) -> Result<Option<AxHttpResponse>> {
+    let path = request.target.split('?').next().unwrap_or("");
+    let token_request = path == axonyx_runtime::csrf_http::CSRF_PATH;
+    let mutation = !matches!(
+        request.method.to_ascii_uppercase().as_str(),
+        "GET" | "HEAD" | "OPTIONS"
+    ) && request.header_value("Cookie").is_some();
+    if !token_request && !mutation {
+        return Ok(None);
+    }
+    let origin = state.runtime_config.public_origin.as_deref();
+    if token_request {
+        if request.method != "GET" {
+            return Ok(Some(
+                AxHttpResponse::text(405, "Method Not Allowed")
+                    .with_header("Allow", "GET")
+                    .with_no_store(),
+            ));
+        }
+        if axonyx_runtime::csrf_http::rejects_token_source(request, origin) {
+            return Ok(Some(forbidden_action_response()));
+        }
+    } else if let Some(response) = reject_cross_site_mutation_request(request, origin) {
+        return Ok(Some(response));
+    }
+    if !project_uses_session_runtime(&state.root)? {
+        return if token_request {
+            Ok(Some(
+                AxHttpResponse::json(200, &serde_json::json!({ "token": null }))?.with_no_store(),
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    let result = (|| {
+        let env = db_env_for_root(&state.root, None)?;
+        let runtime = ax_backend_runtime::runtime_from_env(env)?;
+        if token_request {
+            axonyx_runtime::csrf_http::token_response(&runtime, request)
+                .map(Some)
+                .map_err(anyhow::Error::from)
+        } else {
+            axonyx_runtime::csrf_http::reject_mutation(&runtime, request)
+                .map_err(anyhow::Error::from)
+        }
+    })();
+    Ok(result.unwrap_or_else(|_: anyhow::Error| {
+        Some(AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store())
+    }))
+}
+
+fn project_uses_session_runtime(root: &Path) -> Result<bool> {
+    let mut sources = Vec::new();
+    collect_backend_sources(root, &mut sources)?;
+    let refs = sources
+        .iter()
+        .map(|(_, source)| source.as_str())
+        .collect::<Vec<_>>();
+    backend_source_refs_use_sessions(&refs)
 }
 
 fn reject_cross_site_mutation_request(
@@ -26108,6 +26195,7 @@ action ValidPost
                 import_sources: Vec::new(),
             }],
             CompiledProductionOptions {
+                sessions_required: true,
                 public_origin: Some("https://axonyx.dev"),
                 database_runtime_defaults: "",
                 database_required: true,
@@ -26164,6 +26252,7 @@ action ValidPost
             &[],
             &[],
             CompiledProductionOptions {
+                sessions_required: false,
                 public_origin: None,
                 database_runtime_defaults: "",
                 database_required: false,
@@ -28252,7 +28341,7 @@ action Logout() {
         fs::write(
             root.join(".env.local"),
             format!(
-                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=test-session-secret\nAX_SECRET_SESSION_COOKIE_SECURE=false\n",
+                "AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=test-session-secret-at-least-32-bytes\nAX_SECRET_SESSION_COOKIE_SECURE=false\n",
                 database_path.display()
             ),
         )
@@ -28313,15 +28402,53 @@ action Logout() {
                     "content-type".to_string(),
                     "application/x-www-form-urlencoded".to_string(),
                 ),
-                ("cookie".to_string(), cookie_pair),
+                ("cookie".to_string(), cookie_pair.clone()),
             ]
             .into_iter()
             .collect(),
             body: Vec::new(),
             multipart: None,
         };
-        let logout = handle_action_request(&state, AxServerMode::Dev, &logout_request)
-            .expect("logout should execute");
+        let csrf_request = AxHttpRequest::new("GET", "/__axonyx/csrf")
+            .with_header("Cookie", &cookie_pair)
+            .with_header("Host", "axonyx.dev")
+            .with_header("Origin", "https://axonyx.dev");
+        let csrf_response = handle_http_request(&state, AxServerMode::Dev, csrf_request).unwrap();
+        assert_eq!(csrf_response.status, 200);
+        assert_eq!(
+            csrf_response.header_value("Cache-Control"),
+            Some("no-store")
+        );
+        let csrf_payload: serde_json::Value =
+            serde_json::from_slice(&csrf_response.body.into_bytes()).unwrap();
+        let token = csrf_payload["token"].as_str().unwrap();
+        let logout_request = logout_request
+            .with_header("Host", "axonyx.dev")
+            .with_header("Origin", "https://axonyx.dev");
+        assert_eq!(
+            handle_http_request(&state, AxServerMode::Dev, logout_request.clone())
+                .unwrap()
+                .status,
+            403
+        );
+        assert_eq!(
+            handle_http_request(
+                &state,
+                AxServerMode::Dev,
+                logout_request
+                    .clone()
+                    .with_header("X-Axonyx-CSRF", "invalid")
+            )
+            .unwrap()
+            .status,
+            403
+        );
+        let logout = handle_http_request(
+            &state,
+            AxServerMode::Dev,
+            logout_request.with_header("X-Axonyx-CSRF", token),
+        )
+        .expect("logout should execute");
         assert_eq!(logout.status, 303);
         assert_eq!(logout.set_cookies.len(), 1);
         assert!(logout.set_cookies[0].contains("Max-Age=0"));

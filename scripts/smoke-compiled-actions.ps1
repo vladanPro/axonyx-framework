@@ -274,7 +274,7 @@ route POST "/api/password-probe" {
 
   $env:AX_SECRET_DB_DIALECT = "sqlite"
   $env:AX_SECRET_DB_URL = $dbPath
-  $env:AX_SECRET_SESSION_KEY = "compiled-smoke-session-secret"
+  $env:AX_SECRET_SESSION_KEY = "compiled-smoke-session-secret-at-least-32-bytes"
   $env:AX_SECRET_SESSION_COOKIE_SECURE = "false"
 
   Push-Location $appRoot
@@ -405,6 +405,12 @@ route POST "/api/password-probe" {
     throw "Compiled login leaked session data into the action response"
   }
   $sessionCookie = $sessionCookieHeader.Split(';')[0]
+  $tokenResponse = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl }
+  $csrfToken = ($tokenResponse.Body | ConvertFrom-Json).token
+  if ($csrfToken -notmatch '^axcsrf1\.[a-f0-9]{64}$' -or $tokenResponse.Headers["Cache-Control"] -ne "no-store" -or $tokenResponse.Headers["Vary"] -ne "Cookie") { throw "Invalid private CSRF token response" }
+  if ($tokenResponse.Body -match "user-42" -or $tokenResponse.Body.Contains($sessionCookie.Split('=')[1])) { throw "CSRF response leaked session identity" }
+  Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = "https://attacker.example" } -ExpectedStatus 403 | Out-Null
+  Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl } -ExpectedStatus 403 | Out-Null
   $limited = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -ExpectedStatus 429
   $retrySeconds = 0
   if (![int]::TryParse([string] $limited.Headers["Retry-After"], [ref] $retrySeconds) -or $retrySeconds -lt 1 -or $retrySeconds -gt 60) {
@@ -453,9 +459,11 @@ route POST "/api/password-probe" {
   }
   $logoutUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=Logout"
   Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 403 | Out-Null
+  Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl } -ExpectedStatus 403 | Out-Null
+  Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl; "X-Axonyx-CSRF" = "invalid" } -ExpectedStatus 403 | Out-Null
   $stillAuthenticated = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie }
   if (($stillAuthenticated.Body | ConvertFrom-Json).id -ne "user-42") { throw "Rejected logout changed the session" }
-  $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl; "X-Forwarded-Host" = "ignored.invalid" } -ExpectedStatus 303
+  $logout = Invoke-AxRequest -Url $logoutUrl -Body "__ax_csrf=$csrfToken" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl; "X-Forwarded-Host" = "ignored.invalid" } -ExpectedStatus 303
   if ($logout.Headers["Set-Cookie"] -notmatch "Max-Age=0") {
     throw "Compiled logout did not clear the session cookie"
   }
@@ -465,6 +473,8 @@ route POST "/api/password-probe" {
     throw "Compiled logout did not remove the persisted session"
   }
   Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303 | Out-Null
+  $expiredToken = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl }
+  if (($expiredToken.Body | ConvertFrom-Json).token) { throw "Revoked session still issued a CSRF proof" }
 
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }
