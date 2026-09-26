@@ -203,6 +203,7 @@ route POST "/api/login" {
   input:
     email: String
     password: String
+  before Login.throttle(input.email, 2, 60)
   data credential = resolveCredential(input.email)
   require credential
   data verified = Password.verify(input.password, credential.password_hash)
@@ -395,6 +396,16 @@ route POST "/api/password-probe" {
     throw "Compiled login leaked session data into the action response"
   }
   $sessionCookie = $sessionCookieHeader.Split(';')[0]
+  $limited = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -ExpectedStatus 429
+  $retrySeconds = 0
+  if (![int]::TryParse([string] $limited.Headers["Retry-After"], [ref] $retrySeconds) -or $retrySeconds -lt 1 -or $retrySeconds -gt 60) {
+    throw "Login throttle must return a bounded Retry-After"
+  }
+  if ($limited.Headers["Set-Cookie"] -or $limited.Headers["Cache-Control"] -ne "no-store") {
+    throw "Limited login must not issue cookies or be cached"
+  }
+  $activeSessions = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from ax_sessions").fetchone()[0]);db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or [int] $activeSessions -ne 1) { throw "Limited login created another session" }
   $anonymousPublish = Invoke-AxRequest -Url "$baseUrl/api/publish" -Method "GET" -ExpectedStatus 401
   if (($anonymousPublish.Body | ConvertFrom-Json).error -ne "unauthorized") {
     throw "Permission route did not reject an anonymous request"
