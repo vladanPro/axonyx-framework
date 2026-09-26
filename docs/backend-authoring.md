@@ -110,10 +110,14 @@ This removes the missing-account hashing shortcut, not all end-to-end timing dif
 Actions and unsafe backend HTTP requests reject mismatched Origin/Referer or
 cross-site Fetch Metadata with 403 and no-store before handler execution.
 GET, HEAD and OPTIONS are exempt: do not implement mutations in GET handlers.
-CLI clients without origin metadata remain supported. This is a first origin
-guard, not complete CSRF protection: missing metadata is currently allowed and
-forwarded host trust still needs an explicit proxy policy. Cookie-authenticated
-production applications require a complete CSRF strategy before rollout.
+Cookie-less CLI clients without origin metadata remain supported. Cookie-bearing
+mutations must provide matching Origin/Referer or same-origin Fetch Metadata.
+Same-site requests are not trusted as same-origin. Forwarded host headers are
+ignored: reverse proxies must preserve the public Host including explicit port.
+Both server modes use `axonyx_runtime::mutation_security::rejects_mutation_request`.
+This is not a session-bound CSRF token API or authentication. Canonical full-origin
+configuration (including scheme), explicit cross-origin integrations and token
+policy remain follow-up work before a complete production CSRF claim.
 
 Keep permissions in application-owned tables. `Auth.subject` identifies a valid
 server-side session; it is not a role or permission claim. Resolve the user and
