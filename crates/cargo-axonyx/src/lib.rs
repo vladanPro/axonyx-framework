@@ -12186,6 +12186,8 @@ fn looks_like_backend_ax(source: &str) -> bool {
             || line.starts_with("fn ")
             || line.starts_with("scope ")
             || line.starts_with("job ")
+            || line.starts_with("type ")
+            || line.starts_with("enum ")
     })
 }
 
@@ -21563,6 +21565,22 @@ page SectionCard
 
         let diagnostics = check_ax_source_with_root(&path, source, None);
         assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
+    fn generated_type_only_modules_are_backend_sources() {
+        let root = make_temp_dir("generated-type-module");
+        fs::create_dir_all(root.join("app/generated")).unwrap();
+        fs::write(
+            root.join("app/generated/db.ax"),
+            "export type PostsRow {\n  id: Int\n  title: String\n}\n",
+        )
+        .unwrap();
+        assert!(check_app_sources(&root).unwrap().is_empty());
+        assert!(looks_like_backend_ax(
+            "export enum Status {\n  Draft\n  Published\n}\n"
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
