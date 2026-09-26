@@ -115,9 +115,21 @@ mutations must provide matching Origin/Referer or same-origin Fetch Metadata.
 Same-site requests are not trusted as same-origin. Forwarded host headers are
 ignored: reverse proxies must preserve the public Host including explicit port.
 Both server modes use `axonyx_runtime::mutation_security::rejects_mutation_request`.
-This is not a session-bound CSRF token API or authentication. Canonical full-origin
-configuration (including scheme), explicit cross-origin integrations and token
-policy remain follow-up work before a complete production CSRF claim.
+For production proxies, configure a canonical public origin:
+
+```toml
+[server]
+public_origin = "https://axonyx.dev"
+```
+
+With this setting, Origin/Referer must match scheme, host and effective port;
+default ports (HTTPS 443, HTTP 80) normalize consistently. Internal Host and
+forwarded headers cannot change the configured target. Browser mutations need
+Origin/Referer even with same-origin Fetch Metadata. Cookie-less metadata-free
+CLI requests remain permitted. Invalid configuration fails check/build/start.
+Rebuild compiled applications after changing this build-time setting.
+This is not a session-bound CSRF token API or authentication. Explicit
+cross-origin integrations and token policy remain follow-up work.
 
 Keep permissions in application-owned tables. `Auth.subject` identifies a valid
 server-side session; it is not a role or permission claim. Resolve the user and

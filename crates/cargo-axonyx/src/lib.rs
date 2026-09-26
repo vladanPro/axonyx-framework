@@ -784,8 +784,9 @@ struct AxStorageConfigError {
     message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AxServerRuntimeConfig {
+    public_origin: Option<String>,
     max_body_bytes: usize,
     request_timeout: Duration,
     shutdown_grace: Duration,
@@ -869,6 +870,7 @@ impl Drop for TokioConnectionGuard {
 impl AxServerRuntimeConfig {
     fn from_root(root: &Path) -> std::result::Result<Self, String> {
         Ok(Self {
+            public_origin: configured_public_origin(root)?,
             max_body_bytes: configured_max_request_body_bytes(root)?,
             request_timeout: configured_request_timeout_duration(root)?,
             shutdown_grace: configured_shutdown_grace_duration(root)?,
@@ -893,6 +895,7 @@ impl AxServerRuntimeConfig {
 impl Default for AxServerRuntimeConfig {
     fn default() -> Self {
         Self {
+            public_origin: None,
             max_body_bytes: MAX_REQUEST_BODY_BYTES,
             request_timeout: Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECONDS),
             shutdown_grace: Duration::from_secs(DEFAULT_SHUTDOWN_GRACE_SECONDS),
@@ -8778,6 +8781,17 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     }
 
+    if let Err(message) = configured_public_origin(root) {
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(&path),
+            line: line_for_config_key(&source, "public_origin"),
+            column: 1,
+            severity: "error",
+            code: "axonyx-config-public-origin",
+            message,
+        });
+    }
+
     for key in ["compression", "security_headers", "request_logging"] {
         if let Some(value) = value
             .get("server")
@@ -12881,7 +12895,7 @@ fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Res
     let shared_state = Arc::new(DevServerState {
         root,
         preview_store: Mutex::new(preview_store),
-        runtime_config,
+        runtime_config: runtime_config.clone(),
         storage_registry,
         database_required,
     });
@@ -13078,6 +13092,7 @@ fn build_compiled_production_binary(
         &data_bindings,
         &page_renderers,
         CompiledProductionOptions {
+            public_origin: runtime_config.public_origin.as_deref(),
             database_runtime_defaults: &database_runtime_defaults,
             database_required,
             validate_api_responses,
@@ -13314,6 +13329,7 @@ fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
 
 #[derive(Debug, Clone, Copy)]
 struct CompiledProductionOptions<'a> {
+    public_origin: Option<&'a str>,
     database_runtime_defaults: &'a str,
     database_required: bool,
     validate_api_responses: bool,
@@ -13328,11 +13344,16 @@ fn compiled_production_source(
     options: CompiledProductionOptions<'_>,
 ) -> String {
     let CompiledProductionOptions {
+        public_origin,
         database_runtime_defaults,
         database_required,
         validate_api_responses,
         storage_configs,
     } = options;
+    let public_origin_literal = match public_origin {
+        Some(origin) => format!("Some({origin:?})"),
+        None => "None".to_string(),
+    };
     let storage_import = if storage_configs.is_empty() {
         "use axonyx_runtime::server_prelude::{AxFileStorage, AxUnavailableFileStorage};\n"
             .to_string()
@@ -13849,7 +13870,7 @@ fn url_decode(value: &str) -> String {{
 }}
 
 fn cross_site_action_request(request: &AxHttpRequest) -> bool {{
-    axonyx_runtime::mutation_security::rejects_mutation_request(request)
+    axonyx_runtime::mutation_security::rejects_mutation_request_with_origin(request, {public_origin_literal})
 }}
 
 fn static_response(dist: &Path, target: &str) -> Option<AxHttpResponse> {{
@@ -17389,7 +17410,10 @@ fn handle_http_request(
     }
 
     if request.method == "POST" && request.target.starts_with("/__axonyx/action") {
-        if let Some(response) = reject_cross_site_action_request(&request) {
+        if let Some(response) = reject_cross_site_action_request(
+            &request,
+            state.runtime_config.public_origin.as_deref(),
+        ) {
             return Ok(response);
         }
         return handle_action_request(state, mode, &request);
@@ -17416,7 +17440,9 @@ fn handle_http_request(
         return Ok(AxHttpResponse::text(200, version).with_no_store());
     }
 
-    if let Some(response) = reject_cross_site_mutation_request(&request) {
+    if let Some(response) =
+        reject_cross_site_mutation_request(&request, state.runtime_config.public_origin.as_deref())
+    {
         return Ok(response);
     }
     if let Some(response) = execute_backend_route_request(state, mode, &request)? {
@@ -17597,7 +17623,7 @@ where
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("failed to bind Axonyx Axum/Tokio server at {bind}"))?;
-    let runtime_config = state.runtime_config;
+    let runtime_config = state.runtime_config.clone();
     let tracker = TokioConnectionTracker::new(
         runtime_config.shutdown_grace,
         runtime_config.max_connections,
@@ -17647,7 +17673,7 @@ async fn axum_tokio_handler(
         );
     };
 
-    let runtime_config = state.dev.runtime_config;
+    let runtime_config = state.dev.runtime_config.clone();
     match axum_request_to_dev_request(
         request,
         runtime_config.max_body_bytes,
@@ -18600,6 +18626,14 @@ fn configured_server_bool(
     }
 }
 
+fn configured_public_origin(root: &Path) -> std::result::Result<Option<String>, String> {
+    match axonyx_config_value(root, "server", "public_origin") {
+        None => Ok(None),
+        Some(toml::Value::String(value)) if axonyx_runtime::mutation_security::valid_public_origin(&value) => Ok(Some(value)),
+        Some(_) => Err("[server].public_origin must be an http(s) origin without path, query or credentials (for example https://axonyx.dev).".to_string()),
+    }
+}
+
 fn configured_server_log_format(root: &Path) -> std::result::Result<AxServerLogFormat, String> {
     match axonyx_config_value(root, "server", "log_format") {
         Some(value) => parse_server_log_format_value(&value),
@@ -18902,18 +18936,27 @@ fn project_uses_database_runtime(root: &Path) -> Result<bool> {
     backend_source_refs_use_database(&source_refs)
 }
 
-fn reject_cross_site_mutation_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
+fn reject_cross_site_mutation_request(
+    request: &AxHttpRequest,
+    public_origin: Option<&str>,
+) -> Option<AxHttpResponse> {
     if matches!(
         request.method.to_ascii_uppercase().as_str(),
         "GET" | "HEAD" | "OPTIONS"
     ) {
         return None;
     }
-    reject_cross_site_action_request(request)
+    reject_cross_site_action_request(request, public_origin)
 }
 
-fn reject_cross_site_action_request(request: &AxHttpRequest) -> Option<AxHttpResponse> {
-    if axonyx_runtime::mutation_security::rejects_mutation_request(request) {
+fn reject_cross_site_action_request(
+    request: &AxHttpRequest,
+    public_origin: Option<&str>,
+) -> Option<AxHttpResponse> {
+    if axonyx_runtime::mutation_security::rejects_mutation_request_with_origin(
+        request,
+        public_origin,
+    ) {
         return Some(forbidden_action_response());
     }
     None
@@ -26065,6 +26108,7 @@ action ValidPost
                 import_sources: Vec::new(),
             }],
             CompiledProductionOptions {
+                public_origin: Some("https://axonyx.dev"),
                 database_runtime_defaults: "",
                 database_required: true,
                 validate_api_responses: false,
@@ -26120,6 +26164,7 @@ action ValidPost
             &[],
             &[],
             CompiledProductionOptions {
+                public_origin: None,
                 database_runtime_defaults: "",
                 database_required: false,
                 validate_api_responses: false,
@@ -29158,19 +29203,67 @@ action Logout() {
     }
 
     #[test]
+    fn public_origin_config_validates_before_build_and_controls_dev_mutations() {
+        let root = make_temp_dir("public-origin-config");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[server]\npublic_origin = \"https://axonyx.dev\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            AxServerRuntimeConfig::from_root(&root)
+                .unwrap()
+                .public_origin
+                .as_deref(),
+            Some("https://axonyx.dev")
+        );
+        fs::create_dir_all(root.join("routes/api")).unwrap();
+        fs::write(
+            root.join("routes/api/probe.ax"),
+            "route POST \"/api/probe\" {\n  return json(\"ok\")\n}\n",
+        )
+        .unwrap();
+        let mut state = test_dev_state(&root);
+        state.runtime_config = AxServerRuntimeConfig::from_root(&root).unwrap();
+        for (origin, expected) in [("https://axonyx.dev", 200), ("http://axonyx.dev", 403)] {
+            let request = AxHttpRequest::new("POST", "/api/probe")
+                .with_header("Host", "internal:3000")
+                .with_header("Origin", origin);
+            assert_eq!(
+                handle_http_request(&state, AxServerMode::Dev, request)
+                    .unwrap()
+                    .status,
+                expected
+            );
+        }
+        for invalid in [
+            "public_origin = 1",
+            "public_origin = \"https://axonyx.dev/path\"",
+        ] {
+            fs::write(root.join("Axonyx.toml"), format!("[server]\n{invalid}\n")).unwrap();
+            assert!(AxServerRuntimeConfig::from_root(&root).is_err());
+            assert!(check_axonyx_config(&root)
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "axonyx-config-public-origin"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn mutation_origin_guard_covers_api_methods_without_blocking_reads() {
         for method in ["POST", "PUT", "PATCH", "DELETE", "post"] {
             let request = AxHttpRequest::new(method, "/api/login")
                 .with_header("Host", "axonyx.dev")
                 .with_header("Origin", "https://attacker.example");
-            let response = reject_cross_site_mutation_request(&request).unwrap();
+            let response = reject_cross_site_mutation_request(&request, None).unwrap();
             assert_eq!(response.status, 403);
             assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
         }
         for method in ["GET", "HEAD", "OPTIONS"] {
             let request = AxHttpRequest::new(method, "/api/posts")
                 .with_header("Sec-Fetch-Site", "cross-site");
-            assert!(reject_cross_site_mutation_request(&request).is_none());
+            assert!(reject_cross_site_mutation_request(&request, None).is_none());
         }
     }
 
@@ -29181,7 +29274,7 @@ action Logout() {
             .with_header("Origin", "https://attacker.example")
             .with_header("Sec-Fetch-Site", "cross-site");
 
-        let response = reject_cross_site_action_request(&request)
+        let response = reject_cross_site_action_request(&request, None)
             .expect("cross-site browser action should be rejected");
         assert_eq!(response.status, 403);
     }
@@ -29192,10 +29285,10 @@ action Logout() {
             .with_header("Host", "axonyx.dev")
             .with_header("Origin", "https://axonyx.dev")
             .with_header("Sec-Fetch-Site", "same-origin");
-        assert!(reject_cross_site_action_request(&browser).is_none());
+        assert!(reject_cross_site_action_request(&browser, None).is_none());
 
         let cli = AxHttpRequest::new("POST", "/__axonyx/action?path=%2F&name=Save");
-        assert!(reject_cross_site_action_request(&cli).is_none());
+        assert!(reject_cross_site_action_request(&cli, None).is_none());
     }
 
     #[test]

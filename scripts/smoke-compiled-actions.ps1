@@ -279,6 +279,9 @@ route POST "/api/password-probe" {
 
   Push-Location $appRoot
   try {
+    $configPath = Join-Path $appRoot "Axonyx.toml"
+    $configSource = [System.IO.File]::ReadAllText($configPath).Replace('[server]', "[server]`npublic_origin = `"http://127.0.0.1:$Port`"")
+    [System.IO.File]::WriteAllText($configPath, $configSource)
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- check
     if ($LASTEXITCODE -ne 0) { throw "cargo ax check failed" }
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- build --clean --compiled
@@ -380,6 +383,7 @@ route POST "/api/password-probe" {
   if ($themeCookie.Headers["Set-Cookie"] -notmatch "theme=gold") { throw "Compiled action response did not emit its cookie" }
 
   $loginUrl = "$baseUrl/api/login"
+  Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://127.0.0.1:$Port" } -ExpectedStatus 403 | Out-Null
   Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://attacker.example"; "X-Forwarded-Host" = "attacker.example" } -ExpectedStatus 403 | Out-Null
   $crossSite = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers @{ Origin = "https://attacker.example" } -ExpectedStatus 403
   if ($crossSite.Headers["Set-Cookie"] -or $crossSite.Headers["Cache-Control"] -ne "no-store") {
@@ -451,7 +455,7 @@ route POST "/api/password-probe" {
   Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 403 | Out-Null
   $stillAuthenticated = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie }
   if (($stillAuthenticated.Body | ConvertFrom-Json).id -ne "user-42") { throw "Rejected logout changed the session" }
-  $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl } -ExpectedStatus 303
+  $logout = Invoke-AxRequest -Url $logoutUrl -Body "" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl; "X-Forwarded-Host" = "ignored.invalid" } -ExpectedStatus 303
   if ($logout.Headers["Set-Cookie"] -notmatch "Max-Age=0") {
     throw "Compiled logout did not clear the session cookie"
   }
