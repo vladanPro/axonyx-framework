@@ -253,8 +253,8 @@ route POST "/api/register" {
     email: String
     password: String
   before Login.throttle("register:" + input.email, 10, 60)
-  require input.email != "" else error("Invalid registration input")
-  require input.password != "" else error("Invalid registration input")
+  require Validate.email(input.email) else invalid({email: "Enter a valid email address."})
+  require Validate.password(input.password) else invalid({password: "Use at least 15 characters."})
   data userId = Uuid.new()
   data passwordHash = Password.hash(input.password)
   transaction {
@@ -404,6 +404,9 @@ route POST "/api/theme-guard" {
   if (!$ready) { throw "Compiled server did not become ready" }
 
   $addition = Invoke-AxRequest -Url "$baseUrl/api/addition-probe" -Body "count=42&ratio=0.5&enabled=true"
+  $invalidNumber = Invoke-AxRequest -Url "$baseUrl/api/addition-probe" -Body "count=secret-not-a-number&ratio=0.5&enabled=true" -ExpectedStatus 422
+  $invalidNumberPayload = $invalidNumber.Body | ConvertFrom-Json
+  if ($invalidNumberPayload.error -ne "invalid_input" -or !$invalidNumberPayload.fields.count -or $invalidNumber.Body.Contains("secret-not-a-number")) { throw "Numeric input failure was not safely classified" }
   $additionPayload = $addition.Body | ConvertFrom-Json
   if ($additionPayload.label -ne "Count: 42" -or $additionPayload.suffix -ne "42 items" -or $additionPayload.total -ne 42.5 -or $additionPayload.reverse -ne 42.5 -or $additionPayload.enabled -ne "enabled=true" -or $additionPayload.chained -ne "123" -or $additionPayload.grouped -ne "15") {
     throw "Compiled addition did not preserve scalar String and numeric semantics"
@@ -612,9 +615,15 @@ route POST "/api/theme-guard" {
   $registrationAnonCookie = ([string] $registrationProof.Headers["Set-Cookie"]).Split(';')[0]
   $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
   $registrationBody = "email=registered%40example.com&password=registration-proof-secret&role=admin&id=user-42"
-  foreach ($invalidBody in @("email=&password=registration-proof-secret", "email=invalid%40example.com&password=")) {
-    $invalidRegistration = Invoke-AxRequest -Url $registerUrl -Body $invalidBody -Headers $registrationHeaders -ExpectedStatus 401
-    if (($invalidRegistration.Body | ConvertFrom-Json).error -ne "Invalid registration input" -or $invalidRegistration.Headers["Set-Cookie"]) { throw "Registration guard failed or issued a session" }
+  foreach ($missingBody in @("password=registration-proof-secret", "email=invalid%40example.com")) {
+    $missingRegistration = Invoke-AxRequest -Url $registerUrl -Body $missingBody -Headers $registrationHeaders -ExpectedStatus 422
+    $missingPayload = $missingRegistration.Body | ConvertFrom-Json
+    if ($missingPayload.error -ne "invalid_input" -or !$missingPayload.fields -or $missingRegistration.Headers["Set-Cookie"]) { throw "Missing registration input was not safely rejected" }
+  }
+  foreach ($invalidBody in @("email=&password=registration-proof-secret", "email=invalid%40example.com&password=", "email=invalid%40example.com&password=short", "email=not-an-email&password=registration-proof-secret", ("email=invalid%40example.com&password=" + ('x' * 1025)))) {
+    $invalidRegistration = Invoke-AxRequest -Url $registerUrl -Body $invalidBody -Headers $registrationHeaders -ExpectedStatus 422
+    $invalidPayload = $invalidRegistration.Body | ConvertFrom-Json
+    if ($invalidPayload.error -ne "invalid_input" -or !$invalidPayload.fields -or $invalidRegistration.Headers["Set-Cookie"]) { throw "Registration guard failed or issued a session" }
   }
   $invalidCounts = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from users where email in (?, ?)", ("", "invalid@example.com")).fetchone()[0]);db.close()' $dbPath
   if ($LASTEXITCODE -ne 0 -or [int] $invalidCounts -ne 0) { throw "Invalid registration persisted an account" }

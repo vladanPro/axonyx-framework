@@ -13550,6 +13550,10 @@ fn handle_request_inner(
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
             Err(error) => {{
                 eprintln!("Axonyx compiled API error: {{error}}");
+                if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{
+                    return secure(AxHttpResponse::json(422, &error.public_error_payload())
+                        .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store());
+                }}
                 let conflict = matches!(&error, axonyx_runtime::backend::AxRuntimeError::Database {{ error }}
                     if error.code == "db.unique_violation" || error.code == "db.constraint_violation");
                 let status = if conflict {{ 409 }} else {{ 500 }};
@@ -13691,13 +13695,13 @@ fn handle_compiled_action(
             let body = json!({{
                 "ok": false,
                 "redirect": route,
-                "error": {{ "message": "Action failed.", "status": 500, "value": error.public_error_payload() }},
+                "error": {{ "message": "Action failed.", "status": if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{ 422 }} else {{ 500 }}, "value": if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{ error.public_error_payload() }} else {{ json!({{"error":"internal_server_error"}}) }} }},
                 "patches": [],
                 "invalidations": [],
                 "refreshes": [],
             }});
             match serde_json::to_vec(&body) {{
-                Ok(body) => AxHttpResponse::bytes(500, "application/ax-error+json; charset=utf-8", body).with_no_store(),
+                Ok(bytes) => AxHttpResponse::bytes(body.pointer("/error/status").and_then(Value::as_u64).unwrap_or(500) as u16, "application/ax-error+json; charset=utf-8", bytes).with_no_store(),
                 Err(_) => AxHttpResponse::text(500, "Internal Server Error").with_no_store(),
             }}
         }}
