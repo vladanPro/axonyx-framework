@@ -296,6 +296,13 @@ route POST "/api/password-probe" {
   return json("ok")
 }
 
+route POST "/api/password-hash-probe" {
+  data hash = Password.hash(request.form.password)
+  data verified = Password.verify(request.form.password, hash)
+  require verified
+  return json("ok")
+}
+
 route POST "/api/theme-guard" {
   input:
     theme: String
@@ -370,6 +377,13 @@ route POST "/api/theme-guard" {
     }
   }
   if (!$ready) { throw "Compiled server did not become ready" }
+
+  $hashProbe = Invoke-AxRequest -Url "$baseUrl/api/password-hash-probe" -Body "password=registration-secret"
+  if (($hashProbe.Body | ConvertFrom-Json) -ne "ok") { throw "Compiled password hash round trip failed" }
+  $hashFailure = Invoke-AxRequest -Url "$baseUrl/api/password-hash-probe" -Body "password=" -ExpectedStatus 500
+  if ($hashFailure.Body -match "registration-secret|argon2|password_hash") {
+    throw "Password hashing failure exposed secret material"
+  }
 
   # Test-only probe; real login must load the hash from server-owned storage.
   $badHash = Invoke-AxRequest -Url "$baseUrl/api/password-probe" -Body "password=example&hash=invalid-secret-hash" -ExpectedStatus 500
