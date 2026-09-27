@@ -123,7 +123,8 @@ page FormShell() {
 '@)
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/loaded/layout.asx"), @'
 page NestedFormShell() {
-  return ASX { <section id="nested-form-layout"><Slot /></section> }
+  data banner: String = loadFormBanner()
+  return ASX { <section id="nested-form-layout"><header>{banner}</header><Slot /></section> }
 }
 '@)
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/page.asx"), @'
@@ -162,6 +163,11 @@ query forbiddenPosts() {
   require false else forbidden()
   data posts = db.posts.all()
   return posts
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/loader.ax"), @'
+query loadFormBanner() -> String {
+  return "Loaded layout banner"
 }
 '@)
   [System.IO.File]::AppendAllText(
@@ -559,7 +565,7 @@ route GET "/api/forbidden-loader" {
       $encodedPath = [uri]::EscapeDataString($path)
       $renderedError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=$encodedPath&name=ValidateForm" -Body $body -Headers @{ Accept = "text/html" } -ExpectedStatus 422
       if ($renderedError.Body -notmatch "Form application header" -or ([regex]::Matches($renderedError.Body, 'aria-invalid="true"')).Count -ne 1 -or $renderedError.Headers["Cache-Control"] -ne "no-store") { throw "Compiled POST did not rerender original form" }
-      if ($path -eq "/forms/loaded" -and ($renderedError.Body -notmatch 'id="nested-form-layout"' -or $renderedError.Body -notmatch 'Original detail title')) { throw "Compiled POST lost nested layout or SQLite data" }
+      if ($path -eq "/forms/loaded" -and ($renderedError.Body -notmatch 'id="nested-form-layout"' -or $renderedError.Body -notmatch 'Original detail title' -or $renderedError.Body -notmatch 'Loaded layout banner')) { throw "Compiled POST lost nested layout loader or SQLite data" }
     }
   }
   $probeUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=GuardProbe"
