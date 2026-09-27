@@ -17821,8 +17821,19 @@ fn handle_http_request_inner(
     {
         return Ok(response);
     }
-    if let Some(response) = execute_backend_route_request(state, mode, &request)? {
-        return Ok(preview_response_to_http(response));
+    match execute_backend_route_request(state, mode, &request) {
+        Ok(Some(response)) => return Ok(preview_response_to_http(response)),
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(axonyx_runtime::PreviewError::InvalidInput { field }) =
+                error.downcast_ref::<axonyx_runtime::PreviewError>()
+            {
+                let payload =
+                    ax_backend_runtime::AxRuntimeError::invalid_input(field).public_error_payload();
+                return Ok(AxHttpResponse::json(422, &payload)?.with_no_store());
+            }
+            return Err(error);
+        }
     }
 
     if request.method != "GET" {
@@ -19189,10 +19200,11 @@ fn handle_action_request(
     let content_type = request.header_value("Content-Type").unwrap_or("");
     if !content_type.starts_with("application/x-www-form-urlencoded")
         && !content_type.starts_with("multipart/form-data")
+        && !content_type.starts_with("application/json")
     {
         return Ok(AxHttpResponse::text(
             415,
-            "expected application/x-www-form-urlencoded or multipart/form-data",
+            "expected application/x-www-form-urlencoded, multipart/form-data or application/json",
         )
         .with_no_store());
     }
@@ -19254,14 +19266,35 @@ fn handle_action_request(
             &state.storage_registry,
             &mut store,
         )
-    }
-    .with_context(|| {
-        format!(
-            "failed to execute action '{}' from '{}'",
-            action_name,
-            actions_path.display()
-        )
-    })?;
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(axonyx_runtime::PreviewError::InvalidInput { field }) => AxPreviewActionResult {
+            redirect_to: None,
+            value: axonyx_core::ax_lowering_prelude::AxValue::Null,
+            patches: Vec::new(),
+            invalidations: Vec::new(),
+            cookies: Vec::new(),
+            error: Some(axonyx_runtime::AxPreviewActionError::validation(
+                "Invalid input.",
+                axonyx_core::ax_lowering_prelude::AxValue::record([(
+                    "fields",
+                    axonyx_core::ax_lowering_prelude::AxValue::record([(
+                        field,
+                        axonyx_core::ax_lowering_prelude::AxValue::String(
+                            "Missing or invalid input.".to_string(),
+                        ),
+                    )]),
+                )]),
+            )),
+        },
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "failed to execute action '{action_name}' from '{}'",
+                actions_path.display()
+            )))
+        }
+    };
 
     if wants_action_patch_response(request, &input_fields) {
         return action_patch_response(&route, &result);
@@ -19483,8 +19516,7 @@ fn wants_action_patch_response(
         .get("__ax_patch")
         .is_some_and(|value| parse_boolish(value))
         || request
-            .headers
-            .get("accept")
+            .header_value("Accept")
             .is_some_and(|value| value.contains("application/ax-patch+json"))
 }
 
@@ -31431,6 +31463,72 @@ page Posts() {
         assert_eq!(dev_response.status, 500);
         assert_eq!(start_response.status, 200);
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn preview_input_errors_return_safe_422_for_api_bridge_and_native_forms() {
+        let root = make_temp_dir("preview-input-422");
+        fs::create_dir_all(root.join("routes/api")).unwrap();
+        fs::create_dir_all(root.join("app/input")).unwrap();
+        fs::write(
+            root.join("routes/api/count.ax"),
+            "route POST \"/api/count\" {\n  input:\n    count: Int\n  return json(input.count)\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/input/actions.ax"),
+            "action Save(count: Int) {\n  return input.count\n}\n",
+        )
+        .unwrap();
+        fs::write(root.join("app/input/page.asx"), "page Input() {\n  return ASX {\n    <form method=\"post\" action=\"/__axonyx/action?path=%2Finput&name=Save\"><input name=\"count\" /><span data-ax-field-error=\"count\"></span></form>\n  }\n}\n").unwrap();
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            for body in [
+                r#"{}"#,
+                r#"{"count":"PRIVATE_BAD_VALUE"}"#,
+                r#"{"count":[]}"#,
+                "not-json",
+            ] {
+                let request = AxHttpRequest::new("POST", "/api/count")
+                    .with_header("Content-Type", "application/json")
+                    .with_body(body.as_bytes().to_vec());
+                let response = handle_http_request(&state, mode, request).unwrap();
+                assert_eq!(response.status, 422);
+                assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&response.body.into_bytes()).unwrap();
+                assert_eq!(payload["error"], "invalid_input");
+                assert_eq!(payload["fields"]["count"], "Missing or invalid input.");
+                assert!(!payload.to_string().contains("PRIVATE_BAD_VALUE"));
+            }
+            for accept in ["application/ax-patch+json", "text/html"] {
+                for body in ["", "count=PRIVATE_BAD_VALUE"] {
+                    let request =
+                        AxHttpRequest::new("POST", "/__axonyx/action?path=%2Finput&name=Save")
+                            .with_header("Content-Type", "application/x-www-form-urlencoded")
+                            .with_header("Accept", accept)
+                            .with_body(body.as_bytes().to_vec());
+                    let response = handle_http_request(&state, mode, request).unwrap();
+                    assert_eq!(response.status, 422);
+                    let body = String::from_utf8(response.body.into_bytes()).unwrap();
+                    assert!(body.contains("Missing or invalid input."));
+                    assert!(!body.contains("PRIVATE_BAD_VALUE"));
+                    if accept == "text/html" {
+                        assert!(body.contains("aria-invalid=\"true\""));
+                    }
+                }
+            }
+            let request = AxHttpRequest::new("POST", "/__axonyx/action?path=%2Finput&name=Save")
+                .with_header("Content-Type", "application/json")
+                .with_header("Accept", "application/ax-patch+json")
+                .with_body(br#"{"count":42}"#.to_vec());
+            let response = handle_http_request(&state, mode, request).unwrap();
+            assert_eq!(response.status, 200);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&response.body.into_bytes()).unwrap();
+            assert_eq!(payload["value"], 42);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
