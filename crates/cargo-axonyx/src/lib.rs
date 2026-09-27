@@ -19267,11 +19267,72 @@ fn handle_action_request(
         return action_patch_response(&route, &result);
     }
 
+    if let Some(error) = &result.error {
+        if error.status == 422 && axonyx_runtime::validation::wants_html_error(request) {
+            let value = ax_value_to_json(&error.value);
+            if let Some(fields) = value.get("fields") {
+                let response = render_native_action_validation(
+                    state,
+                    mode,
+                    request,
+                    &route,
+                    &action_name,
+                    fields,
+                )?;
+                return Ok(with_action_cookies(response, &result));
+            }
+        }
+        return action_error_response(&route, error)
+            .map(|response| with_action_cookies(response, &result));
+    }
+
     let redirect_to = result.redirect_to.clone().unwrap_or(route.request_path);
     Ok(with_action_cookies(
         redirect_response(303, &redirect_to),
         &result,
     ))
+}
+
+fn render_native_action_validation(
+    state: &DevServerState,
+    mode: AxServerMode,
+    request: &AxHttpRequest,
+    route: &ResolvedRoute,
+    action: &str,
+    fields: &serde_json::Value,
+) -> Result<AxHttpResponse> {
+    let Some(form) =
+        axonyx_runtime::form_result::AxFormResult::validation(action, &route.request_path, fields)
+    else {
+        return Ok(axonyx_runtime::validation::html_error_response(
+            fields,
+            &route.request_path,
+        ));
+    };
+    let read = axonyx_runtime::form_result::page_read_request(request, &route.request_target);
+    match render_route_html_with_form_result(
+        state,
+        route,
+        mode == AxServerMode::Start,
+        Some(&read),
+        Some(&form),
+    ) {
+        Ok(html) => {
+            let html = if mode.inject_dev_client() {
+                inject_dev_client(&html, &route.request_path)
+            } else {
+                html
+            };
+            Ok(AxHttpResponse::html(422, html).with_no_store())
+        }
+        Err(error) => render_error_response(
+            state,
+            &route.request_target,
+            &error,
+            mode.inject_dev_client(),
+            false,
+        ),
+    }
 }
 
 fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
@@ -20448,6 +20509,16 @@ fn render_route_html_with_request(
     use_database_runtime: bool,
     request: Option<&AxHttpRequest>,
 ) -> Result<String> {
+    render_route_html_with_form_result(state, route, use_database_runtime, request, None)
+}
+
+fn render_route_html_with_form_result(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    use_database_runtime: bool,
+    request: Option<&AxHttpRequest>,
+    form: Option<&axonyx_runtime::form_result::AxFormResult>,
+) -> Result<String> {
     let page_source = fs::read_to_string(&route.page_path)
         .with_context(|| format!("failed to read '{}'", route.page_path.display()))?;
     let layout_sources = route
@@ -20492,17 +20563,32 @@ fn render_route_html_with_request(
         let runtime = ax_backend_runtime::runtime_from_env(env)
             .with_context(|| "failed to initialize page database runtime from environment")?;
         if let Some(request) = request {
-            axonyx_runtime::preview_ax_route_with_http_request_and_runtime_and_imports(
-                &layout_refs,
-                &loader_refs,
-                &action_refs,
-                &page_source,
-                request,
-                &route.params,
-                &runtime,
-                &store,
-                &import_resolver,
-            )
+            if let Some(form) = form {
+                axonyx_runtime::preview_ax_route_with_form_result_and_imports(
+                    &layout_refs,
+                    &loader_refs,
+                    &action_refs,
+                    &page_source,
+                    request,
+                    &route.params,
+                    Some(&runtime),
+                    form,
+                    &store,
+                    &import_resolver,
+                )
+            } else {
+                axonyx_runtime::preview_ax_route_with_http_request_and_runtime_and_imports(
+                    &layout_refs,
+                    &loader_refs,
+                    &action_refs,
+                    &page_source,
+                    request,
+                    &route.params,
+                    &runtime,
+                    &store,
+                    &import_resolver,
+                )
+            }
         } else {
             preview_ax_route_with_request_context_and_runtime_and_imports(
                 &layout_refs,
@@ -20516,6 +20602,19 @@ fn render_route_html_with_request(
                 &import_resolver,
             )
         }
+    } else if let (Some(request), Some(form)) = (request, form) {
+        axonyx_runtime::preview_ax_route_with_form_result_and_imports(
+            &layout_refs,
+            &loader_refs,
+            &action_refs,
+            &page_source,
+            request,
+            &route.params,
+            None,
+            form,
+            &store,
+            &import_resolver,
+        )
     } else {
         preview_ax_route_with_request_context_and_imports(
             &layout_refs,
@@ -31382,7 +31481,62 @@ page Posts() {
                 assert!(body.contains("private content"));
             }
         }
+        connection
+            .execute_batch("CREATE TABLE audit (event TEXT);")
+            .unwrap();
+        fs::write(root.join("app/private/child/loader.ax"), "query loadSecret() {\n  return \"private content\"\n}\nquery loadAudit() {\n  return db.audit.all()\n}\n").unwrap();
+        fs::write(root.join("app/private/child/actions.ax"), "action Validate(email: String, password: String) {\n  require Auth.subject else forbidden()\n  db.audit.insert({ event: \"once\" })\n  require Validate.email(input.email) else invalid({ email: \"Enter a valid email.\" })\n  return ok()\n}\n").unwrap();
+        fs::write(root.join("app/private/child/page.asx"), r#"page Child() {
+  data secret = loadSecret()
+  data audit = loadAudit()
+  return ASX {
+    <p>{secret}</p>
+    <Each items={audit} as="entry"><li>{entry.event}</li></Each>
+    <form id="matching" method="post" action="/__axonyx/action?path=%2Fprivate%2Fchild&name=Validate"><input name="email" /><input name="password" /><span data-ax-field-error="email"></span></form>
+    <form id="other" method="post" action="/__axonyx/action?path=%2Fprivate%2Fchild&name=Other"><input name="email" /><span data-ax-field-error="email"></span></form>
+  }
+}"#).unwrap();
+        let native = || {
+            AxHttpRequest::new(
+                "POST",
+                "/__axonyx/action?path=%2Fprivate%2Fchild&name=Validate",
+            )
+            .with_header("Content-Type", "application/x-www-form-urlencoded")
+            .with_header("Accept", "text/html")
+            .with_header("Cookie", format!("{}={}", cookie.name, cookie.value))
+            .with_body(b"email=bad&password=DO_NOT_ECHO_SECRET&subject=attacker".to_vec())
+        };
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let before: i64 = connection
+                .query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+                .unwrap();
+            let response = handle_action_request(&state, mode, &native()).unwrap();
+            assert_eq!(response.status, 422);
+            assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+            let body = String::from_utf8(response.body.into_bytes()).unwrap();
+            assert!(body.contains("private content"));
+            assert!(body.contains("trusted-user"));
+            assert!(body.contains("Enter a valid email."));
+            assert_eq!(
+                body.matches("<li>once</li>").count() as i64,
+                before + 1,
+                "rerender must use fresh loader values"
+            );
+            assert_eq!(body.matches("aria-invalid=\"true\"").count(), 1);
+            assert!(!body.contains("DO_NOT_ECHO_SECRET"));
+            let after: i64 = connection
+                .query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, before + 1, "rerender must not redispatch the action");
+        }
         connection.execute("DELETE FROM permissions", []).unwrap();
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let response = handle_action_request(&state, mode, &native()).unwrap();
+            assert_eq!(response.status, 403);
+            let body = String::from_utf8(response.body.into_bytes()).unwrap();
+            assert!(!body.contains("private content"));
+            assert!(!body.contains("DO_NOT_ECHO_SECRET"));
+        }
         for mode in [AxServerMode::Dev, AxServerMode::Start] {
             for target in [
                 "/private/child",
