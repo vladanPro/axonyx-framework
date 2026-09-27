@@ -240,6 +240,23 @@ query resolveCredential(email: String) -> Credential? {
   return db.credentials.where({ email: input.email }).first()
 }
 
+route POST "/api/register" {
+  input:
+    email: String
+    password: String
+  before Login.throttle(input.email, 10, 60)
+  require input.email != "" else error("Invalid registration input")
+  require input.password != "" else error("Invalid registration input")
+  data userId = Uuid.new()
+  data passwordHash = Password.hash(input.password)
+  transaction {
+    db.users.insert({ id: userId, email: input.email, role: "member" })
+    db.credentials.insert({ user_id: userId, email: input.email, password_hash: passwordHash })
+  }
+  Session.create(userId, {})
+  return json("ok")
+}
+
 route POST "/api/login" {
   input:
     email: String
@@ -573,6 +590,72 @@ route POST "/api/theme-guard" {
   Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 303 | Out-Null
   $expiredToken = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl }
   if (($expiredToken.Body | ConvertFrom-Json).token -eq $csrfToken) { throw "Revoked session still issued its previous CSRF proof" }
+
+  # Registration is an app-owned proof, not a public account-management service.
+  $registerUrl = "$baseUrl/api/register"
+  $registrationProof = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Origin = $baseUrl }
+  $registrationToken = ($registrationProof.Body | ConvertFrom-Json).token
+  $registrationAnonCookie = ([string] $registrationProof.Headers["Set-Cookie"]).Split(';')[0]
+  $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
+  $registrationBody = "email=registered%40example.com&password=registration-proof-secret&role=admin&id=user-42"
+  Invoke-AxRequest -Url $registerUrl -Body $registrationBody -Headers @{ Origin = $baseUrl } -ExpectedStatus 403 | Out-Null
+  $registered = Invoke-AxRequest -Url $registerUrl -Body $registrationBody -Headers $registrationHeaders
+  if (($registered.Body | ConvertFrom-Json) -ne "ok" -or $registered.Body -match "password|argon2|registration-proof-secret") { throw "Registration leaked credential data" }
+  if ($registered.Headers["Set-Cookie"] -notmatch "HttpOnly") { throw "Registration did not issue a private session" }
+  $registeredCookie = ([string] $registered.Headers["Set-Cookie"]).Split(';')[0]
+  $registeredAccount = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $registeredCookie }
+  $registeredUser = $registeredAccount.Body | ConvertFrom-Json
+  $parsedId = [guid]::Empty
+  if (![guid]::TryParse($registeredUser.id, [ref] $parsedId) -or $registeredUser.id -eq "user-42" -or $registeredUser.role -ne "member" -or $registeredUser.email -ne "registered@example.com") { throw "Registration trusted caller identity/role or failed to persist account" }
+  if ($registeredAccount.Body -match "password|argon2|registration-proof-secret") { throw "Public account response leaked credentials" }
+  $credentialState = & $python.Source -c 'import sqlite3,sys,json;db=sqlite3.connect(sys.argv[1]);row=db.execute("select user_id,password_hash from credentials where email = ?", ("registered@example.com",)).fetchone();print(json.dumps({"id":row[0],"argon2":row[1].startswith("$argon2id$"),"plaintext":row[1]=="registration-proof-secret"}));db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "Registration credential inspection failed" }
+  $credentialState = $credentialState | ConvertFrom-Json
+  if ($credentialState.id -ne $registeredUser.id -or !$credentialState.argon2 -or $credentialState.plaintext) { throw "Registration did not persist a private password hash" }
+  $duplicate = Invoke-AxRequest -Url $registerUrl -Body $registrationBody -Headers $registrationHeaders -ExpectedStatus 500
+  if ($duplicate.Headers["Set-Cookie"] -or $duplicate.Body -match "argon2|registration-proof-secret|UNIQUE|credentials") { throw "Failed registration leaked internals or created a session" }
+  $registrationCounts = & $python.Source -c 'import sqlite3,sys,json;db=sqlite3.connect(sys.argv[1]);print(json.dumps([db.execute("select count(*) from users where email = ?", ("registered@example.com",)).fetchone()[0],db.execute("select count(*) from credentials where email = ?", ("registered@example.com",)).fetchone()[0]]));db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or $registrationCounts -ne "[1, 1]") { throw "Failed credential insert left a partial or duplicate user" }
+  $registeredCsrf = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $registeredCookie; Origin = $baseUrl }
+  $registeredToken = ($registeredCsrf.Body | ConvertFrom-Json).token
+  Invoke-AxRequest -Url $refreshUrl -Body "__ax_csrf=$registeredToken" -Headers @{ Cookie = $registeredCookie; Origin = $baseUrl; Accept = "text/html" } -ExpectedStatus 303 | Out-Null
+  Invoke-AxRequest -Url $logoutUrl -Body "__ax_csrf=$registeredToken" -Headers @{ Cookie = $registeredCookie; Origin = $baseUrl; Accept = "text/html" } -ExpectedStatus 303 | Out-Null
+  Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $registeredCookie } -ExpectedStatus 303 | Out-Null
+  $registeredLogin = Invoke-AxRequest -Url $loginUrl -Body "email=registered%40example.com&password=registration-proof-secret" -Headers $registrationHeaders
+  $registeredLoginCookie = ([string] $registeredLogin.Headers["Set-Cookie"]).Split(';')[0]
+  $reloadedAccount = Invoke-AxRequest -Url "$baseUrl/api/account" -Method "GET" -Headers @{ Cookie = $registeredLoginCookie }
+  if (($reloadedAccount.Body | ConvertFrom-Json).id -ne $registeredUser.id) { throw "Login did not verify the registered credential" }
+
+  $raceHandler = [System.Net.Http.HttpClientHandler]::new()
+  $raceHandler.AllowAutoRedirect = $false
+  $raceHandler.UseCookies = $false
+  $raceClient = [System.Net.Http.HttpClient]::new($raceHandler)
+  $raceRequests = @()
+  $raceResponses = @()
+  try {
+    $raceTasks = foreach ($attempt in 1..2) {
+      $raceRequest = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, $registerUrl)
+      $raceRequest.Content = [System.Net.Http.StringContent]::new("email=race%40example.com&password=concurrent-registration-secret", [System.Text.Encoding]::UTF8, "application/x-www-form-urlencoded")
+      foreach ($key in $registrationHeaders.Keys) { $raceRequest.Headers.Add($key, [string] $registrationHeaders[$key]) }
+      $raceRequests += $raceRequest
+      $raceClient.SendAsync($raceRequest)
+    }
+    $raceStatuses = foreach ($task in $raceTasks) {
+      $raceResponse = $task.GetAwaiter().GetResult()
+      $raceResponses += $raceResponse
+      $raceBody = $raceResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+      if ($raceBody -match "concurrent-registration-secret|argon2|UNIQUE|credentials") { throw "Concurrent registration leaked credential internals" }
+      [int] $raceResponse.StatusCode
+    }
+    if ((($raceStatuses | Sort-Object) -join ',') -ne '200,500') { throw "Concurrent duplicate registration did not yield exactly one successful account: $raceStatuses" }
+  } finally {
+    foreach ($response in $raceResponses) { $response.Dispose() }
+    foreach ($request in $raceRequests) { $request.Dispose() }
+    $raceClient.Dispose()
+    $raceHandler.Dispose()
+  }
+  $raceCounts = & $python.Source -c 'import sqlite3,sys,json;db=sqlite3.connect(sys.argv[1]);print(json.dumps([db.execute("select count(*) from users where email = ?", ("race@example.com",)).fetchone()[0],db.execute("select count(*) from credentials where email = ?", ("race@example.com",)).fetchone()[0]]));db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or $raceCounts -ne "[1, 1]") { throw "Concurrent registration left a partial or duplicate account" }
 
   $data = Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fposts&name=posts" -Method "GET" -Headers @{ Accept = "application/ax-data+json" }
   if ($data.Headers["Content-Type"] -notmatch "application/ax-data\+json") { throw "Missing compiled data content type" }
