@@ -437,6 +437,11 @@ route POST "/api/theme-guard" {
   }
 
   $actionUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=SetTheme"
+  foreach ($body in @("email=invalid&__ax_patch=true", "__ax_patch=true")) {
+    $formError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ValidateForm" -Body $body -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
+    $formResult = ($formError.Body | ConvertFrom-Json).form
+    if ($formResult.version -ne 1 -or $formResult.action -ne "ValidateForm" -or $formResult.route -ne "/posts" -or $formResult.status -ne 422 -or !$formResult.fields.email) { throw "Request-local form result contract failed" }
+  }
   foreach ($body in @("email=invalid", "")) {
     $nativeError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ValidateForm" -Body $body -Headers @{ Accept = "text/html" } -ExpectedStatus 422
     if ($nativeError.Headers["Content-Type"] -notmatch "text/html" -or $nativeError.Body -notmatch 'Return to the form' -or $nativeError.Body -notmatch 'href="/posts"' -or $nativeError.Headers["Cache-Control"] -ne "no-store") { throw "Native form validation fallback failed" }

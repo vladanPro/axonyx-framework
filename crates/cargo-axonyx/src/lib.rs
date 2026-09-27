@@ -13664,6 +13664,15 @@ fn handle_compiled_action(
             }}
             normalize_action_payload(&route, &mut payload);
             let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
+            if !ok && payload.pointer("/error/status").and_then(Value::as_u64) == Some(422) {{
+                let result = axonyx_runtime::form_result::AxFormResult::validation(&name, &route,
+                    payload.pointer("/error/value/fields").unwrap_or(&Value::Null));
+                if let Some(result) = result {{
+                    if let Value::Object(fields) = &mut payload {{
+                        fields.insert("form".into(), json!(result));
+                    }}
+                }}
+            }}
             if !ok && payload.pointer("/error/status").and_then(Value::as_u64) == Some(422)
                 && axonyx_runtime::validation::wants_html_error(request) {{
                 return with_action_cookies(axonyx_runtime::validation::html_error_response(
@@ -13710,6 +13719,14 @@ fn handle_compiled_action(
                 "invalidations": [],
                 "refreshes": [],
             }});
+            let mut body = body;
+            if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{
+                let result = axonyx_runtime::form_result::AxFormResult::validation(&name, &route,
+                    body.pointer("/error/value/fields").unwrap_or(&Value::Null));
+                if let Some(result) = result {{
+                    if let Value::Object(fields) = &mut body {{ fields.insert("form".into(), json!(result)); }}
+                }}
+            }}
             match serde_json::to_vec(&body) {{
                 Ok(bytes) => AxHttpResponse::bytes(body.pointer("/error/status").and_then(Value::as_u64).unwrap_or(500) as u16, "application/ax-error+json; charset=utf-8", bytes).with_no_store(),
                 Err(_) => AxHttpResponse::text(500, "Internal Server Error").with_no_store(),
