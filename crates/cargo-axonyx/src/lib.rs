@@ -1292,6 +1292,7 @@ struct CompiledDataBinding {
 struct CompiledPageRenderer {
     route_pattern: String,
     document_json: String,
+    full_document_json: String,
     import_sources: Vec<(String, String)>,
 }
 
@@ -13244,10 +13245,6 @@ fn compiled_page_renderers(
             .iter()
             .filter(|binding| binding.route_pattern == route.route)
             .count();
-        if route_bindings == 0 {
-            continue;
-        }
-
         let page_path = root.join(&route.file);
         let source = fs::read_to_string(&page_path)
             .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
@@ -13257,13 +13254,30 @@ fn compiled_page_renderers(
             continue;
         }
 
+        let layout_sources = route
+            .layouts
+            .iter()
+            .map(|path| {
+                fs::read_to_string(root.join(path))
+                    .with_context(|| format!("failed to read layout '{path}'"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let layout_refs = layout_sources
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let full_document = axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+
         let mut import_sources = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         collect_compiled_import_sources(root, &document, &mut seen, &mut import_sources)?;
+        collect_compiled_import_sources(root, &full_document, &mut seen, &mut import_sources)?;
         renderers.push(CompiledPageRenderer {
             route_pattern: route.route,
             document_json: serde_json::to_string(&document)
                 .context("failed to serialize compiled page AST")?,
+            full_document_json: serde_json::to_string(&full_document)
+                .context("failed to serialize complete compiled document AST")?,
             import_sources,
         });
     }
@@ -13448,6 +13462,10 @@ fn compiled_production_source(
             )
         })
         .collect::<String>();
+    let page_document_renderer_arms = page_renderers.iter().map(|renderer| {
+        let imports = renderer.import_sources.iter().map(|(source, contents)| format!("({source:?}, {contents:?})")).collect::<Vec<_>>().join(", ");
+        format!("    if route_pattern_matches({pattern:?}, path) {{ return Some(({pattern:?}, {document:?}, &[{imports}])); }}\n", pattern = renderer.route_pattern, document = renderer.full_document_json)
+    }).collect::<String>();
     format!(
         r#"use std::collections::BTreeMap;
 use std::path::{{Component, Path, PathBuf}};
@@ -13853,6 +13871,10 @@ fn compiled_route_param(pattern: &str, path: &str, name: &str) -> Result<Value, 
 
 fn compiled_page_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
 {page_renderer_arms}    None
+}}
+
+pub fn compiled_page_document_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
+{page_document_renderer_arms}    None
 }}
 
 fn compiled_refreshes(route: &str, invalidations: &[Value]) -> Vec<Value> {{
@@ -26295,6 +26317,7 @@ action ValidPost
             &[CompiledPageRenderer {
                 route_pattern: "/posts".to_string(),
                 document_json: "{\"page\":\"posts\"}".to_string(),
+                full_document_json: "{\"page\":\"posts\"}".to_string(),
                 import_sources: Vec::new(),
             }],
             CompiledProductionOptions {
@@ -26375,6 +26398,48 @@ action ValidPost
         assert!(source.contains("\"media\", PathBuf::from(\"storage/media\")"));
         assert!(source.contains("2097152, AxStorageAccess::Write"));
         assert!(!source.contains("AxUnavailableFileStorage"));
+    }
+
+    #[test]
+    fn compiled_static_page_plan_contains_complete_nested_layout_document() {
+        let root = make_temp_dir("compiled-static-document");
+        fs::create_dir_all(root.join("app/register")).unwrap();
+        fs::write(
+            root.join("app/layout.asx"),
+            "page Shell\n<header>Application header</header>\n<Slot />",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/register/layout.asx"),
+            "page Section\n<section id=\"registration\"><Slot /></section>",
+        )
+        .unwrap();
+        fs::write(root.join("app/register/page.asx"), "page Register\n<form method=\"post\" action=\"/__axonyx/action?name=Register&path=%2Fregister\"><input name=\"email\" /><span data-ax-field-error=\"email\"></span></form>").unwrap();
+        let renderers = compiled_page_renderers(&root, &[]).unwrap();
+        let renderer = renderers
+            .iter()
+            .find(|item| item.route_pattern == "/register")
+            .unwrap();
+        let result = axonyx_runtime::form_result::AxFormResult::validation(
+            "Register",
+            "/register",
+            &serde_json::json!({"email":"Invalid email."}),
+        )
+        .unwrap();
+        let html = axonyx_runtime::render_compiled_page_document(
+            &renderer.full_document_json,
+            &[],
+            "/register",
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            Some(&result),
+        )
+        .unwrap();
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Application header"));
+        assert!(html.contains("id=\"registration\""));
+        assert!(html.contains("Invalid email."));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
