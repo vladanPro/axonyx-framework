@@ -13643,12 +13643,17 @@ fn handle_request(
     storage: &impl AxFileStorage,
     request: AxHttpRequest,
 ) -> AxHttpResponse {{
+    let started = std::time::Instant::now();
     let response = handle_request_inner(dist, runtime, storage, request.clone());
-    if SESSIONS_REQUIRED {{
-        return secure(axonyx_runtime::csrf_http::protect_form_response(runtime, &request, response)
-            .unwrap_or_else(|_| AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()));
-    }}
-    response
+    let response = if SESSIONS_REQUIRED {{
+        secure(axonyx_runtime::csrf_http::protect_form_response(runtime, &request, response)
+            .unwrap_or_else(|_| AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()))
+    }} else {{ response }};
+    let metric = format!("axonyx;dur={{:.3}}", started.elapsed().as_secs_f64() * 1000.0);
+    let timing = response.header_value("Server-Timing")
+        .map(|existing| format!("{{existing}}, {{metric}}"))
+        .unwrap_or(metric);
+    response.with_header("Server-Timing", timing)
 }}
 
 fn handle_request_inner(
@@ -26741,6 +26746,9 @@ action ValidPost
         assert!(source.contains("backend::dispatch_action"));
         assert!(source.contains("backend::dispatch_loader"));
         assert!(source.contains("serve_compiled_axum"));
+        assert!(source.contains("let started = std::time::Instant::now()"));
+        assert!(source.contains("response.header_value(\"Server-Timing\")"));
+        assert!(source.contains("response.with_header(\"Server-Timing\", timing)"));
         assert!(source.contains("Component::Normal"));
         assert!(source.contains("application/ax-patch+json"));
         assert!(source.contains("application/ax-data+json"));
