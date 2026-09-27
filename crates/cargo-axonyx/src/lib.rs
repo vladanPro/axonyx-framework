@@ -13266,7 +13266,64 @@ fn compiled_page_renderers(
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let full_document = axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+        let mut full_document =
+            axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+        let uses_ui = layout_refs
+            .iter()
+            .any(|source| source_uses_package(source, "@axonyx/ui"))
+            || source_uses_package(&source, "@axonyx/ui");
+        if uses_ui && resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME).is_some() {
+            let (css, js) = axonyx_ui_asset_hrefs(root);
+            full_document.head.links.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("rel", "stylesheet")
+                    .attr("href", css),
+            );
+            full_document.head.scripts.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("src", js)
+                    .attr("defer", "true"),
+            );
+        }
+        let mut visited = std::collections::BTreeSet::new();
+        let mut scripts = std::collections::BTreeSet::new();
+        for path in route
+            .layouts
+            .iter()
+            .map(|path| root.join(path))
+            .chain(std::iter::once(page_path.clone()))
+        {
+            collect_component_client_script_hrefs(root, &path, &mut visited, &mut scripts)?;
+        }
+        for script in scripts {
+            full_document.head.scripts.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("src", script)
+                    .attr("defer", "true"),
+            );
+        }
+        if let Some(theme) = axonyx_config_table(root, "theme") {
+            if full_document.head.theme.is_none() {
+                if let Some(active) = theme
+                    .get("active")
+                    .and_then(toml::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    full_document.head.theme = Some(active.trim().into());
+                }
+            }
+            if let Some(css) = theme
+                .get("stylesheet")
+                .and_then(toml::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                full_document.head.links.push(
+                    axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                        .attr("rel", "stylesheet")
+                        .attr("href", css.trim()),
+                );
+            }
+        }
 
         let mut import_sources = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -13568,6 +13625,10 @@ fn handle_request_inner(
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
             Err(error) => {{
                 eprintln!("Axonyx compiled API error: {{error}}");
+                if let Some(status) = error.access_denial_status() {{
+                    return secure(AxHttpResponse::json(status, &error.public_error_payload())
+                        .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store());
+                }}
                 if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{
                     return secure(AxHttpResponse::json(422, &error.public_error_payload())
                         .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store());
@@ -13585,6 +13646,17 @@ fn handle_request_inner(
 
     if !request.method.eq_ignore_ascii_case("GET") && !request.method.eq_ignore_ascii_case("HEAD") {{
         return secure(AxHttpResponse::text(405, "Method Not Allowed"));
+    }}
+    let path = request.target.split('?').next().unwrap_or("/");
+    match render_compiled_route_document(runtime, &request, path, None) {{
+        Ok(Some(html)) => {{
+            let mut response = AxHttpResponse::html(200, html).with_no_store();
+            if request.method.eq_ignore_ascii_case("HEAD") {{ response.body = AxBody::fixed(Vec::new()); }}
+            return secure(response);
+        }},
+        Ok(None) => {{}},
+        Err(error) => return secure(AxHttpResponse::text(error.access_denial_status().unwrap_or(500),
+            if error.access_denial_status().is_some() {{ "Access denied." }} else {{ "Page could not be rendered." }}).with_no_store()),
     }}
     let mut response = static_response(dist, &request.target)
         .unwrap_or_else(|| AxHttpResponse::text(404, "Not Found"));
@@ -13693,8 +13765,8 @@ fn handle_compiled_action(
             }}
             if !ok && payload.pointer("/error/status").and_then(Value::as_u64) == Some(422)
                 && axonyx_runtime::validation::wants_html_error(request) {{
-                return with_action_cookies(axonyx_runtime::validation::html_error_response(
-                    payload.pointer("/error/value/fields").unwrap_or(&Value::Null), &route), output.cookies);
+                return with_action_cookies(render_native_form_error(runtime, request, &name, &route,
+                    payload.pointer("/error/value/fields").unwrap_or(&Value::Null)), output.cookies);
             }}
             let response = if wants_action_patch_response(request) || !ok {{
                 let status = if ok {{
@@ -13724,10 +13796,14 @@ fn handle_compiled_action(
         Ok(None) => AxHttpResponse::text(404, "action not found").with_no_store(),
         Err(error) => {{
             eprintln!("Axonyx compiled action error: {{error}}");
+            if let Some(status) = error.access_denial_status() {{
+                return AxHttpResponse::json(status, &error.public_error_payload())
+                    .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store();
+            }}
             if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }})
                 && axonyx_runtime::validation::wants_html_error(request) {{
                 let payload = error.public_error_payload();
-                return axonyx_runtime::validation::html_error_response(payload.get("fields").unwrap_or(&Value::Null), &route);
+                return render_native_form_error(runtime, request, &name, &route, payload.get("fields").unwrap_or(&Value::Null));
             }}
             let body = json!({{
                 "ok": false,
@@ -13751,6 +13827,49 @@ fn handle_compiled_action(
             }}
         }}
     }}
+}}
+
+fn render_compiled_route_document(
+    runtime: &impl AxBackendRuntime,
+    request: &AxHttpRequest,
+    path: &str,
+    form: Option<&axonyx_runtime::form_result::AxFormResult>,
+) -> Result<Option<String>, axonyx_runtime::backend::AxRuntimeError> {{
+    let Some((pattern, document, imports)) = compiled_page_document_renderer(path) else {{ return Ok(None); }};
+    let params = route_params(pattern, path).ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page route mismatch"))?;
+    let mut read_request = axonyx_runtime::form_result::page_read_request(request, path);
+    if form.is_none() {{ read_request.target = request.target.clone(); }}
+    let mut values = BTreeMap::new();
+    for binding in compiled_route_bindings(path) {{
+        let args = compiled_binding_args(&binding, path)?;
+        let value = backend::dispatch_loader(runtime, binding.loader, binding.pattern, &read_request, &args)?
+            .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page loader missing"))?;
+        values.insert(compiled_loader_call_key(binding.loader, &args), value);
+    }}
+    axonyx_runtime::render_compiled_page_document(document, imports, &read_request.target, &params, &values, form)
+        .map(Some).map_err(|_| axonyx_runtime::backend::AxRuntimeError::message("compiled document render failed"))
+}}
+
+fn render_native_form_error(
+    runtime: &impl AxBackendRuntime,
+    request: &AxHttpRequest,
+    name: &str,
+    route: &str,
+    fields: &Value,
+) -> AxHttpResponse {{
+    if let Some(result) = axonyx_runtime::form_result::AxFormResult::validation(name, route, fields) {{
+        match render_compiled_route_document(runtime, request, route, Some(&result)) {{
+            Ok(Some(html)) => return AxHttpResponse::html(422, html).with_no_store(),
+            Ok(None) => {{}},
+            Err(error) => {{
+                if let Some(status) = error.access_denial_status() {{
+                    return AxHttpResponse::text(status, "Access denied.").with_no_store();
+                }}
+                eprintln!("Axonyx form document render failed; using safe fallback");
+            }},
+        }}
+    }}
+    axonyx_runtime::validation::html_error_response(fields, route)
 }}
 
 fn with_action_cookies(
@@ -13846,6 +13965,10 @@ fn handle_compiled_data(
         }},
         Err(error) => {{
             eprintln!("Axonyx compiled data error: {{error}}");
+            if let Some(status) = error.access_denial_status() {{
+                return AxHttpResponse::json(status, &error.public_error_payload())
+                    .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store();
+            }}
             AxHttpResponse::text(500, "Internal Server Error").with_no_store()
         }}
     }}
@@ -14061,6 +14184,29 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
     }
 }
 
+fn route_requires_session_render(root: &Path, route: &ResolvedRoute) -> Result<bool> {
+    for source in collect_route_loader_source_strings(root, route.loader_path.as_deref())? {
+        let document = parse_backend_ax(&source).map_err(anyhow::Error::msg)?;
+        let plan = lower_backend_document(&document).map_err(anyhow::Error::msg)?;
+        if axonyx_core::ax_backend_lowering_prelude::ax_steps_use_auth_subject(
+            plan.globals.iter().chain(
+                plan.handlers
+                    .iter()
+                    .filter(|handler| {
+                        matches!(
+                            handler.kind,
+                            axonyx_core::ax_backend_lowering_prelude::AxHandlerKind::Loader { .. }
+                        )
+                    })
+                    .flat_map(|handler| handler.steps.iter()),
+            ),
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn build_static_site_from_app_root(
     root: &Path,
     out_dir: &Path,
@@ -14111,9 +14257,26 @@ fn build_static_site_from_app_root(
         database_required: project_uses_database_runtime(root)?,
     };
 
+    let mut rendered_static_count = 0;
     for route in &static_routes {
         let resolved = resolve_route(root, &route.route)?
             .ok_or_else(|| anyhow::anyhow!("failed to resolve route '{}'", route.route))?;
+        if route_requires_session_render(root, &resolved)? {
+            let stale = static_route_output_path(&output_dir, &route.route)?;
+            if stale.is_file() {
+                fs::remove_file(&stale).with_context(|| {
+                    format!(
+                        "failed to remove stale protected output '{}'",
+                        stale.display()
+                    )
+                })?;
+            }
+            eprintln!(
+                "Server-rendered session route: {} (no static HTML)",
+                route.route
+            );
+            continue;
+        }
         let html = render_route_html(&state, &resolved)?;
         let output_path = static_route_output_path(&output_dir, &route.route)?;
 
@@ -14124,6 +14287,7 @@ fn build_static_site_from_app_root(
 
         fs::write(&output_path, html)
             .with_context(|| format!("failed to write '{}'", output_path.display()))?;
+        rendered_static_count += 1;
     }
 
     let prerendered_count = build_prerendered_routes(
@@ -14145,7 +14309,7 @@ fn build_static_site_from_app_root(
     );
 
     Ok(StaticBuildStatus::Generated {
-        route_count: static_routes.len(),
+        route_count: rendered_static_count,
         prerendered_count,
         skipped_dynamic_count,
         content_collection_count,
@@ -14205,6 +14369,12 @@ fn build_prerendered_routes(
             let resolved = resolve_route(root, &concrete_route)?.ok_or_else(|| {
                 anyhow::anyhow!("failed to resolve prerender route '{}'", concrete_route)
             })?;
+            if route_requires_session_render(root, &resolved)? {
+                bail!(
+                    "cannot prerender session-bound route '{}'; use compiled server rendering",
+                    concrete_route
+                );
+            }
             let html = render_route_html(state, &resolved)?;
             let output_path = static_route_output_path(output_dir, &concrete_route)?;
 
@@ -24931,6 +25101,35 @@ page Home
     }
 
     #[test]
+    fn static_build_removes_stale_session_page_but_keeps_public_routes() {
+        let root = make_temp_dir("static-session-page");
+        fs::create_dir_all(root.join("app/private")).unwrap();
+        fs::create_dir_all(root.join("dist/private")).unwrap();
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n").unwrap();
+        fs::write(
+            root.join("app/page.asx"),
+            "page Home() { return ASX { <p>Public</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/page.asx"),
+            "page Private() { return ASX { <p>Private</p> } }",
+        )
+        .unwrap();
+        fs::write(root.join("app/private/loader.ax"), "query privateData() {\n  require Auth.subject else error(\"private policy\")\n  return 1\n}").unwrap();
+        fs::write(
+            root.join("dist/private/index.html"),
+            "stale private content",
+        )
+        .unwrap();
+        build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect("protected page should be server rendered");
+        assert!(!root.join("dist/private/index.html").exists());
+        assert!(root.join("dist/index.html").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn build_static_site_skips_dynamic_routes_until_prerender_config_exists() {
         let root = make_temp_dir("static-build-dynamic");
         fs::create_dir_all(root.join("app/blog/[slug]")).expect("blog dir should exist");
@@ -26403,6 +26602,11 @@ action ValidPost
     #[test]
     fn compiled_static_page_plan_contains_complete_nested_layout_document() {
         let root = make_temp_dir("compiled-static-document");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[theme]\nactive = \"gold\"\nstylesheet = \"/theme.css\"\n",
+        )
+        .unwrap();
         fs::create_dir_all(root.join("app/register")).unwrap();
         fs::write(
             root.join("app/layout.asx"),
@@ -26439,6 +26643,8 @@ action ValidPost
         assert!(html.contains("Application header"));
         assert!(html.contains("id=\"registration\""));
         assert!(html.contains("Invalid email."));
+        assert!(html.contains("data-theme=\"gold\""));
+        assert!(html.contains("/theme.css"));
         fs::remove_dir_all(root).unwrap();
     }
 
