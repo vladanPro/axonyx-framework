@@ -278,6 +278,11 @@ action RenamePost(slug: string, title: string) {
   db.posts.where({ slug: input.slug }).update({ title: input.title })
   return ok()
 }
+
+action ValidateDetail(email: String) {
+  require Validate.email(input.email) else invalid({email: "Enter a valid email address."})
+  return ok()
+}
 '@,
     (New-Object System.Text.UTF8Encoding($false))
   )
@@ -291,6 +296,11 @@ return ASX {
     <Card title={posts.title}>
       <Copy>{posts.excerpt}</Copy>
     </Card>
+    <ActionForm name="ValidateDetail">
+      <input name="email" />
+      <span data-ax-field-error="email"></span>
+      <button type="submit">Validate</button>
+    </ActionForm>
   </Container>
 }
 }
@@ -841,6 +851,10 @@ route GET "/api/forbidden-loader" {
   if ($detailPage.Body -notmatch "Fresh parameterized title" -or $detailPage.Headers["Cache-Control"] -ne "no-store") { throw "Compiled GET lost dynamic route parameters or served stale HTML" }
   $detailHead = Invoke-AxRequest -Url "$baseUrl/posts/fresh-compiled-post" -Method HEAD
   if ($detailHead.Body -ne "" -or $detailHead.Headers["Content-Type"] -notmatch "text/html") { throw "Compiled HEAD returned a body or lost its document content type" }
+  foreach ($body in @("email=invalid&slug=attacker-selected-post", "slug=attacker-selected-post")) {
+    $detailError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts%2Ffresh-compiled-post&name=ValidateDetail" -Body $body -Headers @{ Accept = "text/html" } -ExpectedStatus 422
+    if ($detailError.Body -notmatch "Fresh parameterized title" -or $detailError.Body -notmatch 'aria-invalid="true"' -or $detailError.Body -notmatch 'name=ValidateDetail' -or $detailError.Body -match "attacker-selected-post" -or $detailError.Headers["Cache-Control"] -ne "no-store") { throw "Parameterized form rerender lost route identity, errors or private caching policy" }
+  }
   Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2F%2Fevil.example&name=posts" -Method "GET" -ExpectedStatus 400 | Out-Null
 
   $invalid = Invoke-AxRequest -Url $actionUrl -Body "theme=&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
