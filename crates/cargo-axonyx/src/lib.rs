@@ -13196,40 +13196,50 @@ fn compiled_action_signal_aliases(root: &Path) -> Result<Vec<(String, String, St
 fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
     let mut bindings = Vec::new();
     for route in collect_page_route_manifest(root)? {
-        let page_path = root.join(&route.file);
-        let source = fs::read_to_string(&page_path)
-            .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
-        let Ok(document) = parse_ax_auto(&source) else {
-            continue;
-        };
+        let mut names = std::collections::BTreeSet::new();
+        for source_path in route.layouts.iter().chain(std::iter::once(&route.file)) {
+            let page_path = root.join(source_path);
+            let source = fs::read_to_string(&page_path)
+                .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
+            let Ok(document) = parse_ax_auto(&source) else {
+                continue;
+            };
 
-        for statement in &document.page.body {
-            let AxStatement::Data(binding) = statement else {
-                continue;
-            };
-            let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
-                continue;
-            };
-            if args
-                .iter()
-                .any(|arg| compiled_loader_arg_source(arg).is_none())
-            {
-                continue;
+            for statement in &document.page.body {
+                let AxStatement::Data(binding) = statement else {
+                    continue;
+                };
+                let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
+                    continue;
+                };
+                if args
+                    .iter()
+                    .any(|arg| compiled_loader_arg_source(arg).is_none())
+                {
+                    continue;
+                }
+                let Some(loader) = path.last().filter(|name| name.starts_with("load")) else {
+                    continue;
+                };
+                if !names.insert(binding.name.clone()) {
+                    bail!(
+                        "duplicate compiled data binding '{}' across page/layout for route '{}'",
+                        binding.name,
+                        route.route
+                    );
+                }
+
+                let mut query_key = vec![binding.name.clone()];
+                query_key.extend(args.iter().map(format_ax_expr));
+                bindings.push(CompiledDataBinding {
+                    route_pattern: route.route.clone(),
+                    name: binding.name.clone(),
+                    loader: loader.clone(),
+                    args: args.to_vec(),
+                    source: format_ax_expr(&binding.value),
+                    query_key,
+                });
             }
-            let Some(loader) = path.last().filter(|name| name.starts_with("load")) else {
-                continue;
-            };
-
-            let mut query_key = vec![binding.name.clone()];
-            query_key.extend(args.iter().map(format_ax_expr));
-            bindings.push(CompiledDataBinding {
-                route_pattern: route.route.clone(),
-                name: binding.name.clone(),
-                loader: loader.clone(),
-                args: args.to_vec(),
-                source: format_ax_expr(&binding.value),
-                query_key,
-            });
         }
     }
     Ok(bindings)
@@ -13250,9 +13260,6 @@ fn compiled_page_renderers(
             .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
         let document = parse_ax_auto(&source)
             .with_context(|| format!("failed to parse page source '{}'", page_path.display()))?;
-        if data_bindings_from_document(&document).len() != route_bindings {
-            continue;
-        }
 
         let layout_sources = route
             .layouts
@@ -13266,6 +13273,14 @@ fn compiled_page_renderers(
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
+        let mut expected_bindings = data_bindings_from_document(&document).len();
+        for layout_source in &layout_sources {
+            let layout = parse_ax_auto(layout_source).map_err(anyhow::Error::msg)?;
+            expected_bindings += data_bindings_from_document(&layout).len();
+        }
+        if expected_bindings != route_bindings {
+            continue;
+        }
         let mut full_document =
             axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
         let uses_ui = layout_refs
@@ -14185,7 +14200,7 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
 }
 
 fn route_requires_session_render(root: &Path, route: &ResolvedRoute) -> Result<bool> {
-    for source in collect_route_loader_source_strings(root, route.loader_path.as_deref())? {
+    for source in collect_layout_and_page_loader_sources(root, route)? {
         let document = parse_backend_ax(&source).map_err(anyhow::Error::msg)?;
         let plan = lower_backend_document(&document).map_err(anyhow::Error::msg)?;
         if axonyx_core::ax_backend_lowering_prelude::ax_steps_use_auth_subject(
@@ -20353,8 +20368,7 @@ fn render_route_html_with_database_runtime(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let loader_sources =
-        collect_route_loader_source_strings(&state.root, route.loader_path.as_deref())?;
+    let loader_sources = collect_layout_and_page_loader_sources(&state.root, route)?;
     let loader_refs = loader_sources
         .iter()
         .map(String::as_str)
@@ -20528,6 +20542,31 @@ fn apply_package_use_assets(
     let (stylesheet_href, script_href) = axonyx_ui_asset_hrefs(root);
     let html = ensure_head_stylesheet(&html, &stylesheet_href);
     ensure_head_script(&html, &script_href)
+}
+
+fn collect_layout_and_page_loader_sources(
+    root: &Path,
+    route: &ResolvedRoute,
+) -> Result<Vec<String>> {
+    let mut sources = collect_route_loader_source_strings(root, route.loader_path.as_deref())?;
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(path) = &route.loader_path {
+        seen.insert(path.clone());
+    }
+    for layout in &route.layout_paths {
+        let Some(parent) = layout.parent() else {
+            continue;
+        };
+        let path = parent.join("loader.ax");
+        if path.is_file() && seen.insert(path.clone()) {
+            sources.push(
+                fs::read_to_string(&path).with_context(|| {
+                    format!("failed to read layout loader '{}'", path.display())
+                })?,
+            );
+        }
+    }
+    Ok(sources)
 }
 
 fn collect_route_loader_source_strings(
@@ -25101,6 +25140,29 @@ page Home
     }
 
     #[test]
+    fn compiled_layout_bindings_are_planned_and_duplicate_names_are_rejected() {
+        let root = make_temp_dir("compiled-layout-bindings");
+        fs::create_dir_all(root.join("app")).unwrap();
+        fs::write(root.join("app/layout.asx"), "page Shell() {\n data heading: String = loadHeading()\n return ASX { <header>{heading}</header><Slot /> }\n}").unwrap();
+        fs::write(root.join("app/page.asx"), "page Home() {\n data content: String = loadContent()\n return ASX { <p>{content}</p> }\n}").unwrap();
+        let bindings = compiled_data_bindings(&root).unwrap();
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect::<Vec<_>>(),
+            ["heading", "content"]
+        );
+        assert_eq!(compiled_page_renderers(&root, &bindings).unwrap().len(), 1);
+        fs::write(root.join("app/page.asx"), "page Home() {\n data heading: String = loadContent()\n return ASX { <p>{heading}</p> }\n}").unwrap();
+        assert!(compiled_data_bindings(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate compiled data binding"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn static_build_removes_stale_session_page_but_keeps_public_routes() {
         let root = make_temp_dir("static-session-page");
         fs::create_dir_all(root.join("app/private")).unwrap();
@@ -25126,6 +25188,24 @@ page Home
             .expect("protected page should be server rendered");
         assert!(!root.join("dist/private/index.html").exists());
         assert!(root.join("dist/index.html").is_file());
+        fs::create_dir_all(root.join("app/private/child")).unwrap();
+        fs::write(
+            root.join("app/private/layout.asx"),
+            "page PrivateShell() { return ASX { <Slot /> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/child/page.asx"),
+            "page Child() { return ASX { <p>Child</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/child/loader.ax"),
+            "query childData() {\n  return 1\n}",
+        )
+        .unwrap();
+        let child = resolve_route(&root, "/private/child").unwrap().unwrap();
+        assert!(route_requires_session_render(&root, &child).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
