@@ -253,8 +253,8 @@ route POST "/api/register" {
     email: String
     password: String
   before Login.throttle("register:" + input.email, 10, 60)
-  require input.email != "" else error("Invalid registration input")
-  require input.password != "" else error("Invalid registration input")
+  require Validate.email(input.email) else invalid({email: "Enter a valid email address."})
+  require Validate.password(input.password) else invalid({password: "Use at least 15 characters."})
   data userId = Uuid.new()
   data passwordHash = Password.hash(input.password)
   transaction {
@@ -612,9 +612,10 @@ route POST "/api/theme-guard" {
   $registrationAnonCookie = ([string] $registrationProof.Headers["Set-Cookie"]).Split(';')[0]
   $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
   $registrationBody = "email=registered%40example.com&password=registration-proof-secret&role=admin&id=user-42"
-  foreach ($invalidBody in @("email=&password=registration-proof-secret", "email=invalid%40example.com&password=")) {
-    $invalidRegistration = Invoke-AxRequest -Url $registerUrl -Body $invalidBody -Headers $registrationHeaders -ExpectedStatus 401
-    if (($invalidRegistration.Body | ConvertFrom-Json).error -ne "Invalid registration input" -or $invalidRegistration.Headers["Set-Cookie"]) { throw "Registration guard failed or issued a session" }
+  foreach ($invalidBody in @("email=&password=registration-proof-secret", "email=invalid%40example.com&password=", "email=invalid%40example.com&password=short", "email=not-an-email&password=registration-proof-secret", ("email=invalid%40example.com&password=" + ('x' * 1025)))) {
+    $invalidRegistration = Invoke-AxRequest -Url $registerUrl -Body $invalidBody -Headers $registrationHeaders -ExpectedStatus 422
+    $invalidPayload = $invalidRegistration.Body | ConvertFrom-Json
+    if ($invalidPayload.error -ne "invalid_input" -or !$invalidPayload.fields -or $invalidRegistration.Headers["Set-Cookie"]) { throw "Registration guard failed or issued a session" }
   }
   $invalidCounts = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from users where email in (?, ?)", ("", "invalid@example.com")).fetchone()[0]);db.close()' $dbPath
   if ($LASTEXITCODE -ne 0 -or [int] $invalidCounts -ne 0) { throw "Invalid registration persisted an account" }
