@@ -70,6 +70,9 @@ function Invoke-AxRequest {
     if ($status -ne $ExpectedStatus) {
       throw "Expected HTTP $ExpectedStatus from $Url, got $status"
     }
+    if ($response.Headers['Server-Timing'] -notmatch '(?:^|,)\s*axonyx;dur=\d+\.\d{3}(?:,|$)') {
+      throw "Missing or invalid Axonyx Server-Timing from $Url (HTTP $status)"
+    }
     $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
     try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
     return @{ Status = $status; Body = $text; Headers = $response.Headers }
