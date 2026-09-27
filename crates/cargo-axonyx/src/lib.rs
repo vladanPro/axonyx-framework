@@ -20806,6 +20806,16 @@ fn render_error_response(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
+    if let Some(axonyx_runtime::PreviewError::AccessDenied { status }) =
+        error.downcast_ref::<axonyx_runtime::PreviewError>()
+    {
+        let message = if *status == 401 {
+            "Authentication required."
+        } else {
+            "Access denied."
+        };
+        return Ok(AxHttpResponse::text(*status, message).with_no_store());
+    }
     if let Some(route) = resolve_boundary_route(&state.root, "error.asx", request_target) {
         match render_route_response_with_status(
             state,
@@ -31247,6 +31257,32 @@ page Posts() {
         assert_eq!(dev_response.status, 500);
         assert_eq!(start_response.status, 200);
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn preview_page_loader_denial_preserves_status_without_private_html() {
+        let root = make_temp_dir("preview-loader-denial");
+        fs::create_dir_all(root.join("app/private")).unwrap();
+        fs::write(
+            root.join("app/private/page.asx"),
+            "page Private() { data secret = loadPrivate()\n return ASX { <p>{secret}</p> } }",
+        )
+        .unwrap();
+        let state = test_dev_state(&root);
+        for (fallback, status) in [("error(\"private policy\")", 401), ("forbidden()", 403)] {
+            fs::write(root.join("app/private/loader.ax"), format!("query loadPrivate() {{\n  require Auth.subject else {fallback}\n  return \"private data\"\n}}\n")).unwrap();
+            for mode in [AxServerMode::Dev, AxServerMode::Start] {
+                let response =
+                    handle_http_request(&state, mode, AxHttpRequest::new("GET", "/private"))
+                        .unwrap();
+                assert_eq!(response.status, status);
+                assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+                let body = String::from_utf8(response.body.into_bytes()).unwrap();
+                assert!(!body.contains("private data"));
+                assert!(!body.contains("private policy"));
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
