@@ -14184,6 +14184,29 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
     }
 }
 
+fn route_requires_session_render(root: &Path, route: &ResolvedRoute) -> Result<bool> {
+    for source in collect_route_loader_source_strings(root, route.loader_path.as_deref())? {
+        let document = parse_backend_ax(&source).map_err(anyhow::Error::msg)?;
+        let plan = lower_backend_document(&document).map_err(anyhow::Error::msg)?;
+        if axonyx_core::ax_backend_lowering_prelude::ax_steps_use_auth_subject(
+            plan.globals.iter().chain(
+                plan.handlers
+                    .iter()
+                    .filter(|handler| {
+                        matches!(
+                            handler.kind,
+                            axonyx_core::ax_backend_lowering_prelude::AxHandlerKind::Loader { .. }
+                        )
+                    })
+                    .flat_map(|handler| handler.steps.iter()),
+            ),
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn build_static_site_from_app_root(
     root: &Path,
     out_dir: &Path,
@@ -14234,9 +14257,26 @@ fn build_static_site_from_app_root(
         database_required: project_uses_database_runtime(root)?,
     };
 
+    let mut rendered_static_count = 0;
     for route in &static_routes {
         let resolved = resolve_route(root, &route.route)?
             .ok_or_else(|| anyhow::anyhow!("failed to resolve route '{}'", route.route))?;
+        if route_requires_session_render(root, &resolved)? {
+            let stale = static_route_output_path(&output_dir, &route.route)?;
+            if stale.is_file() {
+                fs::remove_file(&stale).with_context(|| {
+                    format!(
+                        "failed to remove stale protected output '{}'",
+                        stale.display()
+                    )
+                })?;
+            }
+            eprintln!(
+                "Server-rendered session route: {} (no static HTML)",
+                route.route
+            );
+            continue;
+        }
         let html = render_route_html(&state, &resolved)?;
         let output_path = static_route_output_path(&output_dir, &route.route)?;
 
@@ -14247,6 +14287,7 @@ fn build_static_site_from_app_root(
 
         fs::write(&output_path, html)
             .with_context(|| format!("failed to write '{}'", output_path.display()))?;
+        rendered_static_count += 1;
     }
 
     let prerendered_count = build_prerendered_routes(
@@ -14268,7 +14309,7 @@ fn build_static_site_from_app_root(
     );
 
     Ok(StaticBuildStatus::Generated {
-        route_count: static_routes.len(),
+        route_count: rendered_static_count,
         prerendered_count,
         skipped_dynamic_count,
         content_collection_count,
@@ -14328,6 +14369,12 @@ fn build_prerendered_routes(
             let resolved = resolve_route(root, &concrete_route)?.ok_or_else(|| {
                 anyhow::anyhow!("failed to resolve prerender route '{}'", concrete_route)
             })?;
+            if route_requires_session_render(root, &resolved)? {
+                bail!(
+                    "cannot prerender session-bound route '{}'; use compiled server rendering",
+                    concrete_route
+                );
+            }
             let html = render_route_html(state, &resolved)?;
             let output_path = static_route_output_path(output_dir, &concrete_route)?;
 
@@ -25051,6 +25098,35 @@ page Home
         )));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn static_build_removes_stale_session_page_but_keeps_public_routes() {
+        let root = make_temp_dir("static-session-page");
+        fs::create_dir_all(root.join("app/private")).unwrap();
+        fs::create_dir_all(root.join("dist/private")).unwrap();
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n").unwrap();
+        fs::write(
+            root.join("app/page.asx"),
+            "page Home() { return ASX { <p>Public</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/page.asx"),
+            "page Private() { return ASX { <p>Private</p> } }",
+        )
+        .unwrap();
+        fs::write(root.join("app/private/loader.ax"), "query privateData() {\n  require Auth.subject else error(\"private policy\")\n  return 1\n}").unwrap();
+        fs::write(
+            root.join("dist/private/index.html"),
+            "stale private content",
+        )
+        .unwrap();
+        build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect("protected page should be server rendered");
+        assert!(!root.join("dist/private/index.html").exists());
+        assert!(root.join("dist/index.html").is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

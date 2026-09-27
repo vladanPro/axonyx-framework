@@ -90,6 +90,28 @@ try {
   }
 
   $actionsPath = Join-Path $appRoot "app/posts/actions.ax"
+  New-Item -ItemType Directory -Path (Join-Path $appRoot "app/forms/private") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/private/page.asx"), @'
+page PrivateForm() {
+  data posts: List<PrivatePost> = loadPrivatePosts()
+  return ASX {
+    <form method="post" action="/__axonyx/action?path=%2Fforms%2Fprivate&name=ValidateForm"><input name="email" /><span data-ax-field-error="email"></span></form>
+    <Each items={posts} as="post"><p>{post.title}</p></Each>
+  }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/private/loader.ax"), @'
+export type PrivatePost {
+  title: String
+}
+query loadPrivatePosts() -> PrivatePost[] {
+  require Auth.subject else error("private identity policy")
+  data permission = db.user_permissions.where({ user_id: Auth.subject, permission: "forms.read" }).first()
+  require permission else forbidden()
+  data posts = db.posts.all()
+  return posts
+}
+'@)
   New-Item -ItemType Directory -Path (Join-Path $appRoot "app/forms/loaded") -Force | Out-Null
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/layout.asx"), @'
 page FormShell() {
@@ -439,6 +461,8 @@ route GET "/api/forbidden-loader" {
     if ($LASTEXITCODE -ne 0) { throw "cargo ax check failed" }
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- build --clean --compiled
     if ($LASTEXITCODE -ne 0) { throw "compiled build failed" }
+    if (Test-Path (Join-Path $appRoot "dist/forms/private/index.html")) { throw "Session-bound page was emitted as public static HTML" }
+    if (!(Test-Path (Join-Path $appRoot "dist/forms/index.html"))) { throw "Unrelated public form was incorrectly excluded from static build" }
   } finally {
     Pop-Location
   }
@@ -626,6 +650,20 @@ route GET "/api/forbidden-loader" {
   $sessionCookie = $sessionCookieHeader.Split(';')[0]
   $tokenResponse = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl }
   $csrfToken = ($tokenResponse.Body | ConvertFrom-Json).token
+  $privateAnonymous = Invoke-AxRequest -Url "$baseUrl/forms/private" -Method GET -ExpectedStatus 401
+  $privateDenied = Invoke-AxRequest -Url "$baseUrl/forms/private" -Method GET -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 403
+  if ($privateAnonymous.Body -match "Original detail title|private identity policy" -or $privateDenied.Body -match "Original detail title") { throw "Private page leaked data to an unauthorized reader" }
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("insert into user_permissions (user_id,permission) values (?,?)", ("user-42","forms.read"));db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "Could not grant private form permission" }
+  $privateAllowed = Invoke-AxRequest -Url "$baseUrl/forms/private" -Method GET -Headers @{ Cookie = $sessionCookie }
+  if ($privateAllowed.Body -notmatch "Original detail title" -or $privateAllowed.Headers["Cache-Control"] -ne "no-store") { throw "Private page did not preserve session identity" }
+  $privateHeaders = @{ Accept = "text/html"; Cookie = $sessionCookie; Origin = $baseUrl }
+  $privateRerender = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms%2Fprivate&name=ValidateForm" -Body "email=invalid&__ax_csrf=$csrfToken" -Headers $privateHeaders -ExpectedStatus 422
+  if ($privateRerender.Body -notmatch "Original detail title" -or $privateRerender.Body -notmatch 'aria-invalid="true"') { throw "Private form rerender lost loader identity or field errors" }
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("delete from user_permissions where user_id = ? and permission = ?", ("user-42","forms.read"));db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "Could not revoke private form permission" }
+  $privateRevoked = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms%2Fprivate&name=ValidateForm" -Body "email=invalid&__ax_csrf=$csrfToken" -Headers $privateHeaders -ExpectedStatus 403
+  if ($privateRevoked.Body -match "Original detail title|Enter a valid email" -or $privateRevoked.Headers["Cache-Control"] -ne "no-store") { throw "Revoked loader access became a validation fallback or leaked page data" }
   if ($csrfToken -notmatch '^axcsrf1\.[a-f0-9]{64}$' -or $tokenResponse.Headers["Cache-Control"] -ne "no-store" -or $tokenResponse.Headers["Vary"] -ne "Cookie") { throw "Invalid private CSRF token response" }
   if ($tokenResponse.Body -match "user-42" -or $tokenResponse.Body.Contains($sessionCookie.Split('=')[1])) { throw "CSRF response leaked session identity" }
   $refreshUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=RefreshSession"
