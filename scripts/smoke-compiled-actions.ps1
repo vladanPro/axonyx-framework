@@ -135,6 +135,12 @@ query deniedPosts() {
   data posts = db.posts.all()
   return posts
 }
+
+query forbiddenPosts() {
+  require false else forbidden()
+  data posts = db.posts.all()
+  return posts
+}
 '@)
   [System.IO.File]::AppendAllText(
     (Join-Path $appRoot "app/backend.ax"),
@@ -396,6 +402,11 @@ route GET "/api/denied-loader" {
   data posts = deniedPosts()
   return json(posts)
 }
+
+route GET "/api/forbidden-loader" {
+  data posts = forbiddenPosts()
+  return json(posts)
+}
 '@,
     (New-Object System.Text.UTF8Encoding($false))
   )
@@ -494,8 +505,10 @@ route GET "/api/denied-loader" {
   }
 
   $actionUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=SetTheme"
-  $deniedLoader = Invoke-AxRequest -Url "$baseUrl/api/denied-loader" -Method GET -ExpectedStatus 500
+  $deniedLoader = Invoke-AxRequest -Url "$baseUrl/api/denied-loader" -Method GET -ExpectedStatus 401
   if ($deniedLoader.Body -match "Original detail title|private loader policy detail|Backend requirement") { throw "Denied loader exposed data or private guard details" }
+  $forbiddenLoader = Invoke-AxRequest -Url "$baseUrl/api/forbidden-loader" -Method GET -ExpectedStatus 403
+  if (($deniedLoader.Body | ConvertFrom-Json).error -ne "unauthorized" -or ($forbiddenLoader.Body | ConvertFrom-Json).error -ne "forbidden" -or $forbiddenLoader.Body -match "Original detail title" -or $forbiddenLoader.Headers["Cache-Control"] -ne "no-store") { throw "Typed loader denial status or safe payload was lost" }
   foreach ($body in @("email=invalid&__ax_patch=true", "__ax_patch=true")) {
     $formError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ValidateForm" -Body $body -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
     $formResult = ($formError.Body | ConvertFrom-Json).form

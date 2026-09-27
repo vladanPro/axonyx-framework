@@ -13625,6 +13625,10 @@ fn handle_request_inner(
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
             Err(error) => {{
                 eprintln!("Axonyx compiled API error: {{error}}");
+                if let Some(status) = error.access_denial_status() {{
+                    return secure(AxHttpResponse::json(status, &error.public_error_payload())
+                        .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store());
+                }}
                 if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{
                     return secure(AxHttpResponse::json(422, &error.public_error_payload())
                         .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store());
@@ -13651,7 +13655,8 @@ fn handle_request_inner(
             return secure(response);
         }},
         Ok(None) => {{}},
-        Err(_) => return secure(AxHttpResponse::text(500, "Page could not be rendered.").with_no_store()),
+        Err(error) => return secure(AxHttpResponse::text(error.access_denial_status().unwrap_or(500),
+            if error.access_denial_status().is_some() {{ "Access denied." }} else {{ "Page could not be rendered." }}).with_no_store()),
     }}
     let mut response = static_response(dist, &request.target)
         .unwrap_or_else(|| AxHttpResponse::text(404, "Not Found"));
@@ -13791,6 +13796,10 @@ fn handle_compiled_action(
         Ok(None) => AxHttpResponse::text(404, "action not found").with_no_store(),
         Err(error) => {{
             eprintln!("Axonyx compiled action error: {{error}}");
+            if let Some(status) = error.access_denial_status() {{
+                return AxHttpResponse::json(status, &error.public_error_payload())
+                    .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store();
+            }}
             if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }})
                 && axonyx_runtime::validation::wants_html_error(request) {{
                 let payload = error.public_error_payload();
@@ -13852,7 +13861,12 @@ fn render_native_form_error(
         match render_compiled_route_document(runtime, request, route, Some(&result)) {{
             Ok(Some(html)) => return AxHttpResponse::html(422, html).with_no_store(),
             Ok(None) => {{}},
-            Err(_) => eprintln!("Axonyx form document render failed; using safe fallback"),
+            Err(error) => {{
+                if let Some(status) = error.access_denial_status() {{
+                    return AxHttpResponse::text(status, "Access denied.").with_no_store();
+                }}
+                eprintln!("Axonyx form document render failed; using safe fallback");
+            }},
         }}
     }}
     axonyx_runtime::validation::html_error_response(fields, route)
@@ -13951,6 +13965,10 @@ fn handle_compiled_data(
         }},
         Err(error) => {{
             eprintln!("Axonyx compiled data error: {{error}}");
+            if let Some(status) = error.access_denial_status() {{
+                return AxHttpResponse::json(status, &error.public_error_payload())
+                    .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store();
+            }}
             AxHttpResponse::text(500, "Internal Server Error").with_no_store()
         }}
     }}
