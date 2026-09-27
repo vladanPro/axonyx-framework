@@ -120,6 +120,11 @@ action Noop() {
   return ok()
 }
 
+action ValidateForm(email: String) {
+  require Validate.email(input.email) else invalid({email: "Enter a valid email address."})
+  return ok()
+}
+
 action GuardProbe(id: Int, ratio: Float, flag: Bool, theme: String) {
   data idAllowed = input.id in [1, 2]
   require idAllowed else error "Choose 1, or 2."
@@ -432,6 +437,10 @@ route POST "/api/theme-guard" {
   }
 
   $actionUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=SetTheme"
+  foreach ($body in @("email=invalid", "")) {
+    $nativeError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ValidateForm" -Body $body -Headers @{ Accept = "text/html" } -ExpectedStatus 422
+    if ($nativeError.Headers["Content-Type"] -notmatch "text/html" -or $nativeError.Body -notmatch 'Return to the form' -or $nativeError.Body -notmatch 'href="/posts"' -or $nativeError.Headers["Cache-Control"] -ne "no-store") { throw "Native form validation fallback failed" }
+  }
   $probeUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=GuardProbe"
   Invoke-AxRequest -Url $probeUrl -Body "id=1&ratio=1.5&flag=true&theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } | Out-Null
   foreach ($case in @(
