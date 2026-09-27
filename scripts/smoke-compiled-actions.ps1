@@ -240,6 +240,14 @@ query resolveCredential(email: String) -> Credential? {
   return db.credentials.where({ email: input.email }).first()
 }
 
+route POST "/api/addition-probe" {
+  input:
+    count: Int
+    ratio: Float
+    enabled: Bool
+  return json({ label: "Count: " + input.count, suffix: input.count + " items", total: input.count + input.ratio, reverse: input.ratio + input.count, enabled: "enabled=" + input.enabled, chained: "1" + 2 + 3, grouped: "1" + (2 + 3) })
+}
+
 route POST "/api/register" {
   input:
     email: String
@@ -394,6 +402,12 @@ route POST "/api/theme-guard" {
     }
   }
   if (!$ready) { throw "Compiled server did not become ready" }
+
+  $addition = Invoke-AxRequest -Url "$baseUrl/api/addition-probe" -Body "count=42&ratio=0.5&enabled=true"
+  $additionPayload = $addition.Body | ConvertFrom-Json
+  if ($additionPayload.label -ne "Count: 42" -or $additionPayload.suffix -ne "42 items" -or $additionPayload.total -ne 42.5 -or $additionPayload.reverse -ne 42.5 -or $additionPayload.enabled -ne "enabled=true" -or $additionPayload.chained -ne "123" -or $additionPayload.grouped -ne "15") {
+    throw "Compiled addition did not preserve scalar String and numeric semantics"
+  }
 
   $hashProbe = Invoke-AxRequest -Url "$baseUrl/api/password-hash-probe" -Body "password=registration-secret"
   if (($hashProbe.Body | ConvertFrom-Json) -ne "ok") { throw "Compiled password hash round trip failed" }
