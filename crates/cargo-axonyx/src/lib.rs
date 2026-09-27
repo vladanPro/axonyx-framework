@@ -13664,6 +13664,11 @@ fn handle_compiled_action(
             }}
             normalize_action_payload(&route, &mut payload);
             let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
+            if !ok && payload.pointer("/error/status").and_then(Value::as_u64) == Some(422)
+                && axonyx_runtime::validation::wants_html_error(request) {{
+                return with_action_cookies(axonyx_runtime::validation::html_error_response(
+                    payload.pointer("/error/value/fields").unwrap_or(&Value::Null), &route), output.cookies);
+            }}
             let response = if wants_action_patch_response(request) || !ok {{
                 let status = if ok {{
                     200
@@ -13692,6 +13697,11 @@ fn handle_compiled_action(
         Ok(None) => AxHttpResponse::text(404, "action not found").with_no_store(),
         Err(error) => {{
             eprintln!("Axonyx compiled action error: {{error}}");
+            if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }})
+                && axonyx_runtime::validation::wants_html_error(request) {{
+                let payload = error.public_error_payload();
+                return axonyx_runtime::validation::html_error_response(payload.get("fields").unwrap_or(&Value::Null), &route);
+            }}
             let body = json!({{
                 "ok": false,
                 "redirect": route,
