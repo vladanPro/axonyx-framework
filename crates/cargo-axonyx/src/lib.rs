@@ -10627,7 +10627,13 @@ fn check_backend_route_inputs(
 
         let mut seen = std::collections::BTreeSet::new();
         for field in &route.input {
-            if !is_supported_route_input_type(&field.ty) {
+            let required_record = !field.optional
+                && field.default.is_none()
+                && plan
+                    .types
+                    .iter()
+                    .any(|record| record.name == field.ty.trim());
+            if !is_supported_route_input_type(&field.ty) && !required_record {
                 diagnostics.push(CheckDiagnostic {
                     file: display_path(path),
                     line: line_for_source_pattern(source, &format!("{}:", field.name)),
@@ -10635,7 +10641,7 @@ fn check_backend_route_inputs(
                     severity: "error",
                     code: "axonyx-route-input-type",
                     message: format!(
-                        "route input `{}` uses unsupported type `{}`. Supported route input types are string, bool, i64, u64, and f64.",
+                        "route input `{}` uses unsupported type `{}`. Supported route input types are string, bool, i64, u64, f64, and required declared records.",
                         field.name, field.ty
                     ),
                 });
@@ -34377,6 +34383,16 @@ route POST "/api/posts"
         assert_eq!(diagnostics[0].line, 4);
         assert_eq!(diagnostics[0].code, "axonyx-route-input-type");
         assert!(diagnostics[0].message.contains("PostTitle"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_required_declared_record_route_input() {
+        let diagnostics = check_ax_source_with_root(
+            &PathBuf::from("demo/routes/api/posts.ax"),
+            "export type PostInput {\n  title: String\n}\nroute POST \"/api/posts\" {\n  input:\n    post: PostInput\n  return json(input.post)\n}",
+            None,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]
