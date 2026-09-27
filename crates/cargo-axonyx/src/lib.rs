@@ -13255,6 +13255,28 @@ fn compiled_page_renderers(
             .iter()
             .filter(|binding| binding.route_pattern == route.route)
             .count();
+        if let Some(resolved) = resolve_route(root, &route.route)? {
+            let mut uses_content = false;
+            for source in collect_layout_and_page_loader_sources(root, &resolved)? {
+                let plan =
+                    lower_backend_document(&parse_backend_ax(&source).map_err(anyhow::Error::msg)?)
+                        .map_err(anyhow::Error::msg)?;
+                uses_content |= plan.globals.iter().chain(plan.handlers.iter()
+                    .filter(|handler| data_bindings.iter().any(|binding| binding.route_pattern == route.route && binding.loader == handler.name))
+                    .flat_map(|handler| handler.steps.iter())).any(|step| matches!(step,
+                    AxStepPlan::Let { value: AxValuePlan::Query(query), .. }
+                    if matches!(query.source, axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::ContentCollection { .. })));
+            }
+            if uses_content {
+                if route_requires_session_render(root, &resolved)? {
+                    bail!(
+                        "session-bound content route '{}' cannot use static fallback",
+                        route.route
+                    );
+                }
+                continue;
+            }
+        }
         let page_path = root.join(&route.file);
         let source = fs::read_to_string(&page_path)
             .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
@@ -13273,10 +13295,20 @@ fn compiled_page_renderers(
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let mut expected_bindings = data_bindings_from_document(&document).len();
+        let mut expected_bindings = document
+            .page
+            .body
+            .iter()
+            .filter(|statement| matches!(statement, AxStatement::Data(binding) if query_call_from_binding_expr(&binding.value).is_some()))
+            .count();
         for layout_source in &layout_sources {
             let layout = parse_ax_auto(layout_source).map_err(anyhow::Error::msg)?;
-            expected_bindings += data_bindings_from_document(&layout).len();
+            expected_bindings += layout
+                .page
+                .body
+                .iter()
+                .filter(|statement| matches!(statement, AxStatement::Data(binding) if query_call_from_binding_expr(&binding.value).is_some()))
+                .count();
         }
         if expected_bindings != route_bindings {
             continue;
@@ -13362,17 +13394,44 @@ fn collect_compiled_import_sources(
     seen: &mut std::collections::BTreeSet<String>,
     sources: &mut Vec<(String, String)>,
 ) -> Result<()> {
-    for import in &document.imports {
-        if !seen.insert(import.source.clone()) {
+    let imports = document
+        .imports
+        .iter()
+        .map(|import| import.source.clone())
+        .collect::<Vec<_>>();
+    collect_compiled_module_sources(root, &imports, seen, sources)
+}
+
+fn collect_compiled_module_sources(
+    root: &Path,
+    imports: &[String],
+    seen: &mut std::collections::BTreeSet<String>,
+    sources: &mut Vec<(String, String)>,
+) -> Result<()> {
+    for source in imports {
+        if !seen.insert(source.clone()) {
             continue;
         }
-        let contents = load_preview_import_source(root, &import.source).with_context(|| {
-            format!("failed to resolve compiled page import '{}'", import.source)
-        })?;
-        let imported = parse_ax_auto(&contents)
-            .with_context(|| format!("failed to parse compiled page import '{}'", import.source))?;
-        collect_compiled_import_sources(root, &imported, seen, sources)?;
-        sources.push((import.source.clone(), contents));
+        let contents = load_preview_import_source(root, source)
+            .with_context(|| format!("failed to resolve compiled page import '{}'", source))?;
+        let imports = if let Some(module) = parse_ax_component_module_v2(&contents)
+            .with_context(|| format!("failed to parse compiled component import '{source}'"))?
+        {
+            module
+                .imports
+                .into_iter()
+                .map(|import| import.source)
+                .collect::<Vec<_>>()
+        } else {
+            parse_ax_auto(&contents)
+                .with_context(|| format!("failed to parse compiled page import '{source}'"))?
+                .imports
+                .into_iter()
+                .map(|import| import.source)
+                .collect::<Vec<_>>()
+        };
+        collect_compiled_module_sources(root, &imports, seen, sources)?;
+        sources.push((source.clone(), contents));
     }
     Ok(())
 }
@@ -13635,6 +13694,7 @@ fn handle_request_inner(
             return secure(AxHttpResponse::text(403, "Forbidden: cross-site Axonyx mutation request").with_no_store());
         }}
         let response = backend::dispatch_api_route(runtime, &request, VALIDATE_API_RESPONSES);
+        if !matches!(&response, Ok(None)) {{
         return secure(match response {{
             Ok(Some(response)) => response,
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
@@ -13657,6 +13717,7 @@ fn handle_request_inner(
                 }})).unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store()
             }}
         }});
+        }}
     }}
 
     if !request.method.eq_ignore_ascii_case("GET") && !request.method.eq_ignore_ascii_case("HEAD") {{
@@ -25137,6 +25198,73 @@ page Home
         )));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn public_content_pages_use_static_fallback_but_private_content_is_rejected() {
+        let root = make_temp_dir("compiled-content-fallback");
+        fs::create_dir_all(root.join("app")).unwrap();
+        fs::write(
+            root.join("app/page.asx"),
+            "page Docs() {\n  data docs = loadDocs()\n  return ASX { <p>Docs</p> }\n}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/loader.ax"),
+            "query loadDocs() {\n  data docs = Content.Collection(\"docs\")\n  return docs\n}",
+        )
+        .unwrap();
+        let bindings = compiled_data_bindings(&root).unwrap();
+        assert!(compiled_page_renderers(&root, &bindings)
+            .unwrap()
+            .is_empty());
+        fs::write(root.join("app/loader.ax"), "query loadDocs() {\n  require Auth.subject else forbidden()\n  data docs = Content.Collection(\"docs\")\n  return docs\n}").unwrap();
+        assert!(compiled_page_renderers(&root, &bindings)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot use static fallback"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compiled_import_collection_supports_transitive_component_modules() {
+        let root = make_temp_dir("compiled-component-imports");
+        fs::create_dir_all(root.join("app/shared")).unwrap();
+        fs::write(
+            root.join("app/shared/Inner.asx"),
+            "component Inner() {\n<p>Imported component</p>\n}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/shared/Outer.asx"),
+            "import { Inner } from \"@/shared/Inner.asx\"\ncomponent Outer() {\n<Inner />\n}",
+        )
+        .unwrap();
+        let document = parse_ax_auto("import { Outer } from \"@/shared/Outer.asx\"\npage Home() { return ASX { <Outer /> } }").unwrap();
+        let mut sources = Vec::new();
+        collect_compiled_import_sources(
+            &root,
+            &document,
+            &mut std::collections::BTreeSet::new(),
+            &mut sources,
+        )
+        .unwrap();
+        assert_eq!(sources.len(), 2);
+        let refs = sources
+            .iter()
+            .map(|(name, contents)| (name.as_str(), contents.as_str()))
+            .collect::<Vec<_>>();
+        let html = axonyx_runtime::render_compiled_page_document(
+            &serde_json::to_string(&document).unwrap(),
+            &refs,
+            "/",
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+        assert!(html.contains("Imported component"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
