@@ -244,7 +244,7 @@ route POST "/api/register" {
   input:
     email: String
     password: String
-  before Login.throttle(input.email, 10, 60)
+  before Login.throttle("registration-proof", 10, 60)
   require input.email != "" else error("Invalid registration input")
   require input.password != "" else error("Invalid registration input")
   data userId = Uuid.new()
