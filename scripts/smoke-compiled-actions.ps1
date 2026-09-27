@@ -404,6 +404,9 @@ route POST "/api/theme-guard" {
   if (!$ready) { throw "Compiled server did not become ready" }
 
   $addition = Invoke-AxRequest -Url "$baseUrl/api/addition-probe" -Body "count=42&ratio=0.5&enabled=true"
+  $invalidNumber = Invoke-AxRequest -Url "$baseUrl/api/addition-probe" -Body "count=secret-not-a-number&ratio=0.5&enabled=true" -ExpectedStatus 422
+  $invalidNumberPayload = $invalidNumber.Body | ConvertFrom-Json
+  if ($invalidNumberPayload.error -ne "invalid_input" -or !$invalidNumberPayload.fields.count -or $invalidNumber.Body.Contains("secret-not-a-number")) { throw "Numeric input failure was not safely classified" }
   $additionPayload = $addition.Body | ConvertFrom-Json
   if ($additionPayload.label -ne "Count: 42" -or $additionPayload.suffix -ne "42 items" -or $additionPayload.total -ne 42.5 -or $additionPayload.reverse -ne 42.5 -or $additionPayload.enabled -ne "enabled=true" -or $additionPayload.chained -ne "123" -or $additionPayload.grouped -ne "15") {
     throw "Compiled addition did not preserve scalar String and numeric semantics"
@@ -612,6 +615,11 @@ route POST "/api/theme-guard" {
   $registrationAnonCookie = ([string] $registrationProof.Headers["Set-Cookie"]).Split(';')[0]
   $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
   $registrationBody = "email=registered%40example.com&password=registration-proof-secret&role=admin&id=user-42"
+  foreach ($missingBody in @("password=registration-proof-secret", "email=invalid%40example.com")) {
+    $missingRegistration = Invoke-AxRequest -Url $registerUrl -Body $missingBody -Headers $registrationHeaders -ExpectedStatus 422
+    $missingPayload = $missingRegistration.Body | ConvertFrom-Json
+    if ($missingPayload.error -ne "invalid_input" -or !$missingPayload.fields -or $missingRegistration.Headers["Set-Cookie"]) { throw "Missing registration input was not safely rejected" }
+  }
   foreach ($invalidBody in @("email=&password=registration-proof-secret", "email=invalid%40example.com&password=", "email=invalid%40example.com&password=short", "email=not-an-email&password=registration-proof-secret", ("email=invalid%40example.com&password=" + ('x' * 1025)))) {
     $invalidRegistration = Invoke-AxRequest -Url $registerUrl -Body $invalidBody -Headers $registrationHeaders -ExpectedStatus 422
     $invalidPayload = $invalidRegistration.Body | ConvertFrom-Json
