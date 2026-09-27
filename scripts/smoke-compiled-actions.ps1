@@ -244,7 +244,7 @@ route POST "/api/register" {
   input:
     email: String
     password: String
-  before Login.throttle(input.email, 10, 60)
+  before Login.throttle("registration-proof", 10, 60)
   require input.email != "" else error("Invalid registration input")
   require input.password != "" else error("Invalid registration input")
   data userId = Uuid.new()
@@ -598,6 +598,12 @@ route POST "/api/theme-guard" {
   $registrationAnonCookie = ([string] $registrationProof.Headers["Set-Cookie"]).Split(';')[0]
   $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
   $registrationBody = "email=registered%40example.com&password=registration-proof-secret&role=admin&id=user-42"
+  foreach ($invalidBody in @("email=&password=registration-proof-secret", "email=invalid%40example.com&password=")) {
+    $invalidRegistration = Invoke-AxRequest -Url $registerUrl -Body $invalidBody -Headers $registrationHeaders -ExpectedStatus 401
+    if (($invalidRegistration.Body | ConvertFrom-Json).error -ne "Invalid registration input" -or $invalidRegistration.Headers["Set-Cookie"]) { throw "Registration guard failed or issued a session" }
+  }
+  $invalidCounts = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from users where email in (?, ?)", ("", "invalid@example.com")).fetchone()[0]);db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or [int] $invalidCounts -ne 0) { throw "Invalid registration persisted an account" }
   Invoke-AxRequest -Url $registerUrl -Body $registrationBody -Headers @{ Origin = $baseUrl } -ExpectedStatus 403 | Out-Null
   $registered = Invoke-AxRequest -Url $registerUrl -Body $registrationBody -Headers $registrationHeaders
   if (($registered.Body | ConvertFrom-Json) -ne "ok" -or $registered.Body -match "password|argon2|registration-proof-secret") { throw "Registration leaked credential data" }
@@ -612,7 +618,8 @@ route POST "/api/theme-guard" {
   if ($LASTEXITCODE -ne 0) { throw "Registration credential inspection failed" }
   $credentialState = $credentialState | ConvertFrom-Json
   if ($credentialState.id -ne $registeredUser.id -or !$credentialState.argon2 -or $credentialState.plaintext) { throw "Registration did not persist a private password hash" }
-  $duplicate = Invoke-AxRequest -Url $registerUrl -Body $registrationBody -Headers $registrationHeaders -ExpectedStatus 500
+  $duplicate = Invoke-AxRequest -Url $registerUrl -Body $registrationBody -Headers $registrationHeaders -ExpectedStatus 409
+  if (($duplicate.Body | ConvertFrom-Json).error -ne "conflict" -or $duplicate.Headers["Cache-Control"] -ne "no-store") { throw "Registration conflict did not use the safe no-store boundary" }
   if ($duplicate.Headers["Set-Cookie"] -or $duplicate.Body -match "argon2|registration-proof-secret|UNIQUE|credentials") { throw "Failed registration leaked internals or created a session" }
   $registrationCounts = & $python.Source -c 'import sqlite3,sys,json;db=sqlite3.connect(sys.argv[1]);print(json.dumps([db.execute("select count(*) from users where email = ?", ("registered@example.com",)).fetchone()[0],db.execute("select count(*) from credentials where email = ?", ("registered@example.com",)).fetchone()[0]]));db.close()' $dbPath
   if ($LASTEXITCODE -ne 0 -or $registrationCounts -ne "[1, 1]") { throw "Failed credential insert left a partial or duplicate user" }
@@ -647,7 +654,7 @@ route POST "/api/theme-guard" {
       if ($raceBody -match "concurrent-registration-secret|argon2|UNIQUE|credentials") { throw "Concurrent registration leaked credential internals" }
       [int] $raceResponse.StatusCode
     }
-    if ((($raceStatuses | Sort-Object) -join ',') -ne '200,500') { throw "Concurrent duplicate registration did not yield exactly one successful account: $raceStatuses" }
+    if ((($raceStatuses | Sort-Object) -join ',') -ne '200,409') { throw "Concurrent duplicate registration did not yield exactly one successful account: $raceStatuses" }
   } finally {
     foreach ($response in $raceResponses) { $response.Dispose() }
     foreach ($request in $raceRequests) { $request.Dispose() }

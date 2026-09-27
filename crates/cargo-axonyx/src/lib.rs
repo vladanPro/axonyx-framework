@@ -13550,9 +13550,12 @@ fn handle_request_inner(
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
             Err(error) => {{
                 eprintln!("Axonyx compiled API error: {{error}}");
-                AxHttpResponse::json(500, &json!({{
-                    "error": "internal_server_error",
-                    "message": "API request could not be completed."
+                let conflict = matches!(&error, axonyx_runtime::backend::AxRuntimeError::Database {{ error }}
+                    if error.code == "db.unique_violation" || error.code == "db.constraint_violation");
+                let status = if conflict {{ 409 }} else {{ 500 }};
+                AxHttpResponse::json(status, &json!({{
+                    "error": if conflict {{ "conflict" }} else {{ "internal_server_error" }},
+                    "message": if conflict {{ "Request conflicts with existing data." }} else {{ "API request could not be completed." }}
                 }})).unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store()
             }}
         }});
