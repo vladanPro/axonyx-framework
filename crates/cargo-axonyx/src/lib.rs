@@ -17842,9 +17842,10 @@ fn handle_http_request_inner(
         );
     };
 
-    let response = match render_route_response(
+    let response = match render_route_response_with_request(
         state,
         &route,
+        Some(&request),
         mode.inject_dev_client(),
         should_stream_page_route(&state.root, &request.target),
     ) {
@@ -19521,8 +19522,25 @@ fn handle_data_request(
     };
 
     let version = route_version(&state.root, &route)?;
-    let rendered_html =
-        render_route_html_with_database_runtime(state, &route, mode == AxServerMode::Start)?;
+    let mut page_request = request.clone();
+    page_request.target = route.request_target.clone();
+    let rendered_html = match render_route_html_with_request(
+        state,
+        &route,
+        mode == AxServerMode::Start,
+        Some(&page_request),
+    ) {
+        Ok(html) => html,
+        Err(error) => {
+            return render_error_response(
+                state,
+                &request_path,
+                &error,
+                mode.inject_dev_client(),
+                false,
+            )
+        }
+    };
     let page_fragment = extract_page_root_fragment(&rendered_html);
     let body = serde_json::to_vec(&serde_json::json!({
         "ok": true,
@@ -20421,6 +20439,15 @@ fn render_route_html_with_database_runtime(
     route: &ResolvedRoute,
     use_database_runtime: bool,
 ) -> Result<String> {
+    render_route_html_with_request(state, route, use_database_runtime, None)
+}
+
+fn render_route_html_with_request(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    use_database_runtime: bool,
+    request: Option<&AxHttpRequest>,
+) -> Result<String> {
     let page_source = fs::read_to_string(&route.page_path)
         .with_context(|| format!("failed to read '{}'", route.page_path.display()))?;
     let layout_sources = route
@@ -20457,21 +20484,38 @@ fn render_route_html_with_database_runtime(
         .clone();
     let import_resolver = |source: &str| load_preview_import_source(&state.root, source);
 
-    let html = if use_database_runtime && backend_source_refs_use_database(&loader_refs)? {
+    let uses_sessions = backend_source_refs_use_sessions(&loader_refs)?;
+    let html = if (use_database_runtime && backend_source_refs_use_database(&loader_refs)?)
+        || (request.is_some() && uses_sessions)
+    {
         let env = db_env_for_root(&state.root, None)?;
         let runtime = ax_backend_runtime::runtime_from_env(env)
             .with_context(|| "failed to initialize page database runtime from environment")?;
-        preview_ax_route_with_request_context_and_runtime_and_imports(
-            &layout_refs,
-            &loader_refs,
-            &action_refs,
-            &page_source,
-            &route.request_target,
-            &route.params,
-            &runtime,
-            &store,
-            &import_resolver,
-        )
+        if let Some(request) = request {
+            axonyx_runtime::preview_ax_route_with_http_request_and_runtime_and_imports(
+                &layout_refs,
+                &loader_refs,
+                &action_refs,
+                &page_source,
+                request,
+                &route.params,
+                &runtime,
+                &store,
+                &import_resolver,
+            )
+        } else {
+            preview_ax_route_with_request_context_and_runtime_and_imports(
+                &layout_refs,
+                &loader_refs,
+                &action_refs,
+                &page_source,
+                &route.request_target,
+                &route.params,
+                &runtime,
+                &store,
+                &import_resolver,
+            )
+        }
     } else {
         preview_ax_route_with_request_context_and_imports(
             &layout_refs,
@@ -20744,13 +20788,44 @@ fn source_uses_package(source: &str, package: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 fn render_route_response(
     state: &DevServerState,
     route: &ResolvedRoute,
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
-    render_route_response_with_status(state, route, 200, inject_dev_client_script, stream_response)
+    render_route_response_with_request(
+        state,
+        route,
+        None,
+        inject_dev_client_script,
+        stream_response,
+    )
+}
+
+fn render_route_response_with_request(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    request: Option<&AxHttpRequest>,
+    inject_dev_client_script: bool,
+    stream_response: bool,
+) -> Result<AxHttpResponse> {
+    let html = render_route_html_with_request(state, route, !inject_dev_client_script, request)?;
+    let html = if inject_dev_client_script {
+        inject_dev_client(&html, &route.request_path)
+    } else {
+        html
+    };
+    if stream_response {
+        return Ok(AxHttpResponse::stream_chunks(
+            200,
+            "text/html; charset=utf-8",
+            html_stream_chunks(&html),
+        )
+        .with_no_store());
+    }
+    Ok(AxHttpResponse::html(200, html).with_no_store())
 }
 
 fn render_route_response_with_status(
@@ -31260,8 +31335,79 @@ page Posts() {
     }
 
     #[test]
+    fn preview_layout_loaders_use_trusted_sessions_and_recheck_permissions() {
+        use axonyx_runtime::backend_prelude::AxSessionExecutor;
+        let root = make_temp_dir("preview-loader-session");
+        let db = root.join("sessions.sqlite");
+        fs::write(root.join(".env.local"), format!("AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=preview-test-session-secret-32-bytes\nAX_SECRET_SESSION_COOKIE_SECURE=false\n", db.display())).unwrap();
+        fs::create_dir_all(root.join("app/private/child")).unwrap();
+        fs::write(root.join("app/private/layout.asx"), "page Layout() { data identity = loadIdentity()\n return ASX { <header>{identity}</header><Slot /> } }").unwrap();
+        fs::write(root.join("app/private/loader.ax"), "query loadIdentity() {\n  require Auth.subject else error(\"private policy\")\n  data permission = db.permissions.where({ user_id: Auth.subject }).first()\n  require permission else forbidden()\n  return Auth.subject\n}\n").unwrap();
+        fs::write(
+            root.join("app/private/child/page.asx"),
+            "page Child() { data secret = loadSecret()\n return ASX { <p>{secret}</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/child/loader.ax"),
+            "query loadSecret() {\n  return \"private content\"\n}\n",
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection.execute_batch("CREATE TABLE permissions (user_id TEXT); INSERT INTO permissions VALUES ('trusted-user');").unwrap();
+        let runtime =
+            ax_backend_runtime::runtime_from_env(db_env_for_root(&root, None).unwrap()).unwrap();
+        let (_, cookie) = runtime
+            .create_session("trusted-user", BTreeMap::new())
+            .unwrap();
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let anonymous = handle_http_request(
+                &state,
+                mode,
+                AxHttpRequest::new("GET", "/private/child?subject=trusted-user")
+                    .with_header("X-User-Id", "trusted-user"),
+            )
+            .unwrap();
+            assert_eq!(anonymous.status, 401);
+            for target in [
+                "/private/child",
+                "/__axonyx/data?path=%2Fprivate%2Fchild&name=secret",
+            ] {
+                let request = AxHttpRequest::new("GET", target)
+                    .with_header("Cookie", format!("{}={}", cookie.name, cookie.value));
+                let response = handle_http_request(&state, mode, request).unwrap();
+                assert_eq!(response.status, 200);
+                let body = String::from_utf8(response.body.into_bytes()).unwrap();
+                assert!(body.contains("private content"));
+            }
+        }
+        connection.execute("DELETE FROM permissions", []).unwrap();
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            for target in [
+                "/private/child",
+                "/__axonyx/data?path=%2Fprivate%2Fchild&name=secret",
+            ] {
+                let request = AxHttpRequest::new("GET", target)
+                    .with_header("Cookie", format!("{}={}", cookie.name, cookie.value));
+                let response = handle_http_request(&state, mode, request).unwrap();
+                assert_eq!(response.status, 403);
+                assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+                assert!(!String::from_utf8(response.body.into_bytes())
+                    .unwrap()
+                    .contains("private content"));
+            }
+        }
+        drop(connection);
+        drop(runtime);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn preview_page_loader_denial_preserves_status_without_private_html() {
         let root = make_temp_dir("preview-loader-denial");
+        fs::write(root.join(".env.local"), format!("AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=preview-test-session-secret-32-bytes\nAX_SECRET_SESSION_COOKIE_SECURE=false\n", root.join("sessions.sqlite").display())).unwrap();
         fs::create_dir_all(root.join("app/private")).unwrap();
         fs::write(
             root.join("app/private/page.asx"),
