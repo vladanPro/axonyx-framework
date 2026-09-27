@@ -90,6 +90,46 @@ try {
   }
 
   $actionsPath = Join-Path $appRoot "app/posts/actions.ax"
+  New-Item -ItemType Directory -Path (Join-Path $appRoot "app/forms/loaded") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/layout.asx"), @'
+page FormShell() {
+  return ASX {
+    <header>Form application header</header>
+    <Slot />
+  }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/loaded/layout.asx"), @'
+page NestedFormShell() {
+  return ASX { <section id="nested-form-layout"><Slot /></section> }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/page.asx"), @'
+page Forms() {
+  return ASX {
+    <form method="post" action="/__axonyx/action?path=%2Fforms&name=ValidateForm"><input name="email" /><span data-ax-field-error="email"></span><button>Submit</button></form>
+    <form method="post" action="/__axonyx/action?path=%2Fforms&name=Noop"><input name="email" /><span data-ax-field-error="email"></span></form>
+  }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/loaded/page.asx"), @'
+page LoadedForms() {
+  data posts: List<FormPost> = loadFormPosts()
+  return ASX {
+    <form method="post" action="/__axonyx/action?path=%2Fforms%2Floaded&name=ValidateForm"><input name="email" /><span data-ax-field-error="email"></span></form>
+    <Each items={posts} as="post"><p>{post.title}</p></Each>
+  }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/loaded/loader.ax"), @'
+export type FormPost {
+  title: String
+}
+query loadFormPosts() -> FormPost[] {
+  data posts = db.posts.all()
+  return posts
+}
+'@)
   [System.IO.File]::AppendAllText(
     (Join-Path $appRoot "app/backend.ax"),
     ("`n" + '  data themes = ["silver", "bronze", "gold"]' + "`n  data noOptions = 42`n"),
@@ -443,8 +483,18 @@ route POST "/api/theme-guard" {
     if ($formResult.version -ne 1 -or $formResult.action -ne "ValidateForm" -or $formResult.route -ne "/posts" -or $formResult.status -ne 422 -or !$formResult.fields.email) { throw "Request-local form result contract failed" }
   }
   foreach ($body in @("email=invalid", "")) {
-    $nativeError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ValidateForm" -Body $body -Headers @{ Accept = "text/html" } -ExpectedStatus 422
-    if ($nativeError.Headers["Content-Type"] -notmatch "text/html" -or $nativeError.Body -notmatch 'Return to the form' -or $nativeError.Body -notmatch 'href="/posts"' -or $nativeError.Headers["Cache-Control"] -ne "no-store") { throw "Native form validation fallback failed" }
+    $nativeError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fmissing-form&name=ValidateForm" -Body $body -Headers @{ Accept = "text/html" } -ExpectedStatus 422
+    if ($nativeError.Headers["Content-Type"] -notmatch "text/html" -or $nativeError.Body -notmatch 'Return to the form' -or $nativeError.Body -notmatch 'href="/missing-form"' -or $nativeError.Headers["Cache-Control"] -ne "no-store") { throw "Native form validation fallback failed" }
+  }
+  foreach ($path in @("/forms", "/forms/loaded")) {
+    $formPage = Invoke-AxRequest -Url "$baseUrl$path" -Method GET
+    if ($formPage.Body -notmatch "Form application header" -or $formPage.Body -notmatch "/__axonyx/action") { throw "Compiled GET did not render form layout" }
+    foreach ($body in @("email=invalid", "")) {
+      $encodedPath = [uri]::EscapeDataString($path)
+      $renderedError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=$encodedPath&name=ValidateForm" -Body $body -Headers @{ Accept = "text/html" } -ExpectedStatus 422
+      if ($renderedError.Body -notmatch "Form application header" -or ([regex]::Matches($renderedError.Body, 'aria-invalid="true"')).Count -ne 1 -or $renderedError.Headers["Cache-Control"] -ne "no-store") { throw "Compiled POST did not rerender original form" }
+      if ($path -eq "/forms/loaded" -and ($renderedError.Body -notmatch 'id="nested-form-layout"' -or $renderedError.Body -notmatch 'Original detail title')) { throw "Compiled POST lost nested layout or SQLite data" }
+    }
   }
   $probeUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=GuardProbe"
   Invoke-AxRequest -Url $probeUrl -Body "id=1&ratio=1.5&flag=true&theme=gold&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } | Out-Null
