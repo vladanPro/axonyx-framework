@@ -129,6 +129,12 @@ query loadFormPosts() -> FormPost[] {
   data posts = db.posts.all()
   return posts
 }
+
+query deniedPosts() {
+  require false else error("private loader policy detail")
+  data posts = db.posts.all()
+  return posts
+}
 '@)
   [System.IO.File]::AppendAllText(
     (Join-Path $appRoot "app/backend.ax"),
@@ -162,6 +168,12 @@ action Noop() {
 
 action ValidateForm(email: String) {
   require Validate.email(input.email) else invalid({email: "Enter a valid email address."})
+  return ok()
+}
+
+action CountInvalid() {
+  db.posts.where({ slug: "fresh-compiled-post" }).update({ excerpt: "Invocation probe" })
+  require false else invalid({email: "Test validation error."})
   return ok()
 }
 
@@ -379,6 +391,11 @@ route POST "/api/theme-guard" {
   require input.theme in themes else error "Choose silver, bronze, or gold."
   return json(input.theme)
 }
+
+route GET "/api/denied-loader" {
+  data posts = deniedPosts()
+  return json(posts)
+}
 '@,
     (New-Object System.Text.UTF8Encoding($false))
   )
@@ -477,6 +494,8 @@ route POST "/api/theme-guard" {
   }
 
   $actionUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=SetTheme"
+  $deniedLoader = Invoke-AxRequest -Url "$baseUrl/api/denied-loader" -Method GET -ExpectedStatus 500
+  if ($deniedLoader.Body -match "Original detail title|private loader policy detail|Backend requirement") { throw "Denied loader exposed data or private guard details" }
   foreach ($body in @("email=invalid&__ax_patch=true", "__ax_patch=true")) {
     $formError = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ValidateForm" -Body $body -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
     $formResult = ($formError.Body | ConvertFrom-Json).form
@@ -767,6 +786,10 @@ route POST "/api/theme-guard" {
   $detailPayload = $detailData.Body | ConvertFrom-Json
   if (!$detailPayload.ok -or $detailPayload.value.title -ne "Fresh parameterized title") { throw "Parameterized loader response is invalid: $($detailData.Body)" }
   if ($detailPayload.html -notmatch 'data-ax-root="page"' -or $detailPayload.html -notmatch "Fresh parameterized title") { throw "Parameterized page HTML was not regenerated: $($detailData.Body)" }
+  $detailPage = Invoke-AxRequest -Url "$baseUrl/posts/fresh-compiled-post" -Method GET
+  if ($detailPage.Body -notmatch "Fresh parameterized title" -or $detailPage.Headers["Cache-Control"] -ne "no-store") { throw "Compiled GET lost dynamic route parameters or served stale HTML" }
+  $detailHead = Invoke-AxRequest -Url "$baseUrl/posts/fresh-compiled-post" -Method HEAD
+  if ($detailHead.Body -ne "" -or $detailHead.Headers["Content-Type"] -notmatch "text/html") { throw "Compiled HEAD returned a body or lost its document content type" }
   Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2F%2Fevil.example&name=posts" -Method "GET" -ExpectedStatus 400 | Out-Null
 
   $invalid = Invoke-AxRequest -Url $actionUrl -Body "theme=&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 422
@@ -781,6 +804,21 @@ route POST "/api/theme-guard" {
   if ($fallback.Headers["Location"] -ne "/posts") { throw "Compiled no-JS redirect fallback is invalid" }
   $safeFallback = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2F%2Fevil.example&name=Noop" -Body "noop=1" -ExpectedStatus 303
   if ($safeFallback.Headers["Location"] -ne "/") { throw "Compiled action allowed an unsafe redirect" }
+
+  # A database trigger counts effects so an accidental second action dispatch is observable.
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.executescript("CREATE TABLE invocation_probe (id INTEGER); CREATE TRIGGER count_probe AFTER UPDATE ON posts BEGIN INSERT INTO invocation_probe VALUES (1); END;");db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "Could not prepare action invocation probe" }
+  Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms%2Floaded&name=CountInvalid" -Body "" -Headers @{ Accept = "text/html" } -ExpectedStatus 422 | Out-Null
+  $invocations = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from invocation_probe").fetchone()[0]);db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or $invocations -ne "1") { throw "Native validation rerender redispatched the action: $invocations effects" }
+
+  # Fail the disposable fixture's loader after all successful database scenarios.
+  & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("drop table posts");db.commit();db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0) { throw "Could not prepare loader failure fixture" }
+  $failedPage = Invoke-AxRequest -Url "$baseUrl/forms/loaded" -Method GET -ExpectedStatus 500
+  if ($failedPage.Body -match "Original detail title|Fresh parameterized title|SQL|sqlite|no such table|SELECT" -or $failedPage.Headers["Cache-Control"] -ne "no-store") { throw "Failed loader exposed internals or served stale page data" }
+  $failedRerender = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms%2Floaded&name=ValidateForm" -Body "email=invalid" -Headers @{ Accept = "text/html" } -ExpectedStatus 422
+  if ($failedRerender.Body -notmatch "Return to the form" -or $failedRerender.Body -match "Original detail title|SQL|sqlite|no such table|SELECT" -or $failedRerender.Headers["Cache-Control"] -ne "no-store") { throw "Failed form loader did not use a safe validation fallback" }
 
   Write-Host "Axonyx compiled action smoke passed."
 } finally {
