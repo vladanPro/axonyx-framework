@@ -90,6 +90,8 @@ try {
   }
 
   $actionsPath = Join-Path $appRoot "app/posts/actions.ax"
+  New-Item -ItemType Directory -Path (Join-Path $appRoot "app/api/guide") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/api/guide/page.asx"), 'page ApiGuide() { return ASX { <p>API documentation page</p> } }')
   New-Item -ItemType Directory -Path (Join-Path $appRoot "app/forms/private") -Force | Out-Null
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/private/page.asx"), @'
 page PrivateForm() {
@@ -545,6 +547,8 @@ route GET "/api/forbidden-loader" {
   }
 
   $actionUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=SetTheme"
+  $apiPage = Invoke-AxRequest -Url "$baseUrl/api/guide" -Method GET
+  if ($apiPage.Body -notmatch "API documentation page") { throw "API dispatcher shadowed an app page without a matching backend route" }
   $deniedLoader = Invoke-AxRequest -Url "$baseUrl/api/denied-loader" -Method GET -ExpectedStatus 401
   if ($deniedLoader.Body -match "Original detail title|private loader policy detail|Backend requirement") { throw "Denied loader exposed data or private guard details" }
   $forbiddenLoader = Invoke-AxRequest -Url "$baseUrl/api/forbidden-loader" -Method GET -ExpectedStatus 403
