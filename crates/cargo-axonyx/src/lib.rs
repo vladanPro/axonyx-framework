@@ -89,7 +89,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.5.1";
+const AXONYX_RUNTIME_VERSION: &str = "0.6.0";
 const AXONYX_UI_VERSION: &str = "0.0.71";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -1292,6 +1292,7 @@ struct CompiledDataBinding {
 struct CompiledPageRenderer {
     route_pattern: String,
     document_json: String,
+    full_document_json: String,
     import_sources: Vec<(String, String)>,
 }
 
@@ -9172,6 +9173,20 @@ fn check_backend_requirements(
 
     let type_names = root.and_then(|root| collect_project_type_names(root).ok());
     diagnostics.extend(check_backend_route_inputs(path, source, document, &plan));
+    if let Err(error) = axonyx_core::ax_backend_codegen::validate_request_record_inputs(&plan) {
+        let field = match &error {
+            axonyx_core::ax_backend_codegen::AxBackendCodegenError::UnsupportedRequestRecordInput { field, .. } => field.as_str(),
+            _ => "",
+        };
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_source_pattern(source, &format!("{field}:")),
+            column: 1,
+            severity: "error",
+            code: "axonyx-record-input-contract",
+            message: error.to_string(),
+        });
+    }
     diagnostics.extend(check_backend_database_surface(path, source, root, document));
     diagnostics.extend(check_backend_return_contracts(
         path,
@@ -10626,7 +10641,11 @@ fn check_backend_route_inputs(
 
         let mut seen = std::collections::BTreeSet::new();
         for field in &route.input {
-            if !is_supported_route_input_type(&field.ty) {
+            let declared_record = plan
+                .types
+                .iter()
+                .any(|record| record.name == field.ty.trim());
+            if !is_supported_route_input_type(&field.ty) && !declared_record {
                 diagnostics.push(CheckDiagnostic {
                     file: display_path(path),
                     line: line_for_source_pattern(source, &format!("{}:", field.name)),
@@ -10634,7 +10653,7 @@ fn check_backend_route_inputs(
                     severity: "error",
                     code: "axonyx-route-input-type",
                     message: format!(
-                        "route input `{}` uses unsupported type `{}`. Supported route input types are string, bool, i64, u64, and f64.",
+                        "route input `{}` uses unsupported type `{}`. Supported route input types are string, bool, i64, u64, f64, and required declared records.",
                         field.name, field.ty
                     ),
                 });
@@ -13195,40 +13214,50 @@ fn compiled_action_signal_aliases(root: &Path) -> Result<Vec<(String, String, St
 fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
     let mut bindings = Vec::new();
     for route in collect_page_route_manifest(root)? {
-        let page_path = root.join(&route.file);
-        let source = fs::read_to_string(&page_path)
-            .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
-        let Ok(document) = parse_ax_auto(&source) else {
-            continue;
-        };
+        let mut names = std::collections::BTreeSet::new();
+        for source_path in route.layouts.iter().chain(std::iter::once(&route.file)) {
+            let page_path = root.join(source_path);
+            let source = fs::read_to_string(&page_path)
+                .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
+            let Ok(document) = parse_ax_auto(&source) else {
+                continue;
+            };
 
-        for statement in &document.page.body {
-            let AxStatement::Data(binding) = statement else {
-                continue;
-            };
-            let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
-                continue;
-            };
-            if args
-                .iter()
-                .any(|arg| compiled_loader_arg_source(arg).is_none())
-            {
-                continue;
+            for statement in &document.page.body {
+                let AxStatement::Data(binding) = statement else {
+                    continue;
+                };
+                let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
+                    continue;
+                };
+                if args
+                    .iter()
+                    .any(|arg| compiled_loader_arg_source(arg).is_none())
+                {
+                    continue;
+                }
+                let Some(loader) = path.last().filter(|name| name.starts_with("load")) else {
+                    continue;
+                };
+                if !names.insert(binding.name.clone()) {
+                    bail!(
+                        "duplicate compiled data binding '{}' across page/layout for route '{}'",
+                        binding.name,
+                        route.route
+                    );
+                }
+
+                let mut query_key = vec![binding.name.clone()];
+                query_key.extend(args.iter().map(format_ax_expr));
+                bindings.push(CompiledDataBinding {
+                    route_pattern: route.route.clone(),
+                    name: binding.name.clone(),
+                    loader: loader.clone(),
+                    args: args.to_vec(),
+                    source: format_ax_expr(&binding.value),
+                    query_key,
+                });
             }
-            let Some(loader) = path.last().filter(|name| name.starts_with("load")) else {
-                continue;
-            };
-
-            let mut query_key = vec![binding.name.clone()];
-            query_key.extend(args.iter().map(format_ax_expr));
-            bindings.push(CompiledDataBinding {
-                route_pattern: route.route.clone(),
-                name: binding.name.clone(),
-                loader: loader.clone(),
-                args: args.to_vec(),
-                source: format_ax_expr(&binding.value),
-                query_key,
-            });
         }
     }
     Ok(bindings)
@@ -13244,26 +13273,133 @@ fn compiled_page_renderers(
             .iter()
             .filter(|binding| binding.route_pattern == route.route)
             .count();
-        if route_bindings == 0 {
-            continue;
+        if let Some(resolved) = resolve_route(root, &route.route)? {
+            let mut uses_content = false;
+            for source in collect_layout_and_page_loader_sources(root, &resolved)? {
+                let plan =
+                    lower_backend_document(&parse_backend_ax(&source).map_err(anyhow::Error::msg)?)
+                        .map_err(anyhow::Error::msg)?;
+                uses_content |= plan.globals.iter().chain(plan.handlers.iter()
+                    .filter(|handler| data_bindings.iter().any(|binding| binding.route_pattern == route.route && binding.loader == handler.name))
+                    .flat_map(|handler| handler.steps.iter())).any(|step| matches!(step,
+                    AxStepPlan::Let { value: AxValuePlan::Query(query), .. }
+                    if matches!(query.source, axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::ContentCollection { .. })));
+            }
+            if uses_content {
+                if route_requires_session_render(root, &resolved)? {
+                    bail!(
+                        "session-bound content route '{}' cannot use static fallback",
+                        route.route
+                    );
+                }
+                continue;
+            }
         }
-
         let page_path = root.join(&route.file);
         let source = fs::read_to_string(&page_path)
             .with_context(|| format!("failed to read page source '{}'", page_path.display()))?;
         let document = parse_ax_auto(&source)
             .with_context(|| format!("failed to parse page source '{}'", page_path.display()))?;
-        if data_bindings_from_document(&document).len() != route_bindings {
+
+        let layout_sources = route
+            .layouts
+            .iter()
+            .map(|path| {
+                fs::read_to_string(root.join(path))
+                    .with_context(|| format!("failed to read layout '{path}'"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let layout_refs = layout_sources
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut expected_bindings = document
+            .page
+            .body
+            .iter()
+            .filter(|statement| matches!(statement, AxStatement::Data(binding) if query_call_from_binding_expr(&binding.value).is_some()))
+            .count();
+        for layout_source in &layout_sources {
+            let layout = parse_ax_auto(layout_source).map_err(anyhow::Error::msg)?;
+            expected_bindings += layout
+                .page
+                .body
+                .iter()
+                .filter(|statement| matches!(statement, AxStatement::Data(binding) if query_call_from_binding_expr(&binding.value).is_some()))
+                .count();
+        }
+        if expected_bindings != route_bindings {
             continue;
+        }
+        let mut full_document =
+            axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+        let uses_ui = layout_refs
+            .iter()
+            .any(|source| source_uses_package(source, "@axonyx/ui"))
+            || source_uses_package(&source, "@axonyx/ui");
+        if uses_ui && resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME).is_some() {
+            let (css, js) = axonyx_ui_asset_hrefs(root);
+            full_document.head.links.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("rel", "stylesheet")
+                    .attr("href", css),
+            );
+            full_document.head.scripts.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("src", js)
+                    .attr("defer", "true"),
+            );
+        }
+        let mut visited = std::collections::BTreeSet::new();
+        let mut scripts = std::collections::BTreeSet::new();
+        for path in route
+            .layouts
+            .iter()
+            .map(|path| root.join(path))
+            .chain(std::iter::once(page_path.clone()))
+        {
+            collect_component_client_script_hrefs(root, &path, &mut visited, &mut scripts)?;
+        }
+        for script in scripts {
+            full_document.head.scripts.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("src", script)
+                    .attr("defer", "true"),
+            );
+        }
+        if let Some(theme) = axonyx_config_table(root, "theme") {
+            if full_document.head.theme.is_none() {
+                if let Some(active) = theme
+                    .get("active")
+                    .and_then(toml::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    full_document.head.theme = Some(active.trim().into());
+                }
+            }
+            if let Some(css) = theme
+                .get("stylesheet")
+                .and_then(toml::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                full_document.head.links.push(
+                    axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                        .attr("rel", "stylesheet")
+                        .attr("href", css.trim()),
+                );
+            }
         }
 
         let mut import_sources = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         collect_compiled_import_sources(root, &document, &mut seen, &mut import_sources)?;
+        collect_compiled_import_sources(root, &full_document, &mut seen, &mut import_sources)?;
         renderers.push(CompiledPageRenderer {
             route_pattern: route.route,
             document_json: serde_json::to_string(&document)
                 .context("failed to serialize compiled page AST")?,
+            full_document_json: serde_json::to_string(&full_document)
+                .context("failed to serialize complete compiled document AST")?,
             import_sources,
         });
     }
@@ -13276,17 +13412,44 @@ fn collect_compiled_import_sources(
     seen: &mut std::collections::BTreeSet<String>,
     sources: &mut Vec<(String, String)>,
 ) -> Result<()> {
-    for import in &document.imports {
-        if !seen.insert(import.source.clone()) {
+    let imports = document
+        .imports
+        .iter()
+        .map(|import| import.source.clone())
+        .collect::<Vec<_>>();
+    collect_compiled_module_sources(root, &imports, seen, sources)
+}
+
+fn collect_compiled_module_sources(
+    root: &Path,
+    imports: &[String],
+    seen: &mut std::collections::BTreeSet<String>,
+    sources: &mut Vec<(String, String)>,
+) -> Result<()> {
+    for source in imports {
+        if !seen.insert(source.clone()) {
             continue;
         }
-        let contents = load_preview_import_source(root, &import.source).with_context(|| {
-            format!("failed to resolve compiled page import '{}'", import.source)
-        })?;
-        let imported = parse_ax_auto(&contents)
-            .with_context(|| format!("failed to parse compiled page import '{}'", import.source))?;
-        collect_compiled_import_sources(root, &imported, seen, sources)?;
-        sources.push((import.source.clone(), contents));
+        let contents = load_preview_import_source(root, source)
+            .with_context(|| format!("failed to resolve compiled page import '{}'", source))?;
+        let imports = if let Some(module) = parse_ax_component_module_v2(&contents)
+            .with_context(|| format!("failed to parse compiled component import '{source}'"))?
+        {
+            module
+                .imports
+                .into_iter()
+                .map(|import| import.source)
+                .collect::<Vec<_>>()
+        } else {
+            parse_ax_auto(&contents)
+                .with_context(|| format!("failed to parse compiled page import '{source}'"))?
+                .imports
+                .into_iter()
+                .map(|import| import.source)
+                .collect::<Vec<_>>()
+        };
+        collect_compiled_module_sources(root, &imports, seen, sources)?;
+        sources.push((source.clone(), contents));
     }
     Ok(())
 }
@@ -13448,6 +13611,10 @@ fn compiled_production_source(
             )
         })
         .collect::<String>();
+    let page_document_renderer_arms = page_renderers.iter().map(|renderer| {
+        let imports = renderer.import_sources.iter().map(|(source, contents)| format!("({source:?}, {contents:?})")).collect::<Vec<_>>().join(", ");
+        format!("    if route_pattern_matches({pattern:?}, path) {{ return Some(({pattern:?}, {document:?}, &[{imports}])); }}\n", pattern = renderer.route_pattern, document = renderer.full_document_json)
+    }).collect::<String>();
     format!(
         r#"use std::collections::BTreeMap;
 use std::path::{{Component, Path, PathBuf}};
@@ -13494,12 +13661,17 @@ fn handle_request(
     storage: &impl AxFileStorage,
     request: AxHttpRequest,
 ) -> AxHttpResponse {{
+    let started = std::time::Instant::now();
     let response = handle_request_inner(dist, runtime, storage, request.clone());
-    if SESSIONS_REQUIRED {{
-        return secure(axonyx_runtime::csrf_http::protect_form_response(runtime, &request, response)
-            .unwrap_or_else(|_| AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()));
-    }}
-    response
+    let response = if SESSIONS_REQUIRED {{
+        secure(axonyx_runtime::csrf_http::protect_form_response(runtime, &request, response)
+            .unwrap_or_else(|_| AxHttpResponse::text(500, "CSRF runtime unavailable").with_no_store()))
+    }} else {{ response }};
+    let metric = format!("axonyx;dur={{:.3}}", started.elapsed().as_secs_f64() * 1000.0);
+    let timing = response.header_value("Server-Timing")
+        .map(|existing| format!("{{existing}}, {{metric}}"))
+        .unwrap_or(metric);
+    response.with_header("Server-Timing", timing)
 }}
 
 fn handle_request_inner(
@@ -13545,21 +13717,45 @@ fn handle_request_inner(
             return secure(AxHttpResponse::text(403, "Forbidden: cross-site Axonyx mutation request").with_no_store());
         }}
         let response = backend::dispatch_api_route(runtime, &request, VALIDATE_API_RESPONSES);
+        if !matches!(&response, Ok(None)) {{
         return secure(match response {{
             Ok(Some(response)) => response,
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
             Err(error) => {{
                 eprintln!("Axonyx compiled API error: {{error}}");
-                AxHttpResponse::json(500, &json!({{
-                    "error": "internal_server_error",
-                    "message": "API request could not be completed."
+                if let Some(status) = error.access_denial_status() {{
+                    return secure(AxHttpResponse::json(status, &error.public_error_payload())
+                        .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store());
+                }}
+                if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{
+                    return secure(AxHttpResponse::json(422, &error.public_error_payload())
+                        .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store());
+                }}
+                let conflict = matches!(&error, axonyx_runtime::backend::AxRuntimeError::Database {{ error }}
+                    if error.code == "db.unique_violation" || error.code == "db.constraint_violation");
+                let status = if conflict {{ 409 }} else {{ 500 }};
+                AxHttpResponse::json(status, &json!({{
+                    "error": if conflict {{ "conflict" }} else {{ "internal_server_error" }},
+                    "message": if conflict {{ "Request conflicts with existing data." }} else {{ "API request could not be completed." }}
                 }})).unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store()
             }}
         }});
+        }}
     }}
 
     if !request.method.eq_ignore_ascii_case("GET") && !request.method.eq_ignore_ascii_case("HEAD") {{
         return secure(AxHttpResponse::text(405, "Method Not Allowed"));
+    }}
+    let path = request.target.split('?').next().unwrap_or("/");
+    match render_compiled_route_document(runtime, &request, path, None) {{
+        Ok(Some(html)) => {{
+            let mut response = AxHttpResponse::html(200, html).with_no_store();
+            if request.method.eq_ignore_ascii_case("HEAD") {{ response.body = AxBody::fixed(Vec::new()); }}
+            return secure(response);
+        }},
+        Ok(None) => {{}},
+        Err(error) => return secure(AxHttpResponse::text(error.access_denial_status().unwrap_or(500),
+            if error.access_denial_status().is_some() {{ "Access denied." }} else {{ "Page could not be rendered." }}).with_no_store()),
     }}
     let mut response = static_response(dist, &request.target)
         .unwrap_or_else(|| AxHttpResponse::text(404, "Not Found"));
@@ -13657,6 +13853,20 @@ fn handle_compiled_action(
             }}
             normalize_action_payload(&route, &mut payload);
             let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
+            if !ok && payload.pointer("/error/status").and_then(Value::as_u64) == Some(422) {{
+                let result = axonyx_runtime::form_result::AxFormResult::validation(&name, &route,
+                    payload.pointer("/error/value/fields").unwrap_or(&Value::Null));
+                if let Some(result) = result {{
+                    if let Value::Object(fields) = &mut payload {{
+                        fields.insert("form".into(), json!(result));
+                    }}
+                }}
+            }}
+            if !ok && payload.pointer("/error/status").and_then(Value::as_u64) == Some(422)
+                && axonyx_runtime::validation::wants_html_error(request) {{
+                return with_action_cookies(render_native_form_error(runtime, request, &name, &route,
+                    payload.pointer("/error/value/fields").unwrap_or(&Value::Null)), output.cookies);
+            }}
             let response = if wants_action_patch_response(request) || !ok {{
                 let status = if ok {{
                     200
@@ -13685,20 +13895,80 @@ fn handle_compiled_action(
         Ok(None) => AxHttpResponse::text(404, "action not found").with_no_store(),
         Err(error) => {{
             eprintln!("Axonyx compiled action error: {{error}}");
+            if let Some(status) = error.access_denial_status() {{
+                return AxHttpResponse::json(status, &error.public_error_payload())
+                    .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store();
+            }}
+            if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }})
+                && axonyx_runtime::validation::wants_html_error(request) {{
+                let payload = error.public_error_payload();
+                return render_native_form_error(runtime, request, &name, &route, payload.get("fields").unwrap_or(&Value::Null));
+            }}
             let body = json!({{
                 "ok": false,
                 "redirect": route,
-                "error": {{ "message": "Action failed.", "status": 500, "value": error.public_error_payload() }},
+                "error": {{ "message": "Action failed.", "status": if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{ 422 }} else {{ 500 }}, "value": if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{ error.public_error_payload() }} else {{ json!({{"error":"internal_server_error"}}) }} }},
                 "patches": [],
                 "invalidations": [],
                 "refreshes": [],
             }});
+            let mut body = body;
+            if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{
+                let result = axonyx_runtime::form_result::AxFormResult::validation(&name, &route,
+                    body.pointer("/error/value/fields").unwrap_or(&Value::Null));
+                if let Some(result) = result {{
+                    if let Value::Object(fields) = &mut body {{ fields.insert("form".into(), json!(result)); }}
+                }}
+            }}
             match serde_json::to_vec(&body) {{
-                Ok(body) => AxHttpResponse::bytes(500, "application/ax-error+json; charset=utf-8", body).with_no_store(),
+                Ok(bytes) => AxHttpResponse::bytes(body.pointer("/error/status").and_then(Value::as_u64).unwrap_or(500) as u16, "application/ax-error+json; charset=utf-8", bytes).with_no_store(),
                 Err(_) => AxHttpResponse::text(500, "Internal Server Error").with_no_store(),
             }}
         }}
     }}
+}}
+
+fn render_compiled_route_document(
+    runtime: &impl AxBackendRuntime,
+    request: &AxHttpRequest,
+    path: &str,
+    form: Option<&axonyx_runtime::form_result::AxFormResult>,
+) -> Result<Option<String>, axonyx_runtime::backend::AxRuntimeError> {{
+    let Some((pattern, document, imports)) = compiled_page_document_renderer(path) else {{ return Ok(None); }};
+    let params = route_params(pattern, path).ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page route mismatch"))?;
+    let mut read_request = axonyx_runtime::form_result::page_read_request(request, path);
+    if form.is_none() {{ read_request.target = request.target.clone(); }}
+    let mut values = BTreeMap::new();
+    for binding in compiled_route_bindings(path) {{
+        let args = compiled_binding_args(&binding, path)?;
+        let value = backend::dispatch_loader(runtime, binding.loader, binding.pattern, &read_request, &args)?
+            .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page loader missing"))?;
+        values.insert(compiled_loader_call_key(binding.loader, &args), value);
+    }}
+    axonyx_runtime::render_compiled_page_document(document, imports, &read_request.target, &params, &values, form)
+        .map(Some).map_err(|_| axonyx_runtime::backend::AxRuntimeError::message("compiled document render failed"))
+}}
+
+fn render_native_form_error(
+    runtime: &impl AxBackendRuntime,
+    request: &AxHttpRequest,
+    name: &str,
+    route: &str,
+    fields: &Value,
+) -> AxHttpResponse {{
+    if let Some(result) = axonyx_runtime::form_result::AxFormResult::validation(name, route, fields) {{
+        match render_compiled_route_document(runtime, request, route, Some(&result)) {{
+            Ok(Some(html)) => return AxHttpResponse::html(422, html).with_no_store(),
+            Ok(None) => {{}},
+            Err(error) => {{
+                if let Some(status) = error.access_denial_status() {{
+                    return AxHttpResponse::text(status, "Access denied.").with_no_store();
+                }}
+                eprintln!("Axonyx form document render failed; using safe fallback");
+            }},
+        }}
+    }}
+    axonyx_runtime::validation::html_error_response(fields, route)
 }}
 
 fn with_action_cookies(
@@ -13794,6 +14064,10 @@ fn handle_compiled_data(
         }},
         Err(error) => {{
             eprintln!("Axonyx compiled data error: {{error}}");
+            if let Some(status) = error.access_denial_status() {{
+                return AxHttpResponse::json(status, &error.public_error_payload())
+                    .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store();
+            }}
             AxHttpResponse::text(500, "Internal Server Error").with_no_store()
         }}
     }}
@@ -13819,6 +14093,10 @@ fn compiled_route_param(pattern: &str, path: &str, name: &str) -> Result<Value, 
 
 fn compiled_page_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
 {page_renderer_arms}    None
+}}
+
+pub fn compiled_page_document_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
+{page_document_renderer_arms}    None
 }}
 
 fn compiled_refreshes(route: &str, invalidations: &[Value]) -> Vec<Value> {{
@@ -14005,6 +14283,29 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
     }
 }
 
+fn route_requires_session_render(root: &Path, route: &ResolvedRoute) -> Result<bool> {
+    for source in collect_layout_and_page_loader_sources(root, route)? {
+        let document = parse_backend_ax(&source).map_err(anyhow::Error::msg)?;
+        let plan = lower_backend_document(&document).map_err(anyhow::Error::msg)?;
+        if axonyx_core::ax_backend_lowering_prelude::ax_steps_use_auth_subject(
+            plan.globals.iter().chain(
+                plan.handlers
+                    .iter()
+                    .filter(|handler| {
+                        matches!(
+                            handler.kind,
+                            axonyx_core::ax_backend_lowering_prelude::AxHandlerKind::Loader { .. }
+                        )
+                    })
+                    .flat_map(|handler| handler.steps.iter()),
+            ),
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn build_static_site_from_app_root(
     root: &Path,
     out_dir: &Path,
@@ -14055,9 +14356,26 @@ fn build_static_site_from_app_root(
         database_required: project_uses_database_runtime(root)?,
     };
 
+    let mut rendered_static_count = 0;
     for route in &static_routes {
         let resolved = resolve_route(root, &route.route)?
             .ok_or_else(|| anyhow::anyhow!("failed to resolve route '{}'", route.route))?;
+        if route_requires_session_render(root, &resolved)? {
+            let stale = static_route_output_path(&output_dir, &route.route)?;
+            if stale.is_file() {
+                fs::remove_file(&stale).with_context(|| {
+                    format!(
+                        "failed to remove stale protected output '{}'",
+                        stale.display()
+                    )
+                })?;
+            }
+            eprintln!(
+                "Server-rendered session route: {} (no static HTML)",
+                route.route
+            );
+            continue;
+        }
         let html = render_route_html(&state, &resolved)?;
         let output_path = static_route_output_path(&output_dir, &route.route)?;
 
@@ -14068,6 +14386,7 @@ fn build_static_site_from_app_root(
 
         fs::write(&output_path, html)
             .with_context(|| format!("failed to write '{}'", output_path.display()))?;
+        rendered_static_count += 1;
     }
 
     let prerendered_count = build_prerendered_routes(
@@ -14089,7 +14408,7 @@ fn build_static_site_from_app_root(
     );
 
     Ok(StaticBuildStatus::Generated {
-        route_count: static_routes.len(),
+        route_count: rendered_static_count,
         prerendered_count,
         skipped_dynamic_count,
         content_collection_count,
@@ -14149,6 +14468,12 @@ fn build_prerendered_routes(
             let resolved = resolve_route(root, &concrete_route)?.ok_or_else(|| {
                 anyhow::anyhow!("failed to resolve prerender route '{}'", concrete_route)
             })?;
+            if route_requires_session_render(root, &resolved)? {
+                bail!(
+                    "cannot prerender session-bound route '{}'; use compiled server rendering",
+                    concrete_route
+                );
+            }
             let html = render_route_html(state, &resolved)?;
             let output_path = static_route_output_path(output_dir, &concrete_route)?;
 
@@ -17514,8 +17839,19 @@ fn handle_http_request_inner(
     {
         return Ok(response);
     }
-    if let Some(response) = execute_backend_route_request(state, mode, &request)? {
-        return Ok(preview_response_to_http(response));
+    match execute_backend_route_request(state, mode, &request) {
+        Ok(Some(response)) => return Ok(preview_response_to_http(response)),
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(axonyx_runtime::PreviewError::InvalidInput { field }) =
+                error.downcast_ref::<axonyx_runtime::PreviewError>()
+            {
+                let payload =
+                    ax_backend_runtime::AxRuntimeError::invalid_input(field).public_error_payload();
+                return Ok(AxHttpResponse::json(422, &payload)?.with_no_store());
+            }
+            return Err(error);
+        }
     }
 
     if request.method != "GET" {
@@ -17535,9 +17871,10 @@ fn handle_http_request_inner(
         );
     };
 
-    let response = match render_route_response(
+    let response = match render_route_response_with_request(
         state,
         &route,
+        Some(&request),
         mode.inject_dev_client(),
         should_stream_page_route(&state.root, &request.target),
     ) {
@@ -18881,10 +19218,11 @@ fn handle_action_request(
     let content_type = request.header_value("Content-Type").unwrap_or("");
     if !content_type.starts_with("application/x-www-form-urlencoded")
         && !content_type.starts_with("multipart/form-data")
+        && !content_type.starts_with("application/json")
     {
         return Ok(AxHttpResponse::text(
             415,
-            "expected application/x-www-form-urlencoded or multipart/form-data",
+            "expected application/x-www-form-urlencoded, multipart/form-data or application/json",
         )
         .with_no_store());
     }
@@ -18946,17 +19284,57 @@ fn handle_action_request(
             &state.storage_registry,
             &mut store,
         )
-    }
-    .with_context(|| {
-        format!(
-            "failed to execute action '{}' from '{}'",
-            action_name,
-            actions_path.display()
-        )
-    })?;
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(axonyx_runtime::PreviewError::InvalidInput { field }) => AxPreviewActionResult {
+            redirect_to: None,
+            value: axonyx_core::ax_lowering_prelude::AxValue::Null,
+            patches: Vec::new(),
+            invalidations: Vec::new(),
+            cookies: Vec::new(),
+            error: Some(axonyx_runtime::AxPreviewActionError::validation(
+                "Invalid input.",
+                axonyx_core::ax_lowering_prelude::AxValue::record([(
+                    "fields",
+                    axonyx_core::ax_lowering_prelude::AxValue::record([(
+                        field,
+                        axonyx_core::ax_lowering_prelude::AxValue::String(
+                            "Missing or invalid input.".to_string(),
+                        ),
+                    )]),
+                )]),
+            )),
+        },
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "failed to execute action '{action_name}' from '{}'",
+                actions_path.display()
+            )))
+        }
+    };
 
     if wants_action_patch_response(request, &input_fields) {
         return action_patch_response(&route, &result);
+    }
+
+    if let Some(error) = &result.error {
+        if error.status == 422 && axonyx_runtime::validation::wants_html_error(request) {
+            let value = ax_value_to_json(&error.value);
+            if let Some(fields) = value.get("fields") {
+                let response = render_native_action_validation(
+                    state,
+                    mode,
+                    request,
+                    &route,
+                    &action_name,
+                    fields,
+                )?;
+                return Ok(with_action_cookies(response, &result));
+            }
+        }
+        return action_error_response(&route, error)
+            .map(|response| with_action_cookies(response, &result));
     }
 
     let redirect_to = result.redirect_to.clone().unwrap_or(route.request_path);
@@ -18964,6 +19342,48 @@ fn handle_action_request(
         redirect_response(303, &redirect_to),
         &result,
     ))
+}
+
+fn render_native_action_validation(
+    state: &DevServerState,
+    mode: AxServerMode,
+    request: &AxHttpRequest,
+    route: &ResolvedRoute,
+    action: &str,
+    fields: &serde_json::Value,
+) -> Result<AxHttpResponse> {
+    let Some(form) =
+        axonyx_runtime::form_result::AxFormResult::validation(action, &route.request_path, fields)
+    else {
+        return Ok(axonyx_runtime::validation::html_error_response(
+            fields,
+            &route.request_path,
+        ));
+    };
+    let read = axonyx_runtime::form_result::page_read_request(request, &route.request_target);
+    match render_route_html_with_form_result(
+        state,
+        route,
+        mode == AxServerMode::Start,
+        Some(&read),
+        Some(&form),
+    ) {
+        Ok(html) => {
+            let html = if mode.inject_dev_client() {
+                inject_dev_client(&html, &route.request_path)
+            } else {
+                html
+            };
+            Ok(AxHttpResponse::html(422, html).with_no_store())
+        }
+        Err(error) => render_error_response(
+            state,
+            &route.request_target,
+            &error,
+            mode.inject_dev_client(),
+            false,
+        ),
+    }
 }
 
 fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
@@ -19114,8 +19534,7 @@ fn wants_action_patch_response(
         .get("__ax_patch")
         .is_some_and(|value| parse_boolish(value))
         || request
-            .headers
-            .get("accept")
+            .header_value("Accept")
             .is_some_and(|value| value.contains("application/ax-patch+json"))
 }
 
@@ -19214,8 +19633,25 @@ fn handle_data_request(
     };
 
     let version = route_version(&state.root, &route)?;
-    let rendered_html =
-        render_route_html_with_database_runtime(state, &route, mode == AxServerMode::Start)?;
+    let mut page_request = request.clone();
+    page_request.target = route.request_target.clone();
+    let rendered_html = match render_route_html_with_request(
+        state,
+        &route,
+        mode == AxServerMode::Start,
+        Some(&page_request),
+    ) {
+        Ok(html) => html,
+        Err(error) => {
+            return render_error_response(
+                state,
+                &request_path,
+                &error,
+                mode.inject_dev_client(),
+                false,
+            )
+        }
+    };
     let page_fragment = extract_page_root_fragment(&rendered_html);
     let body = serde_json::to_vec(&serde_json::json!({
         "ok": true,
@@ -20114,6 +20550,25 @@ fn render_route_html_with_database_runtime(
     route: &ResolvedRoute,
     use_database_runtime: bool,
 ) -> Result<String> {
+    render_route_html_with_request(state, route, use_database_runtime, None)
+}
+
+fn render_route_html_with_request(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    use_database_runtime: bool,
+    request: Option<&AxHttpRequest>,
+) -> Result<String> {
+    render_route_html_with_form_result(state, route, use_database_runtime, request, None)
+}
+
+fn render_route_html_with_form_result(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    use_database_runtime: bool,
+    request: Option<&AxHttpRequest>,
+    form: Option<&axonyx_runtime::form_result::AxFormResult>,
+) -> Result<String> {
     let page_source = fs::read_to_string(&route.page_path)
         .with_context(|| format!("failed to read '{}'", route.page_path.display()))?;
     let layout_sources = route
@@ -20127,8 +20582,7 @@ fn render_route_html_with_database_runtime(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let loader_sources =
-        collect_route_loader_source_strings(&state.root, route.loader_path.as_deref())?;
+    let loader_sources = collect_layout_and_page_loader_sources(&state.root, route)?;
     let loader_refs = loader_sources
         .iter()
         .map(String::as_str)
@@ -20151,18 +20605,63 @@ fn render_route_html_with_database_runtime(
         .clone();
     let import_resolver = |source: &str| load_preview_import_source(&state.root, source);
 
-    let html = if use_database_runtime && backend_source_refs_use_database(&loader_refs)? {
+    let uses_sessions = backend_source_refs_use_sessions(&loader_refs)?;
+    let html = if (use_database_runtime && backend_source_refs_use_database(&loader_refs)?)
+        || (request.is_some() && uses_sessions)
+    {
         let env = db_env_for_root(&state.root, None)?;
         let runtime = ax_backend_runtime::runtime_from_env(env)
             .with_context(|| "failed to initialize page database runtime from environment")?;
-        preview_ax_route_with_request_context_and_runtime_and_imports(
+        if let Some(request) = request {
+            if let Some(form) = form {
+                axonyx_runtime::preview_ax_route_with_form_result_and_imports(
+                    &layout_refs,
+                    &loader_refs,
+                    &action_refs,
+                    &page_source,
+                    request,
+                    &route.params,
+                    Some(&runtime),
+                    form,
+                    &store,
+                    &import_resolver,
+                )
+            } else {
+                axonyx_runtime::preview_ax_route_with_http_request_and_runtime_and_imports(
+                    &layout_refs,
+                    &loader_refs,
+                    &action_refs,
+                    &page_source,
+                    request,
+                    &route.params,
+                    &runtime,
+                    &store,
+                    &import_resolver,
+                )
+            }
+        } else {
+            preview_ax_route_with_request_context_and_runtime_and_imports(
+                &layout_refs,
+                &loader_refs,
+                &action_refs,
+                &page_source,
+                &route.request_target,
+                &route.params,
+                &runtime,
+                &store,
+                &import_resolver,
+            )
+        }
+    } else if let (Some(request), Some(form)) = (request, form) {
+        axonyx_runtime::preview_ax_route_with_form_result_and_imports(
             &layout_refs,
             &loader_refs,
             &action_refs,
             &page_source,
-            &route.request_target,
+            request,
             &route.params,
-            &runtime,
+            None,
+            form,
             &store,
             &import_resolver,
         )
@@ -20304,6 +20803,31 @@ fn apply_package_use_assets(
     ensure_head_script(&html, &script_href)
 }
 
+fn collect_layout_and_page_loader_sources(
+    root: &Path,
+    route: &ResolvedRoute,
+) -> Result<Vec<String>> {
+    let mut sources = collect_route_loader_source_strings(root, route.loader_path.as_deref())?;
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(path) = &route.loader_path {
+        seen.insert(path.clone());
+    }
+    for layout in &route.layout_paths {
+        let Some(parent) = layout.parent() else {
+            continue;
+        };
+        let path = parent.join("loader.ax");
+        if path.is_file() && seen.insert(path.clone()) {
+            sources.push(
+                fs::read_to_string(&path).with_context(|| {
+                    format!("failed to read layout loader '{}'", path.display())
+                })?,
+            );
+        }
+    }
+    Ok(sources)
+}
+
 fn collect_route_loader_source_strings(
     root: &Path,
     route_loader_path: Option<&Path>,
@@ -20413,13 +20937,44 @@ fn source_uses_package(source: &str, package: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 fn render_route_response(
     state: &DevServerState,
     route: &ResolvedRoute,
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
-    render_route_response_with_status(state, route, 200, inject_dev_client_script, stream_response)
+    render_route_response_with_request(
+        state,
+        route,
+        None,
+        inject_dev_client_script,
+        stream_response,
+    )
+}
+
+fn render_route_response_with_request(
+    state: &DevServerState,
+    route: &ResolvedRoute,
+    request: Option<&AxHttpRequest>,
+    inject_dev_client_script: bool,
+    stream_response: bool,
+) -> Result<AxHttpResponse> {
+    let html = render_route_html_with_request(state, route, !inject_dev_client_script, request)?;
+    let html = if inject_dev_client_script {
+        inject_dev_client(&html, &route.request_path)
+    } else {
+        html
+    };
+    if stream_response {
+        return Ok(AxHttpResponse::stream_chunks(
+            200,
+            "text/html; charset=utf-8",
+            html_stream_chunks(&html),
+        )
+        .with_no_store());
+    }
+    Ok(AxHttpResponse::html(200, html).with_no_store())
 }
 
 fn render_route_response_with_status(
@@ -20475,6 +21030,16 @@ fn render_error_response(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
+    if let Some(axonyx_runtime::PreviewError::AccessDenied { status }) =
+        error.downcast_ref::<axonyx_runtime::PreviewError>()
+    {
+        let message = if *status == 401 {
+            "Authentication required."
+        } else {
+            "Access denied."
+        };
+        return Ok(AxHttpResponse::text(*status, message).with_no_store());
+    }
     if let Some(route) = resolve_boundary_route(&state.root, "error.asx", request_target) {
         match render_route_response_with_status(
             state,
@@ -24875,6 +25440,143 @@ page Home
     }
 
     #[test]
+    fn public_content_pages_use_static_fallback_but_private_content_is_rejected() {
+        let root = make_temp_dir("compiled-content-fallback");
+        fs::create_dir_all(root.join("app")).unwrap();
+        fs::write(
+            root.join("app/page.asx"),
+            "page Docs() {\n  data docs = loadDocs()\n  return ASX { <p>Docs</p> }\n}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/loader.ax"),
+            "query loadDocs() {\n  data docs = Content.Collection(\"docs\")\n  return docs\n}",
+        )
+        .unwrap();
+        let bindings = compiled_data_bindings(&root).unwrap();
+        assert!(compiled_page_renderers(&root, &bindings)
+            .unwrap()
+            .is_empty());
+        fs::write(root.join("app/loader.ax"), "query loadDocs() {\n  require Auth.subject else forbidden()\n  data docs = Content.Collection(\"docs\")\n  return docs\n}").unwrap();
+        assert!(compiled_page_renderers(&root, &bindings)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot use static fallback"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compiled_import_collection_supports_transitive_component_modules() {
+        let root = make_temp_dir("compiled-component-imports");
+        fs::create_dir_all(root.join("app/shared")).unwrap();
+        fs::write(
+            root.join("app/shared/Inner.asx"),
+            "component Inner() {\n<p>Imported component</p>\n}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/shared/Outer.asx"),
+            "import { Inner } from \"@/shared/Inner.asx\"\ncomponent Outer() {\n<Inner />\n}",
+        )
+        .unwrap();
+        let document = parse_ax_auto("import { Outer } from \"@/shared/Outer.asx\"\npage Home() { return ASX { <Outer /> } }").unwrap();
+        let mut sources = Vec::new();
+        collect_compiled_import_sources(
+            &root,
+            &document,
+            &mut std::collections::BTreeSet::new(),
+            &mut sources,
+        )
+        .unwrap();
+        assert_eq!(sources.len(), 2);
+        let refs = sources
+            .iter()
+            .map(|(name, contents)| (name.as_str(), contents.as_str()))
+            .collect::<Vec<_>>();
+        let html = axonyx_runtime::render_compiled_page_document(
+            &serde_json::to_string(&document).unwrap(),
+            &refs,
+            "/",
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+        assert!(html.contains("Imported component"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compiled_layout_bindings_are_planned_and_duplicate_names_are_rejected() {
+        let root = make_temp_dir("compiled-layout-bindings");
+        fs::create_dir_all(root.join("app")).unwrap();
+        fs::write(root.join("app/layout.asx"), "page Shell() {\n data heading: String = loadHeading()\n return ASX { <header>{heading}</header><Slot /> }\n}").unwrap();
+        fs::write(root.join("app/page.asx"), "page Home() {\n data content: String = loadContent()\n return ASX { <p>{content}</p> }\n}").unwrap();
+        let bindings = compiled_data_bindings(&root).unwrap();
+        assert_eq!(
+            bindings
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect::<Vec<_>>(),
+            ["heading", "content"]
+        );
+        assert_eq!(compiled_page_renderers(&root, &bindings).unwrap().len(), 1);
+        fs::write(root.join("app/page.asx"), "page Home() {\n data heading: String = loadContent()\n return ASX { <p>{heading}</p> }\n}").unwrap();
+        assert!(compiled_data_bindings(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate compiled data binding"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn static_build_removes_stale_session_page_but_keeps_public_routes() {
+        let root = make_temp_dir("static-session-page");
+        fs::create_dir_all(root.join("app/private")).unwrap();
+        fs::create_dir_all(root.join("dist/private")).unwrap();
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n").unwrap();
+        fs::write(
+            root.join("app/page.asx"),
+            "page Home() { return ASX { <p>Public</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/page.asx"),
+            "page Private() { return ASX { <p>Private</p> } }",
+        )
+        .unwrap();
+        fs::write(root.join("app/private/loader.ax"), "query privateData() {\n  require Auth.subject else error(\"private policy\")\n  return 1\n}").unwrap();
+        fs::write(
+            root.join("dist/private/index.html"),
+            "stale private content",
+        )
+        .unwrap();
+        build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect("protected page should be server rendered");
+        assert!(!root.join("dist/private/index.html").exists());
+        assert!(root.join("dist/index.html").is_file());
+        fs::create_dir_all(root.join("app/private/child")).unwrap();
+        fs::write(
+            root.join("app/private/layout.asx"),
+            "page PrivateShell() { return ASX { <Slot /> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/child/page.asx"),
+            "page Child() { return ASX { <p>Child</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/child/loader.ax"),
+            "query childData() {\n  return 1\n}",
+        )
+        .unwrap();
+        let child = resolve_route(&root, "/private/child").unwrap().unwrap();
+        assert!(route_requires_session_render(&root, &child).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn build_static_site_skips_dynamic_routes_until_prerender_config_exists() {
         let root = make_temp_dir("static-build-dynamic");
         fs::create_dir_all(root.join("app/blog/[slug]")).expect("blog dir should exist");
@@ -26261,6 +26963,7 @@ action ValidPost
             &[CompiledPageRenderer {
                 route_pattern: "/posts".to_string(),
                 document_json: "{\"page\":\"posts\"}".to_string(),
+                full_document_json: "{\"page\":\"posts\"}".to_string(),
                 import_sources: Vec::new(),
             }],
             CompiledProductionOptions {
@@ -26277,6 +26980,9 @@ action ValidPost
         assert!(source.contains("backend::dispatch_action"));
         assert!(source.contains("backend::dispatch_loader"));
         assert!(source.contains("serve_compiled_axum"));
+        assert!(source.contains("let started = std::time::Instant::now()"));
+        assert!(source.contains("response.header_value(\"Server-Timing\")"));
+        assert!(source.contains("response.with_header(\"Server-Timing\", timing)"));
         assert!(source.contains("Component::Normal"));
         assert!(source.contains("application/ax-patch+json"));
         assert!(source.contains("application/ax-data+json"));
@@ -26341,6 +27047,55 @@ action ValidPost
         assert!(source.contains("\"media\", PathBuf::from(\"storage/media\")"));
         assert!(source.contains("2097152, AxStorageAccess::Write"));
         assert!(!source.contains("AxUnavailableFileStorage"));
+    }
+
+    #[test]
+    fn compiled_static_page_plan_contains_complete_nested_layout_document() {
+        let root = make_temp_dir("compiled-static-document");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[theme]\nactive = \"gold\"\nstylesheet = \"/theme.css\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("app/register")).unwrap();
+        fs::write(
+            root.join("app/layout.asx"),
+            "page Shell\n<header>Application header</header>\n<Slot />",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/register/layout.asx"),
+            "page Section\n<section id=\"registration\"><Slot /></section>",
+        )
+        .unwrap();
+        fs::write(root.join("app/register/page.asx"), "page Register\n<form method=\"post\" action=\"/__axonyx/action?name=Register&path=%2Fregister\"><input name=\"email\" /><span data-ax-field-error=\"email\"></span></form>").unwrap();
+        let renderers = compiled_page_renderers(&root, &[]).unwrap();
+        let renderer = renderers
+            .iter()
+            .find(|item| item.route_pattern == "/register")
+            .unwrap();
+        let result = axonyx_runtime::form_result::AxFormResult::validation(
+            "Register",
+            "/register",
+            &serde_json::json!({"email":"Invalid email."}),
+        )
+        .unwrap();
+        let html = axonyx_runtime::render_compiled_page_document(
+            &renderer.full_document_json,
+            &[],
+            "/register",
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            Some(&result),
+        )
+        .unwrap();
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Application header"));
+        assert!(html.contains("id=\"registration\""));
+        assert!(html.contains("Invalid email."));
+        assert!(html.contains("data-theme=\"gold\""));
+        assert!(html.contains("/theme.css"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -30729,6 +31484,224 @@ page Posts() {
     }
 
     #[test]
+    fn preview_input_errors_return_safe_422_for_api_bridge_and_native_forms() {
+        let root = make_temp_dir("preview-input-422");
+        fs::create_dir_all(root.join("routes/api")).unwrap();
+        fs::create_dir_all(root.join("app/input")).unwrap();
+        fs::write(
+            root.join("routes/api/count.ax"),
+            "route POST \"/api/count\" {\n  input:\n    count: Int\n  return json(input.count)\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/input/actions.ax"),
+            "action Save(count: Int) {\n  return input.count\n}\n",
+        )
+        .unwrap();
+        fs::write(root.join("app/input/page.asx"), "page Input() {\n  return ASX {\n    <form method=\"post\" action=\"/__axonyx/action?path=%2Finput&name=Save\"><input name=\"count\" /><span data-ax-field-error=\"count\"></span></form>\n  }\n}\n").unwrap();
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            for body in [
+                r#"{}"#,
+                r#"{"count":"PRIVATE_BAD_VALUE"}"#,
+                r#"{"count":[]}"#,
+                "not-json",
+            ] {
+                let request = AxHttpRequest::new("POST", "/api/count")
+                    .with_header("Content-Type", "application/json")
+                    .with_body(body.as_bytes().to_vec());
+                let response = handle_http_request(&state, mode, request).unwrap();
+                assert_eq!(response.status, 422);
+                assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&response.body.into_bytes()).unwrap();
+                assert_eq!(payload["error"], "invalid_input");
+                assert_eq!(payload["fields"]["count"], "Missing or invalid input.");
+                assert!(!payload.to_string().contains("PRIVATE_BAD_VALUE"));
+            }
+            for accept in ["application/ax-patch+json", "text/html"] {
+                for body in ["", "count=PRIVATE_BAD_VALUE"] {
+                    let request =
+                        AxHttpRequest::new("POST", "/__axonyx/action?path=%2Finput&name=Save")
+                            .with_header("Content-Type", "application/x-www-form-urlencoded")
+                            .with_header("Accept", accept)
+                            .with_body(body.as_bytes().to_vec());
+                    let response = handle_http_request(&state, mode, request).unwrap();
+                    assert_eq!(response.status, 422);
+                    let body = String::from_utf8(response.body.into_bytes()).unwrap();
+                    assert!(body.contains("Missing or invalid input."));
+                    assert!(!body.contains("PRIVATE_BAD_VALUE"));
+                    if accept == "text/html" {
+                        assert!(body.contains("aria-invalid=\"true\""));
+                    }
+                }
+            }
+            let request = AxHttpRequest::new("POST", "/__axonyx/action?path=%2Finput&name=Save")
+                .with_header("Content-Type", "application/json")
+                .with_header("Accept", "application/ax-patch+json")
+                .with_body(br#"{"count":42}"#.to_vec());
+            let response = handle_http_request(&state, mode, request).unwrap();
+            assert_eq!(response.status, 200);
+            let payload: serde_json::Value =
+                serde_json::from_slice(&response.body.into_bytes()).unwrap();
+            assert_eq!(payload["value"], 42);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preview_layout_loaders_use_trusted_sessions_and_recheck_permissions() {
+        use axonyx_runtime::backend_prelude::AxSessionExecutor;
+        let root = make_temp_dir("preview-loader-session");
+        let db = root.join("sessions.sqlite");
+        fs::write(root.join(".env.local"), format!("AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=preview-test-session-secret-32-bytes\nAX_SECRET_SESSION_COOKIE_SECURE=false\n", db.display())).unwrap();
+        fs::create_dir_all(root.join("app/private/child")).unwrap();
+        fs::write(root.join("app/private/layout.asx"), "page Layout() { data identity = loadIdentity()\n return ASX { <header>{identity}</header><Slot /> } }").unwrap();
+        fs::write(root.join("app/private/loader.ax"), "query loadIdentity() {\n  require Auth.subject else error(\"private policy\")\n  data permission = db.permissions.where({ user_id: Auth.subject }).first()\n  require permission else forbidden()\n  return Auth.subject\n}\n").unwrap();
+        fs::write(
+            root.join("app/private/child/page.asx"),
+            "page Child() { data secret = loadSecret()\n return ASX { <p>{secret}</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/private/child/loader.ax"),
+            "query loadSecret() {\n  return \"private content\"\n}\n",
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection.execute_batch("CREATE TABLE permissions (user_id TEXT); INSERT INTO permissions VALUES ('trusted-user');").unwrap();
+        let runtime =
+            ax_backend_runtime::runtime_from_env(db_env_for_root(&root, None).unwrap()).unwrap();
+        let (_, cookie) = runtime
+            .create_session("trusted-user", BTreeMap::new())
+            .unwrap();
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let anonymous = handle_http_request(
+                &state,
+                mode,
+                AxHttpRequest::new("GET", "/private/child?subject=trusted-user")
+                    .with_header("X-User-Id", "trusted-user"),
+            )
+            .unwrap();
+            assert_eq!(anonymous.status, 401);
+            for target in [
+                "/private/child",
+                "/__axonyx/data?path=%2Fprivate%2Fchild&name=secret",
+            ] {
+                let request = AxHttpRequest::new("GET", target)
+                    .with_header("Cookie", format!("{}={}", cookie.name, cookie.value));
+                let response = handle_http_request(&state, mode, request).unwrap();
+                assert_eq!(response.status, 200);
+                let body = String::from_utf8(response.body.into_bytes()).unwrap();
+                assert!(body.contains("private content"));
+            }
+        }
+        connection
+            .execute_batch("CREATE TABLE audit (event TEXT);")
+            .unwrap();
+        fs::write(root.join("app/private/child/loader.ax"), "query loadSecret() {\n  return \"private content\"\n}\nquery loadAudit() {\n  return db.audit.all()\n}\n").unwrap();
+        fs::write(root.join("app/private/child/actions.ax"), "action Validate(email: String, password: String) {\n  require Auth.subject else forbidden()\n  db.audit.insert({ event: \"once\" })\n  require Validate.email(input.email) else invalid({ email: \"Enter a valid email.\" })\n  return ok()\n}\n").unwrap();
+        fs::write(root.join("app/private/child/page.asx"), r#"page Child() {
+  data secret = loadSecret()
+  data audit = loadAudit()
+  return ASX {
+    <p>{secret}</p>
+    <Each items={audit} as="entry"><li>{entry.event}</li></Each>
+    <form id="matching" method="post" action="/__axonyx/action?path=%2Fprivate%2Fchild&name=Validate"><input name="email" /><input name="password" /><span data-ax-field-error="email"></span></form>
+    <form id="other" method="post" action="/__axonyx/action?path=%2Fprivate%2Fchild&name=Other"><input name="email" /><span data-ax-field-error="email"></span></form>
+  }
+}"#).unwrap();
+        let native = || {
+            AxHttpRequest::new(
+                "POST",
+                "/__axonyx/action?path=%2Fprivate%2Fchild&name=Validate",
+            )
+            .with_header("Content-Type", "application/x-www-form-urlencoded")
+            .with_header("Accept", "text/html")
+            .with_header("Cookie", format!("{}={}", cookie.name, cookie.value))
+            .with_body(b"email=bad&password=DO_NOT_ECHO_SECRET&subject=attacker".to_vec())
+        };
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let before: i64 = connection
+                .query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+                .unwrap();
+            let response = handle_action_request(&state, mode, &native()).unwrap();
+            assert_eq!(response.status, 422);
+            assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+            let body = String::from_utf8(response.body.into_bytes()).unwrap();
+            assert!(body.contains("private content"));
+            assert!(body.contains("trusted-user"));
+            assert!(body.contains("Enter a valid email."));
+            assert_eq!(
+                body.matches("<li>once</li>").count() as i64,
+                before + 1,
+                "rerender must use fresh loader values"
+            );
+            assert_eq!(body.matches("aria-invalid=\"true\"").count(), 1);
+            assert!(!body.contains("DO_NOT_ECHO_SECRET"));
+            let after: i64 = connection
+                .query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(after, before + 1, "rerender must not redispatch the action");
+        }
+        connection.execute("DELETE FROM permissions", []).unwrap();
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let response = handle_action_request(&state, mode, &native()).unwrap();
+            assert_eq!(response.status, 403);
+            let body = String::from_utf8(response.body.into_bytes()).unwrap();
+            assert!(!body.contains("private content"));
+            assert!(!body.contains("DO_NOT_ECHO_SECRET"));
+        }
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            for target in [
+                "/private/child",
+                "/__axonyx/data?path=%2Fprivate%2Fchild&name=secret",
+            ] {
+                let request = AxHttpRequest::new("GET", target)
+                    .with_header("Cookie", format!("{}={}", cookie.name, cookie.value));
+                let response = handle_http_request(&state, mode, request).unwrap();
+                assert_eq!(response.status, 403);
+                assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+                assert!(!String::from_utf8(response.body.into_bytes())
+                    .unwrap()
+                    .contains("private content"));
+            }
+        }
+        drop(connection);
+        drop(runtime);
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn preview_page_loader_denial_preserves_status_without_private_html() {
+        let root = make_temp_dir("preview-loader-denial");
+        fs::write(root.join(".env.local"), format!("AX_SECRET_DB_DRIVER=sqlite\nAX_SECRET_DB_URL={}\nAX_SECRET_SESSION_KEY=preview-test-session-secret-32-bytes\nAX_SECRET_SESSION_COOKIE_SECURE=false\n", root.join("sessions.sqlite").display())).unwrap();
+        fs::create_dir_all(root.join("app/private")).unwrap();
+        fs::write(
+            root.join("app/private/page.asx"),
+            "page Private() { data secret = loadPrivate()\n return ASX { <p>{secret}</p> } }",
+        )
+        .unwrap();
+        let state = test_dev_state(&root);
+        for (fallback, status) in [("error(\"private policy\")", 401), ("forbidden()", 403)] {
+            fs::write(root.join("app/private/loader.ax"), format!("query loadPrivate() {{\n  require Auth.subject else {fallback}\n  return \"private data\"\n}}\n")).unwrap();
+            for mode in [AxServerMode::Dev, AxServerMode::Start] {
+                let response =
+                    handle_http_request(&state, mode, AxHttpRequest::new("GET", "/private"))
+                        .unwrap();
+                assert_eq!(response.status, status);
+                assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+                let body = String::from_utf8(response.body.into_bytes()).unwrap();
+                assert!(!body.contains("private data"));
+                assert!(!body.contains("private policy"));
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn renders_dynamic_page_route_with_loader_params_and_query_context() {
         let root = make_temp_dir("dynamic-page-render");
         fs::create_dir_all(root.join("app/posts/[slug]")).expect("dynamic app dir should exist");
@@ -33422,6 +34395,37 @@ route POST "/api/posts"
         assert_eq!(diagnostics[0].line, 4);
         assert_eq!(diagnostics[0].code, "axonyx-route-input-type");
         assert!(diagnostics[0].message.contains("PostTitle"));
+    }
+
+    #[test]
+    fn check_ax_source_accepts_required_declared_record_route_input() {
+        let diagnostics = check_ax_source_with_root(
+            &PathBuf::from("demo/routes/api/posts.ax"),
+            "export type PostInput {\n  title: String\n}\nroute POST \"/api/posts\" {\n  input:\n    post: PostInput\n  return json(input.post)\n}",
+            None,
+        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn check_ax_source_reports_unsupported_record_carrier_before_build() {
+        let source = "export type PostInput {\n  title: String\n  amount: Decimal\n}\naction Save(post: PostInput) {\n  return input.post\n}";
+        let diagnostics =
+            check_ax_source_with_root(&PathBuf::from("demo/actions.ax"), source, None);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "axonyx-record-input-contract");
+        assert!(diagnostics[0].message.contains("PostInput.amount"));
+        assert!(diagnostics[0].message.contains("Decimal"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_one_diagnostic_for_optional_record() {
+        let source = "export type PostInput {\n  title: String\n}\nroute POST \"/api/posts\" {\n  input:\n    post?: PostInput\n  return json(input.post)\n}";
+        let diagnostics =
+            check_ax_source_with_root(&PathBuf::from("demo/routes/api/posts.ax"), source, None);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "axonyx-record-input-contract");
+        assert!(diagnostics[0].message.contains("must be required"));
     }
 
     #[test]
