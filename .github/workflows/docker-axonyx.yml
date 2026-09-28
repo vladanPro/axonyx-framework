@@ -6,7 +6,7 @@ on:
       tag:
         description: Docker image tag
         required: true
-        default: "0.5.1"
+        default: "0.6.0"
       push_latest:
         description: Also push latest tag
         required: true
