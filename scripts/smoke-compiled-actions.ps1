@@ -43,6 +43,8 @@ function Invoke-AxRequest {
       $request.Accept = [string] $header.Value
     } elseif ($header.Key -ieq "Origin") {
       $request.Headers["Origin"] = [string] $header.Value
+    } elseif ($header.Key -ieq "Content-Type") {
+      $request.ContentType = [string] $header.Value
     } elseif ($header.Key -ieq "Cookie") {
       $request.CookieContainer = New-Object System.Net.CookieContainer
       $request.CookieContainer.SetCookies([uri] $Url, [string] $header.Value)
@@ -205,6 +207,22 @@ action Noop() {
   return ok()
 }
 
+export type ActionRecordAuthor {
+  name: String
+}
+export type ActionRecordInput {
+  title: String
+  summary?: String
+  tags: String[]
+  count: Int
+  score: Float
+  author: ActionRecordAuthor
+}
+action SaveRecord(post: ActionRecordInput) {
+  cookie "record-probe" = "executed"
+  return input.post
+}
+
 action ValidateForm(email: String) {
   require Validate.email(input.email) else invalid({email: "Enter a valid email address."})
   return ok()
@@ -352,6 +370,23 @@ route POST "/api/addition-probe" {
     ratio: Float
     enabled: Bool
   return json({ label: "Count: " + input.count, suffix: input.count + " items", total: input.count + input.ratio, reverse: input.ratio + input.count, enabled: "enabled=" + input.enabled, chained: "1" + 2 + 3, grouped: "1" + (2 + 3) })
+}
+
+export type ApiRecordAuthor {
+  name: String
+}
+export type ApiRecordInput {
+  title: String
+  summary?: String
+  tags: String[]
+  count: Int
+  score: Float
+  author: ApiRecordAuthor
+}
+route POST "/api/record-probe" {
+  input:
+    post: ApiRecordInput
+  return json(input.post)
 }
 
 route POST "/api/register" {
@@ -522,6 +557,19 @@ route GET "/api/forbidden-loader" {
   if (!$ready) { throw "Compiled server did not become ready" }
 
   $addition = Invoke-AxRequest -Url "$baseUrl/api/addition-probe" -Body "count=42&ratio=0.5&enabled=true"
+  $recordBody = '{"post":{"title":"Hello","tags":["rust"],"count":3,"score":1.25,"author":{"name":"Ada","extra":true},"extra":true}}'
+  $recordHeaders = @{ 'Content-Type' = 'application/json'; Accept = 'application/ax-patch+json' }
+  $recordApi = Invoke-AxRequest -Url "$baseUrl/api/record-probe" -Body $recordBody -Headers $recordHeaders
+  $record = $recordApi.Body | ConvertFrom-Json
+  if ($record.title -ne 'Hello' -or $record.score -ne 1.25 -or $record.author.name -ne 'Ada' -or $null -ne $record.summary -or $record.PSObject.Properties.Name -contains 'extra' -or $record.author.PSObject.Properties.Name -contains 'extra') { throw 'Compiled record API did not preserve its type contract' }
+  $recordAction = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=SaveRecord" -Body $recordBody -Headers $recordHeaders
+  if (($recordAction.Body | ConvertFrom-Json).value.title -ne 'Hello' -or $recordAction.Headers['Set-Cookie'] -notmatch 'record-probe=executed') { throw 'Compiled record action did not decode input' }
+  foreach ($body in @('{}', '{"post":{"title":"PRIVATE_VALUE"}}', '{"post":{"title":123,"tags":[],"count":3,"score":1.25}}', '{"post":"{}"}', 'broken-json')) {
+    foreach ($url in @("$baseUrl/api/record-probe", "$baseUrl/__axonyx/action?path=%2Fposts&name=SaveRecord")) {
+      $invalidRecord = Invoke-AxRequest -Url $url -Body $body -Headers $recordHeaders -ExpectedStatus 422
+      if ($invalidRecord.Body.Contains('PRIVATE_VALUE') -or $invalidRecord.Headers['Cache-Control'] -notmatch 'no-store' -or $invalidRecord.Headers['Set-Cookie'] -match 'record-probe') { throw 'Compiled record error exposed input, allowed caching or executed action effects' }
+    }
+  }
   $invalidNumber = Invoke-AxRequest -Url "$baseUrl/api/addition-probe" -Body "count=secret-not-a-number&ratio=0.5&enabled=true" -ExpectedStatus 422
   $invalidNumberPayload = $invalidNumber.Body | ConvertFrom-Json
   if ($invalidNumberPayload.error -ne "invalid_input" -or !$invalidNumberPayload.fields.count -or $invalidNumber.Body.Contains("secret-not-a-number")) { throw "Numeric input failure was not safely classified" }
