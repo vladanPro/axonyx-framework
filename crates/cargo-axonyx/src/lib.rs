@@ -13986,10 +13986,12 @@ fn normalize_action_payload(route: &str, payload: &mut Value) {{
     for patch in patches {{
         let Some(signal) = patch.get("signal").and_then(Value::as_str).map(str::to_string) else {{ continue; }};
         let canonical = match (route, signal.as_str()) {{
-{signal_match_arms}            _ => continue,
+{signal_match_arms}            _ => signal.as_str(),
         }};
-        if let Value::Object(fields) = patch {{
-            fields.insert("signal".to_string(), Value::String(canonical.to_string()));
+        if canonical != signal.as_str() {{
+            if let Value::Object(fields) = patch {{
+                fields.insert("signal".to_string(), Value::String(canonical.to_string()));
+            }}
         }}
     }}
     let invalidations = payload.get("invalidations").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -14074,11 +14076,13 @@ fn handle_compiled_data(
 }}
 
 fn compiled_route_bindings(path: &str) -> Vec<CompiledBinding> {{
+    let _ = path;
     let mut bindings = Vec::new();
 {route_binding_steps}    bindings
 }}
 
 fn compiled_binding_args(binding: &CompiledBinding, path: &str) -> Result<Vec<Value>, axonyx_runtime::backend::AxRuntimeError> {{
+    let _ = path;
     match (binding.pattern, binding.name) {{
 {binding_arg_arms}        _ => Err(axonyx_runtime::backend::AxRuntimeError::message("compiled loader arguments not found")),
     }}
@@ -27017,6 +27021,28 @@ action ValidPost
         );
         assert!(!source.contains("compiled actions are not enabled"));
         assert!(!source.contains("read_to_string"));
+    }
+
+    #[test]
+    fn compiled_production_source_keeps_unknown_patches_when_no_signals_exist() {
+        let source = compiled_production_source(
+            "\"dist\"",
+            &[],
+            &[],
+            &[],
+            CompiledProductionOptions {
+                sessions_required: false,
+                public_origin: None,
+                database_runtime_defaults: "",
+                database_required: false,
+                validate_api_responses: false,
+                storage_configs: &[],
+            },
+        );
+
+        assert!(source.contains("_ => signal.as_str(),"));
+        assert!(source.contains("if canonical != signal.as_str()"));
+        assert!(!source.contains("_ => continue,"));
     }
 
     #[test]
