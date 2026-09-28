@@ -9173,6 +9173,20 @@ fn check_backend_requirements(
 
     let type_names = root.and_then(|root| collect_project_type_names(root).ok());
     diagnostics.extend(check_backend_route_inputs(path, source, document, &plan));
+    if let Err(error) = axonyx_core::ax_backend_codegen::validate_request_record_inputs(&plan) {
+        let field = match &error {
+            axonyx_core::ax_backend_codegen::AxBackendCodegenError::UnsupportedRequestRecordInput { field, .. } => field.as_str(),
+            _ => "",
+        };
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_source_pattern(source, &format!("{field}:")),
+            column: 1,
+            severity: "error",
+            code: "axonyx-record-input-contract",
+            message: error.to_string(),
+        });
+    }
     diagnostics.extend(check_backend_database_surface(path, source, root, document));
     diagnostics.extend(check_backend_return_contracts(
         path,
@@ -10627,13 +10641,11 @@ fn check_backend_route_inputs(
 
         let mut seen = std::collections::BTreeSet::new();
         for field in &route.input {
-            let required_record = !field.optional
-                && field.default.is_none()
-                && plan
-                    .types
-                    .iter()
-                    .any(|record| record.name == field.ty.trim());
-            if !is_supported_route_input_type(&field.ty) && !required_record {
+            let declared_record = plan
+                .types
+                .iter()
+                .any(|record| record.name == field.ty.trim());
+            if !is_supported_route_input_type(&field.ty) && !declared_record {
                 diagnostics.push(CheckDiagnostic {
                     file: display_path(path),
                     line: line_for_source_pattern(source, &format!("{}:", field.name)),
@@ -34393,6 +34405,27 @@ route POST "/api/posts"
             None,
         );
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn check_ax_source_reports_unsupported_record_carrier_before_build() {
+        let source = "export type PostInput {\n  title: String\n  amount: Decimal\n}\naction Save(post: PostInput) {\n  return input.post\n}";
+        let diagnostics =
+            check_ax_source_with_root(&PathBuf::from("demo/actions.ax"), source, None);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "axonyx-record-input-contract");
+        assert!(diagnostics[0].message.contains("PostInput.amount"));
+        assert!(diagnostics[0].message.contains("Decimal"));
+    }
+
+    #[test]
+    fn check_ax_source_reports_one_diagnostic_for_optional_record() {
+        let source = "export type PostInput {\n  title: String\n}\nroute POST \"/api/posts\" {\n  input:\n    post?: PostInput\n  return json(input.post)\n}";
+        let diagnostics =
+            check_ax_source_with_root(&PathBuf::from("demo/routes/api/posts.ax"), source, None);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].code, "axonyx-record-input-contract");
+        assert!(diagnostics[0].message.contains("must be required"));
     }
 
     #[test]
