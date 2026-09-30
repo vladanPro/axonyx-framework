@@ -1,5 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="{{APP_NAME}} field notes">
-  <rect width="160" height="160" rx="38" fill="#17120d" />
-  <path d="M38 30h62l22 22v78H38z" fill="#c98b52" stroke="#f0c99c" stroke-width="5" />
-  <path d="M100 30v24h24M58 72h44M58 91h44M58 110h28" fill="none" stroke="#17120d" stroke-width="8" stroke-linecap="round" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2 0 28 24" role="img" aria-label="Axonyx forged X">
+  <defs><linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f0c6a7"/><stop offset=".5" stop-color="#cf9974"/><stop offset="1" stop-color="#9e6243"/></linearGradient></defs>
+  <path d="M2 2H7L13 10.5L10 14.5L5 22H0L8 12Z" fill="url(#metal)"/>
+  <path d="M24 2H19L12 12L19 22H24L17 12Z" fill="url(#metal)"/>
+  <path d="M2 2H7L13 10.5L11.8 12.1L6.3 3.2H3Z" fill="#f0c6a7" opacity=".65"/>
+  <path d="M24 2H19L12 12L13.2 13.7L20 3.2H23Z" fill="#f0c6a7" opacity=".65"/>
 </svg>
