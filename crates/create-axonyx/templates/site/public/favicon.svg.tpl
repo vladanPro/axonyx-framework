@@ -1,11 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="{{APP_NAME}}">
-  <defs>
-    <linearGradient id="ax-site-gradient" x1="18%" x2="82%" y1="12%" y2="88%">
-      <stop offset="0%" stop-color="#67e8f9" />
-      <stop offset="100%" stop-color="#0284c7" />
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="18" fill="#020617" />
-  <circle cx="32" cy="32" r="22" fill="none" stroke="url(#ax-site-gradient)" stroke-width="4" />
-  <path d="M32 17 43 47H36l-4-11h-8l-4 11h-7l11-30h8Zm-5 13h6l-3-9-3 9Z" fill="#e0f2fe" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-2 0 28 24" role="img" aria-label="Axonyx forged X">
+  <defs><linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#f0c6a7"/><stop offset=".5" stop-color="#cf9974"/><stop offset="1" stop-color="#9e6243"/></linearGradient></defs>
+  <path d="M2 2H7L13 10.5L10 14.5L5 22H0L8 12Z" fill="url(#metal)"/>
+  <path d="M24 2H19L12 12L19 22H24L17 12Z" fill="url(#metal)"/>
+  <path d="M2 2H7L13 10.5L11.8 12.1L6.3 3.2H3Z" fill="#f0c6a7" opacity=".65"/>
+  <path d="M24 2H19L12 12L13.2 13.7L20 3.2H23Z" fill="#f0c6a7" opacity=".65"/>
 </svg>
