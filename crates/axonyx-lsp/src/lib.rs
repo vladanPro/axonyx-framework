@@ -1,8 +1,10 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 use axonyx_core::ax_formatter_prelude::format_ax_source;
 use axonyx_core::ax_language_service_prelude::{
@@ -20,8 +22,19 @@ const JSON_RPC_VERSION: &str = "2.0";
 struct ServerState {
     documents: HashMap<String, OpenDocument>,
     workspace_root: Option<PathBuf>,
-    package_roots: BTreeMap<String, PathBuf>,
+    project_package_roots: RefCell<BTreeMap<PathBuf, ProjectPackageRoots>>,
     shutdown_requested: bool,
+}
+
+struct ProjectPackageRoots {
+    stamp: ProjectManifestStamp,
+    roots: BTreeMap<String, PathBuf>,
+}
+
+#[derive(PartialEq, Eq)]
+struct ProjectManifestStamp {
+    manifest: Option<(SystemTime, u64)>,
+    lockfile: Option<(SystemTime, u64)>,
 }
 
 struct OpenDocument {
@@ -113,6 +126,7 @@ fn handle_message<W: Write>(
 
     match method {
         Some("initialize") => {
+            state.project_package_roots.get_mut().clear();
             state.workspace_root = message
                 .pointer("/params/rootUri")
                 .and_then(Value::as_str)
@@ -123,11 +137,6 @@ fn handle_message<W: Write>(
                         .and_then(Value::as_str)
                         .map(PathBuf::from)
                 });
-            state.package_roots = state
-                .workspace_root
-                .as_deref()
-                .map(discover_axonyx_package_roots)
-                .unwrap_or_default();
             if let Some(id) = id {
                 write_response(
                     writer,
@@ -329,13 +338,15 @@ fn publish_diagnostics<W: Write>(
 ) -> io::Result<()> {
     let mut source_diagnostics = diagnose_ax_source(uri, source);
     if source_diagnostics.is_empty() {
-        if let (Some(root), Some(path)) = (&state.workspace_root, file_uri_to_path(uri)) {
-            source_diagnostics.extend(diagnose_ax_workspace_imports(
-                root,
-                &path,
-                source,
-                &state.package_roots,
-            ));
+        if let Some(path) = file_uri_to_path(uri) {
+            if let Some((root, package_roots)) = document_project_context(state, &path) {
+                source_diagnostics.extend(diagnose_ax_workspace_imports(
+                    &root,
+                    &path,
+                    source,
+                    &package_roots,
+                ));
+            }
         }
     }
 
@@ -387,14 +398,7 @@ fn import_definition(state: &ServerState, message: &Value) -> Option<Value> {
         .find(|import| import.line.saturating_sub(1) == line)
     {
         if cursor_is_on_import_source(source_line, &import.source, character) {
-            let root = state.workspace_root.as_ref()?;
-            let target = resolve_definition_import(
-                root,
-                &importing_path,
-                kind,
-                &import.source,
-                &state.package_roots,
-            )?;
+            let target = resolve_document_import(state, &importing_path, kind, &import.source)?;
             return target.is_file().then(|| file_start_location(&target));
         }
     }
@@ -687,9 +691,7 @@ fn import_source(
     kind: AxSourceKind,
     source: &str,
 ) -> Option<(PathBuf, String)> {
-    let root = state.workspace_root.as_ref()?;
-    let target =
-        resolve_definition_import(root, importing_path, kind, source, &state.package_roots)?;
+    let target = resolve_document_import(state, importing_path, kind, source)?;
     let target_uri = path_to_file_uri(&target);
     let target_source = state
         .documents
@@ -1393,7 +1395,6 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
         });
     }
 
-    let root = state.workspace_root.as_ref()?;
     for import in ax_source_imports(&importing_path.to_string_lossy(), &document.text) {
         let imported_name = import.bindings.iter().find_map(|binding| {
             if binding.local == reference_name
@@ -1409,13 +1410,7 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
         let Some(imported_name) = imported_name else {
             continue;
         };
-        let target = resolve_definition_import(
-            root,
-            &importing_path,
-            kind,
-            &import.source,
-            &state.package_roots,
-        )?;
+        let target = resolve_document_import(state, &importing_path, kind, &import.source)?;
         if !target.is_file() {
             return None;
         }
@@ -1726,15 +1721,9 @@ fn canonical_locations(
 
         let source_kind = classify_ax_source(&document.path.to_string_lossy(), &document.text);
         for import in ax_source_imports(&document.path.to_string_lossy(), &document.text) {
-            let Some(import_target) = state.workspace_root.as_deref().and_then(|root| {
-                resolve_definition_import(
-                    root,
-                    &document.path,
-                    source_kind,
-                    &import.source,
-                    &state.package_roots,
-                )
-            }) else {
+            let Some(import_target) =
+                resolve_document_import(state, &document.path, source_kind, &import.source)
+            else {
                 continue;
             };
             if !same_file_path(&import_target, &target_path) {
@@ -1949,21 +1938,14 @@ fn ensure_canonical_rename_has_no_collision(
         let source_kind = classify_ax_source(&document.path.to_string_lossy(), &document.text);
         let imports = ax_source_imports(&document.path.to_string_lossy(), &document.text);
         let changes_local_binding = imports.iter().any(|import| {
-            state.workspace_root.as_deref().is_some_and(|root| {
-                resolve_definition_import(
-                    root,
-                    &document.path,
-                    source_kind,
-                    &import.source,
-                    &state.package_roots,
-                )
-                .is_some_and(|target| {
+            resolve_document_import(state, &document.path, source_kind, &import.source).is_some_and(
+                |target| {
                     same_file_path(&target, &target_path)
                         && import.bindings.iter().any(|binding| {
                             binding.imported == symbol.name && binding.local == symbol.name
                         })
-                })
-            })
+                },
+            )
         });
         if !changes_local_binding {
             continue;
@@ -2226,8 +2208,10 @@ fn path_is_inside_workspace(state: &ServerState, path: &Path) -> bool {
 
 fn path_is_package_source(state: &ServerState, path: &Path) -> bool {
     state
-        .package_roots
+        .project_package_roots
+        .borrow()
         .values()
+        .flat_map(|project| project.roots.values())
         .any(|package_root| path_starts_with(path, package_root))
 }
 
@@ -2237,6 +2221,58 @@ fn path_starts_with(path: &Path, root: &Path) -> bool {
     let path_components = comparable_path_components(&path);
     let root_components = comparable_path_components(&root);
     path_components.starts_with(&root_components)
+}
+
+fn document_project_context(
+    state: &ServerState,
+    path: &Path,
+) -> Option<(PathBuf, BTreeMap<String, PathBuf>)> {
+    let workspace_root = state.workspace_root.as_ref()?;
+    if !path_starts_with(path.parent()?, workspace_root) {
+        return None;
+    }
+
+    let project_root = path.parent()?.ancestors().find(|ancestor| {
+        path_starts_with(ancestor, workspace_root) && ancestor.join("Cargo.toml").is_file()
+    });
+    let root = project_root.unwrap_or(workspace_root).to_path_buf();
+    let stamp = project_manifest_stamp(&root);
+    if let Some(cached) = state.project_package_roots.borrow().get(&root) {
+        if cached.stamp == stamp {
+            return Some((root.clone(), cached.roots.clone()));
+        }
+    }
+    let roots = discover_axonyx_package_roots(&root);
+    state.project_package_roots.borrow_mut().insert(
+        root.clone(),
+        ProjectPackageRoots {
+            stamp: project_manifest_stamp(&root),
+            roots: roots.clone(),
+        },
+    );
+    Some((root, roots))
+}
+
+fn project_manifest_stamp(root: &Path) -> ProjectManifestStamp {
+    fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+        let metadata = fs::metadata(path).ok()?;
+        Some((metadata.modified().ok()?, metadata.len()))
+    }
+
+    ProjectManifestStamp {
+        manifest: file_stamp(&root.join("Cargo.toml")),
+        lockfile: file_stamp(&root.join("Cargo.lock")),
+    }
+}
+
+fn resolve_document_import(
+    state: &ServerState,
+    importing_path: &Path,
+    kind: AxSourceKind,
+    source: &str,
+) -> Option<PathBuf> {
+    let (root, package_roots) = document_project_context(state, importing_path)?;
+    resolve_definition_import(&root, importing_path, kind, source, &package_roots)
 }
 
 fn comparable_path_components(path: &Path) -> Vec<String> {
@@ -3365,6 +3401,73 @@ mod tests {
 
         assert_eq!(roots.get("@axonyx/ui"), Some(&package_root.join("src")));
         fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn resolves_package_imports_from_a_nested_project() {
+        let workspace = temp_workspace("nested-project-imports");
+        let project = workspace.join("axonyx-site");
+        let package = project.join("packages/axonyx-ui");
+        fs::create_dir_all(project.join("app")).expect("app directory should be created");
+        fs::create_dir_all(project.join("src")).expect("app source should be created");
+        fs::create_dir_all(package.join("src/foundry")).expect("package source should be created");
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"nested-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\naxonyx-ui = { path = \"packages/axonyx-ui\" }\n",
+        )
+        .expect("app manifest should be written");
+        fs::write(project.join("src/lib.rs"), "").expect("app source should be written");
+        fs::write(
+            package.join("Cargo.toml"),
+            "[package]\nname = \"axonyx-ui\"\nversion = \"0.0.74\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("package manifest should be written");
+        fs::write(package.join("src/lib.rs"), "").expect("package library should be written");
+        fs::write(
+            package.join("Axonyx.package.toml"),
+            "[package]\nnamespace = \"@axonyx/ui\"\n\n[exports]\nax_root = \"src\"\n",
+        )
+        .expect("package config should be written");
+        let component = package.join("src/foundry/DocsCodeBlock.asx");
+        fs::write(
+            &component,
+            "component DocsCodeBlock() { return ASX { <pre /> } }",
+        )
+        .expect("component should be written");
+
+        let page = project.join("app/page.asx");
+        let page_uri = file_uri(&page);
+        let source = "import { DocsCodeBlock } from \"@axonyx/ui/foundry/DocsCodeBlock\"\n\npage Home() { return ASX { <DocsCodeBlock /> } }";
+        let explicit = source.replace(
+            "@axonyx/ui/foundry/DocsCodeBlock\"",
+            "@axonyx/ui/foundry/DocsCodeBlock.asx\"",
+        );
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "rootUri": file_uri(&workspace) } }),
+            json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": { "uri": page_uri, "version": 1, "text": source } } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "textDocument/definition", "params": { "textDocument": { "uri": page_uri }, "position": source_position(source, "@axonyx/ui", 0) } }),
+            json!({ "jsonrpc": "2.0", "method": "textDocument/didChange", "params": { "textDocument": { "uri": page_uri, "version": 2 }, "contentChanges": [{ "text": explicit }] } }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+
+        assert_eq!(messages[1]["params"]["diagnostics"], json!([]));
+        assert_eq!(messages[2]["result"]["uri"], path_to_file_uri(&component));
+        assert_eq!(messages[3]["params"]["diagnostics"], json!([]));
+
+        let state = ServerState {
+            workspace_root: Some(workspace.clone()),
+            ..ServerState::default()
+        };
+        let (_, roots) = document_project_context(&state, &page).expect("project should resolve");
+        assert_eq!(roots.get("@axonyx/ui"), Some(&package.join("src")));
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"nested-app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("app manifest should update");
+        let (_, roots) = document_project_context(&state, &page).expect("project should refresh");
+        assert!(!roots.contains_key("@axonyx/ui"));
+        fs::remove_dir_all(workspace).expect("workspace should be removed");
     }
 
     #[test]
