@@ -66,7 +66,7 @@ so apps can customize or dogfood UI components without changing the public impor
 The default generated UI setup is now:
 
 ```toml
-axonyx-ui = "0.0.71"
+axonyx-ui = "0.0.73"
 ```
 
 That gives the app a normal Cargo dependency while Axonyx resolves `.asx`
