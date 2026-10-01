@@ -1761,7 +1761,7 @@ fn scaffold_component_files(name: &str, island: bool) -> Result<Vec<(PathBuf, St
         String::new()
     };
     let component = format!(
-        "component {component_name}(tone: String = \"default\") {{\n{client_declaration}  render ASX {{\n    <div class=\"ax-{file_stem}\" data-tone={{tone}}{marker}>\n      <Slot />\n    </div>\n  }}\n}}\n"
+        "component {component_name}(tone: String = \"default\") {{\n{client_declaration}  return ASX {{\n    <div class=\"ax-{file_stem}\" data-tone={{tone}}{marker}>\n      <Slot />\n    </div>\n  }}\n}}\n"
     );
     let mut files = vec![(component_path, component)];
 
@@ -27697,6 +27697,7 @@ return ASX { <Copy>{posts}</Copy> }
         let path = root.join("app/components/theme-switcher.asx");
         let source = fs::read_to_string(&path).expect("component source should exist");
         assert!(source.contains("component ThemeSwitcher"));
+        assert!(source.contains("return ASX {"));
         assert!(source.contains("class=\"ax-theme-switcher\""));
         parse_component_report_source(&source).expect("generated component should parse");
 
@@ -27746,6 +27747,7 @@ page Home() {
         let source = fs::read_to_string(root.join("app/components/command-palette.asx"))
             .expect("island source should exist");
         assert!(source.contains("client JS from \"./command-palette.client.js\""));
+        assert!(source.contains("return ASX {"));
         assert!(source.contains("data-ax-island=\"command-palette\""));
         parse_component_report_source(&source).expect("generated island should parse");
 
