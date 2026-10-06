@@ -90,7 +90,7 @@ const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/referen
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const AXONYX_RUNTIME_VERSION: &str = "0.6.0";
-const AXONYX_UI_VERSION: &str = "0.0.74";
+const AXONYX_UI_VERSION: &str = "0.0.81";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -28711,7 +28711,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-ui = "0.0.74"
+axonyx-ui = "0.0.81"
 "#,
         )
         .expect("newer manifest should write");
