@@ -29158,6 +29158,86 @@ axonyx-runtime = "0.1.0"
     }
 
     #[test]
+    fn preview_settings_validation_returns_field_errors_in_dev_and_start() {
+        let root = make_temp_dir("preview-settings-validation");
+        fs::create_dir_all(root.join("app/settings")).expect("settings route");
+        fs::write(
+            root.join("app/settings/page.asx"),
+            "page Settings() { return ASX { <p>Settings</p> } }",
+        )
+        .expect("settings page");
+        fs::write(
+            root.join("app/settings/actions.ax"),
+            r#"
+action ValidateSettings(workspace: String, email: String, theme: String) {
+  require input.workspace != "" else invalid({workspace: "Required"})
+  require Validate.email(input.email) else invalid({email: "Invalid email"})
+  require input.theme in ["silver", "bronze", "gold"] else invalid({theme: "Unsupported"})
+  return ok()
+}
+"#,
+        )
+        .expect("settings action");
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            for (body, status, field, message) in [
+                (
+                    "workspace=&email=builder%40example.com&theme=gold",
+                    422,
+                    "workspace",
+                    "Required",
+                ),
+                (
+                    "workspace=Sample&email=bad&theme=gold",
+                    422,
+                    "email",
+                    "Invalid email",
+                ),
+                (
+                    "workspace=Sample&email=builder%40example.com&theme=blue",
+                    422,
+                    "theme",
+                    "Unsupported",
+                ),
+                (
+                    "workspace=Sample&email=builder%40example.com&theme=gold",
+                    200,
+                    "",
+                    "",
+                ),
+            ] {
+                let request = AxHttpRequest {
+                    method: "POST".to_string(),
+                    target: "/__axonyx/action?path=%2Fsettings&name=ValidateSettings".to_string(),
+                    headers: BTreeMap::from([
+                        (
+                            "content-type".to_string(),
+                            "application/x-www-form-urlencoded".to_string(),
+                        ),
+                        (
+                            "accept".to_string(),
+                            "application/ax-patch+json".to_string(),
+                        ),
+                    ]),
+                    body: body.as_bytes().to_vec(),
+                    multipart: None,
+                };
+                let response =
+                    handle_action_request(&state, mode, &request).expect("action response");
+                assert_eq!(response.status, status);
+                if status == 422 {
+                    let payload: serde_json::Value =
+                        serde_json::from_slice(&response.body.into_bytes())
+                            .expect("validation JSON");
+                    assert_eq!(payload["error"]["value"]["fields"][field], message);
+                }
+            }
+        }
+        drop(state);
+        fs::remove_dir_all(root).expect("clean test fixture");
+    }
+
+    #[test]
     fn dev_session_actions_persist_across_requests_and_emit_private_cookies() {
         let root = make_temp_dir("dev-session-actions");
         fs::create_dir_all(root.join("app/account")).expect("account route should exist");
