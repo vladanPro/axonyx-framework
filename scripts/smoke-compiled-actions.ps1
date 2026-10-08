@@ -137,7 +137,7 @@ page NestedFormShell() {
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/page.asx"), @'
 page Forms() {
   return ASX {
-    <form method="post" action="/__axonyx/action?path=%2Fforms&name=ValidateForm"><input name="email" /><span data-ax-field-error="email"></span><button>Submit</button></form>
+    <form method="post" action="/__axonyx/action?path=%2Fforms&name=ValidateForm" data-ax-retain-fields="email,password,hidden"><input name="email" /><input type="password" name="password" /><input type="hidden" name="hidden" value="server-owned" /><span data-ax-field-error="email"></span><button>Submit</button></form>
     <form method="post" action="/__axonyx/action?path=%2Fforms&name=Noop"><input name="email" /><span data-ax-field-error="email"></span></form>
   }
 }
@@ -937,6 +937,10 @@ route GET "/api/forbidden-loader" {
   Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms%2Floaded&name=CountInvalid" -Body "" -Headers @{ Accept = "text/html" } -ExpectedStatus 422 | Out-Null
   $invocations = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from invocation_probe").fetchone()[0]);db.close()' $dbPath
   if ($LASTEXITCODE -ne 0 -or $invocations -ne "1") { throw "Native validation rerender redispatched the action: $invocations effects" }
+
+  $retained = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms&name=ValidateForm" -Body "email=%22%3E%3Cscript%3E&password=PRIVATE_PASSWORD&hidden=PRIVATE_HIDDEN" -Headers @{ Accept = "text/html" } -ExpectedStatus 422
+  if ($retained.Body -notmatch 'value="&quot;&gt;&lt;script&gt;"' -or $retained.Body -notmatch 'value="server-owned"' -or $retained.Body -match 'PRIVATE_PASSWORD|PRIVATE_HIDDEN|value=""><script>') { throw "Native form replay lost escaping or retained private controls" }
+  if ([regex]::Matches($retained.Body, 'value="&quot;&gt;&lt;script&gt;"').Count -ne 1) { throw "Native replay modified a foreign action form" }
 
   # Fail the disposable fixture's loader after all successful database scenarios.
   & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("drop table posts");db.commit();db.close()' $dbPath
