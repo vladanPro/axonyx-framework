@@ -370,6 +370,24 @@ query resolveCredential(email: String) -> Credential? {
   return db.credentials.where({ email: input.email }).first()
 }
 
+action QuerySignIn(email: String, password: String) {
+  data credential = resolveCredential(input.email)
+  data verified = Password.verifyOptional(input.password, credential?.password_hash)
+  require verified else invalid({ email: "Invalid credentials." })
+  require credential else invalid({ email: "Invalid credentials." })
+  Session.create(credential.user_id, {})
+  return ok()
+}
+
+query actionSubject() -> String {
+  require Auth.subject else forbidden()
+  return Auth.subject
+}
+action ReadSubject() {
+  data subject = actionSubject()
+  return json(subject)
+}
+
 route POST "/api/addition-probe" {
   input:
     count: Int
@@ -825,6 +843,21 @@ route GET "/api/forbidden-loader" {
   $registrationToken = ($registrationProof.Body | ConvertFrom-Json).token
   $registrationAnonCookie = ([string] $registrationProof.Headers["Set-Cookie"]).Split(';')[0]
   $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
+  $queryLoginUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=QuerySignIn"
+  foreach ($email in @("unknown%40example.com", "foundry%40example.com")) {
+    $rejected = Invoke-AxRequest -Url $queryLoginUrl -Body "email=$email&password=wrong&__ax_patch=true" -Headers $registrationHeaders -ExpectedStatus 422
+    $rejectedPayload = $rejected.Body | ConvertFrom-Json
+    if ($rejectedPayload.ok -ne $false -or $rejectedPayload.error.status -ne 422 -or $rejectedPayload.error.value.fields.email -ne "Invalid credentials." -or $rejected.Headers["Set-Cookie"]) { throw "Typed action query leaked account existence or issued a session" }
+  }
+  $queryLogin = Invoke-AxRequest -Url $queryLoginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password&__ax_patch=true" -Headers $registrationHeaders
+  $queryCookie = ([string]$queryLogin.Headers["Set-Cookie"]).Split(';')[0]
+  if (!$queryCookie -or $queryLogin.Body -match 'password_hash|argon2') { throw "Typed action login failed" }
+  $queryProof = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method GET -Headers @{ Origin = $baseUrl; Cookie = $queryCookie }
+  $queryHeaders = @{ Origin = $baseUrl; Cookie = $queryCookie; "X-Axonyx-CSRF" = ($queryProof.Body | ConvertFrom-Json).token; Accept = "application/ax-patch+json" }
+  $subject = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts%2Fforged&name=ReadSubject" -Body "__ax_patch=true" -Headers $queryHeaders
+  if (($subject.Body | ConvertFrom-Json).value -ne "user-42") { throw "Action query lost its verified request session" }
+  Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fadmin&name=ReadSubject" -Body "__ax_patch=true" -Headers $registrationHeaders -ExpectedStatus 403 | Out-Null
+  Invoke-AxRequest -Url $logoutUrl -Body "__ax_patch=true" -Headers $queryHeaders | Out-Null
   $registrationBody = "email=registered%40example.com&password=registration-proof-secret&role=admin&id=user-42"
   foreach ($missingBody in @("password=registration-proof-secret", "email=invalid%40example.com")) {
     $missingRegistration = Invoke-AxRequest -Url $registerUrl -Body $missingBody -Headers $registrationHeaders -ExpectedStatus 422
