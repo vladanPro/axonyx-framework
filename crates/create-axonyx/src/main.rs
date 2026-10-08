@@ -755,9 +755,9 @@ mod tests {
 
         let cargo_toml =
             fs::read_to_string(target_dir.join("Cargo.toml")).expect("cargo manifest should read");
-        assert!(
-            cargo_toml.contains("axonyx-runtime = { version = \"0.6.0\", features = [\"axum\"] }")
-        );
+        assert!(cargo_toml.contains(&format!(
+            "axonyx-runtime = {{ version = \"{DEFAULT_RUNTIME_VERSION}\", features = [\"axum\"] }}"
+        )));
         assert!(cargo_toml.contains(&format!("axonyx-ui = \"{DEFAULT_UI_VERSION}\"")));
 
         let page = fs::read_to_string(target_dir.join("app/page.asx")).expect("page should read");
