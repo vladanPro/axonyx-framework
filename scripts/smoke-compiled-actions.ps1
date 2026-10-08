@@ -234,6 +234,12 @@ action CountInvalid() {
   return ok()
 }
 
+action ThrottleProbe(key: String) {
+  before Login.throttle(input.key, 1, 60)
+  db.posts.where({ slug: "fresh-compiled-post" }).update({ excerpt: "Throttle probe" })
+  return ok()
+}
+
 action GuardProbe(id: Int, ratio: Float, flag: Bool, theme: String) {
   data idAllowed = input.id in [1, 2]
   require idAllowed else error "Choose 1, or 2."
@@ -937,6 +943,16 @@ route GET "/api/forbidden-loader" {
   Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms%2Floaded&name=CountInvalid" -Body "" -Headers @{ Accept = "text/html" } -ExpectedStatus 422 | Out-Null
   $invocations = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from invocation_probe").fetchone()[0]);db.close()' $dbPath
   if ($LASTEXITCODE -ne 0 -or $invocations -ne "1") { throw "Native validation rerender redispatched the action: $invocations effects" }
+
+  $throttleUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=ThrottleProbe"
+  Invoke-AxRequest -Url $throttleUrl -Body "key=probe&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } | Out-Null
+  $limited = Invoke-AxRequest -Url $throttleUrl -Body "key=probe&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" } -ExpectedStatus 429
+  $limitedPayload = $limited.Body | ConvertFrom-Json
+  if ($limitedPayload.ok -or $limitedPayload.error.status -ne 429 -or [int]$limited.Headers["Retry-After"] -lt 1 -or $limited.Headers["Cache-Control"] -ne "no-store" -or $limited.Headers["Content-Type"] -notmatch "application/ax-error\+json") { throw "Compiled action throttle lost its JSON/header contract" }
+  $limitedHtml = Invoke-AxRequest -Url $throttleUrl -Body "key=probe" -Headers @{ Accept = "text/html" } -ExpectedStatus 429
+  if ($limitedHtml.Body -notmatch "Too many requests" -or $limitedHtml.Headers["Cache-Control"] -ne "no-store") { throw "Compiled action throttle lost its native HTML boundary" }
+  $invocations = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);print(db.execute("select count(*) from invocation_probe").fetchone()[0]);db.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or $invocations -ne "2") { throw "Blocked action executed a database mutation: $invocations effects" }
 
   $retained = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms&name=ValidateForm" -Body "email=%22%3E%3Cscript%3E&password=PRIVATE_PASSWORD&hidden=PRIVATE_HIDDEN" -Headers @{ Accept = "text/html" } -ExpectedStatus 422
   if ($retained.Body -notmatch 'value="&quot;&gt;&lt;script&gt;"' -or $retained.Body -notmatch 'value="server-owned"' -or $retained.Body -match 'PRIVATE_PASSWORD|PRIVATE_HIDDEN|value=""><script>') { throw "Native form replay lost escaping or retained private controls" }
