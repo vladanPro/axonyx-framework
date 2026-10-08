@@ -13862,6 +13862,10 @@ fn handle_compiled_action(
                     }}
                 }}
             }}
+            if !ok && payload.pointer("/error/status").and_then(Value::as_u64) == Some(429) {{
+                return axonyx_runtime::login_throttle::action_response(request,
+                    payload.pointer("/error/value/retryAfter").and_then(Value::as_u64).unwrap_or(1));
+            }}
             if !ok && payload.pointer("/error/status").and_then(Value::as_u64) == Some(422)
                 && axonyx_runtime::validation::wants_html_error(request) {{
                 return with_action_cookies(render_native_form_error(runtime, request, &name, &route,
@@ -19319,6 +19323,18 @@ fn handle_action_request(
         }
     };
 
+    if let Some(error) = &result.error {
+        if error.status == 429 {
+            let value = ax_value_to_json(&error.value);
+            return Ok(axonyx_runtime::login_throttle::action_response(
+                request,
+                value
+                    .get("retryAfter")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1),
+            ));
+        }
+    }
     if wants_action_patch_response(request, &input_fields) {
         return action_patch_response(&route, &result);
     }
@@ -29211,6 +29227,61 @@ action Save(title: String, slug: String) {
         }
         drop(state);
         fs::remove_dir_all(root).expect("clean native replay fixture");
+    }
+
+    #[test]
+    fn action_throttle_returns_safe_json_and_html_in_dev_and_start() {
+        let root = make_temp_dir("action-throttle");
+        fs::create_dir_all(root.join("app/login")).unwrap();
+        fs::write(
+            root.join("app/login/page.asx"),
+            "page Login() { return ASX { <p>Login</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/login/actions.ax"),
+            r#"
+action SignIn(email: String) {
+  before Login.throttle(input.email, 1, 60)
+  require false else invalid({email: "Invalid credentials."})
+  return ok()
+}
+"#,
+        )
+        .unwrap();
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let state = test_dev_state(&root);
+            let request = AxHttpRequest::new("POST", "/__axonyx/action?path=%2Flogin&name=SignIn")
+                .with_header("Content-Type", "application/x-www-form-urlencoded")
+                .with_header("Accept", "application/ax-patch+json")
+                .with_body(b"email=PRIVATE_IDENTITY".to_vec());
+            assert_eq!(
+                handle_action_request(&state, mode, &request)
+                    .unwrap()
+                    .status,
+                422
+            );
+            let response = handle_action_request(&state, mode, &request).unwrap();
+            assert_eq!(response.status, 429);
+            assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+            let retry = response
+                .header_value("Retry-After")
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            assert!((1..=60).contains(&retry));
+            let body = String::from_utf8(response.body.into_bytes()).unwrap();
+            assert!(!body.contains("PRIVATE_IDENTITY"));
+            let payload: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(payload["error"]["status"], 429);
+            let html_request = request.with_header("Accept", "text/html");
+            let response = handle_action_request(&state, mode, &html_request).unwrap();
+            assert_eq!(response.status, 429);
+            assert!(String::from_utf8(response.body.into_bytes())
+                .unwrap()
+                .contains("Too many requests"));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
