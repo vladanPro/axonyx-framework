@@ -13957,6 +13957,7 @@ fn render_native_form_error(
     fields: &Value,
 ) -> AxHttpResponse {{
     if let Some(result) = axonyx_runtime::form_result::AxFormResult::validation(name, route, fields) {{
+        let result = result.with_request_values(request);
         match render_compiled_route_document(runtime, request, route, Some(&result)) {{
             Ok(Some(html)) => return AxHttpResponse::html(422, html).with_no_store(),
             Ok(None) => {{}},
@@ -19364,6 +19365,7 @@ fn render_native_action_validation(
             &route.request_path,
         ));
     };
+    let form = form.with_request_values(request);
     let read = axonyx_runtime::form_result::page_read_request(request, &route.request_target);
     match render_route_html_with_form_result(
         state,
@@ -29155,6 +29157,60 @@ axonyx-runtime = "0.1.0"
 
         drop(state);
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn native_validation_retains_only_allowlisted_public_form_values() {
+        let root = make_temp_dir("native-form-replay");
+        fs::create_dir_all(root.join("app/posts")).expect("posts route");
+        fs::write(root.join("app/posts/page.asx"), r#"
+page Posts() {
+  return ASX {
+    <form method="post" action="/__axonyx/action?name=Save&path=%2Fposts" data-ax-retain-fields="title,slug,password,hidden">
+      <input name="title" value="Initial" />
+      <input name="slug" value="initial-slug" />
+      <input name="password" type="password" />
+      <input name="hidden" type="hidden" value="Server-owned" />
+      <span data-ax-field-error="slug"></span>
+    </form>
+  }
+}
+"#).expect("posts page");
+        fs::write(
+            root.join("app/posts/actions.ax"),
+            r#"
+action Save(title: String, slug: String) {
+  require input.slug != "admin" else invalid({slug: "Reserved slug"})
+  return ok()
+}
+"#,
+        )
+        .expect("posts action");
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            let request = AxHttpRequest {
+                method: "POST".into(),
+                target: "/__axonyx/action?name=Save&path=%2Fposts".into(),
+                headers: BTreeMap::from([
+                    ("content-type".into(), "application/x-www-form-urlencoded".into()),
+                    ("accept".into(), "text/html".into()),
+                ]),
+                body: b"title=%22%3E%3Cscript%3E&slug=admin&password=PRIVATE_PASSWORD&hidden=PRIVATE_HIDDEN".to_vec(),
+                multipart: None,
+            };
+            let response = handle_action_request(&state, mode, &request).expect("native response");
+            assert_eq!(response.status, 422);
+            let html = String::from_utf8(response.body.into_bytes()).unwrap();
+            assert!(html.contains("value=\"admin\""));
+            assert!(html.contains("value=\"&quot;&gt;&lt;script&gt;\""));
+            assert!(html.contains("Reserved slug"));
+            assert!(html.contains("Server-owned"));
+            assert!(!html.contains("PRIVATE_PASSWORD"));
+            assert!(!html.contains("PRIVATE_HIDDEN"));
+            assert!(!html.contains("value=\"\"><script>"));
+        }
+        drop(state);
+        fs::remove_dir_all(root).expect("clean native replay fixture");
     }
 
     #[test]
