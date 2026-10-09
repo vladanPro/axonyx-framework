@@ -77,7 +77,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        # Official Docker image mirror avoids Docker Hub anonymous pull limits.
+        image: public.ecr.aws/docker/library/postgres:17-alpine
         env:
           POSTGRES_DB: axonyx_test
           POSTGRES_PASSWORD: postgres

@@ -95,6 +95,25 @@ try {
   }
 
   $actionsPath = Join-Path $appRoot "app/posts/actions.ax"
+  New-Item -ItemType Directory -Path (Join-Path $appRoot "app/absent/[id]") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/[id]/page.asx"), @'
+page Missing() {
+  data value: String = loadMissing(params.id)
+  return ASX {
+    <p>{value}</p>
+  }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/[id]/loader.ax"), @'
+export query loadMissing(id: String) -> String {
+  require false else notFound()
+  return input.id
+}
+route GET "/api/not-found-probe" {
+  data missing = loadMissing("missing")
+  return json(missing)
+}
+'@)
   New-Item -ItemType Directory -Path (Join-Path $appRoot "app/api/guide") -Force | Out-Null
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/api/guide/page.asx"), 'page ApiGuide() { return ASX { <p>API documentation page</p> } }')
   New-Item -ItemType Directory -Path (Join-Path $appRoot "app/forms/private") -Force | Out-Null
@@ -204,6 +223,11 @@ action SetTheme(theme: string) {
 }
 
 action Noop() {
+  return ok()
+}
+
+action NotFoundProbe() {
+  require false else notFound()
   return ok()
 }
 
@@ -1000,6 +1024,12 @@ route GET "/api/forbidden-loader" {
   $fallback = Invoke-AxRequest -Url $actionUrl -Body "theme=silver" -ExpectedStatus 303
   if ($fallback.Headers["Location"] -ne "/posts") { throw "Compiled no-JS redirect fallback is invalid" }
   $explicitRedirect = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=RedirectProbe" -Body "destination=%2Fexplicit-target" -ExpectedStatus 303
+  $missingPage = Invoke-AxRequest -Url "$baseUrl/absent/missing" -Method GET -ExpectedStatus 404
+  if ($missingPage.Body -ne "Not Found" -or $missingPage.Headers['Cache-Control'] -ne 'no-store') { throw "Missing loader did not return a fixed no-store 404" }
+  Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fabsent%2Fmissing&name=value" -Method GET -ExpectedStatus 404 | Out-Null
+  Invoke-AxRequest -Url "$baseUrl/api/not-found-probe" -Method GET -ExpectedStatus 404 | Out-Null
+  Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=NotFoundProbe" -ExpectedStatus 404 | Out-Null
+  Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=NotFoundProbe" -Body '__ax_patch=true' -Headers @{ Accept = 'application/ax-patch+json' } -ExpectedStatus 404 | Out-Null
   if ($explicitRedirect.Headers["Location"] -ne "/explicit-target") { throw "Explicit action redirect was replaced by the current route" }
   $redirectPatch = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=RedirectProbe" -Body "destination=%2Fexplicit-target&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
   if (($redirectPatch.Body | ConvertFrom-Json).redirect -ne "/explicit-target") { throw "Action patch lost the explicit redirect" }
