@@ -89,7 +89,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.6.4";
+const AXONYX_RUNTIME_VERSION: &str = "0.6.5";
 const AXONYX_UI_VERSION: &str = "0.0.81";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -13723,7 +13723,7 @@ fn handle_request_inner(
             Ok(None) => AxHttpResponse::text(404, "Not Found"),
             Err(error) => {{
                 eprintln!("Axonyx compiled API error: {{error}}");
-                if let Some(status) = error.access_denial_status() {{
+                if let Some(status) = error.public_response_status() {{
                     return secure(AxHttpResponse::json(status, &error.public_error_payload())
                         .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store());
                 }}
@@ -13754,8 +13754,8 @@ fn handle_request_inner(
             return secure(response);
         }},
         Ok(None) => {{}},
-        Err(error) => return secure(AxHttpResponse::text(error.access_denial_status().unwrap_or(500),
-            if error.access_denial_status().is_some() {{ "Access denied." }} else {{ "Page could not be rendered." }}).with_no_store()),
+        Err(error) => return secure(AxHttpResponse::text(error.public_response_status().unwrap_or(500),
+            if error.public_response_status() == Some(404) {{ "Not Found" }} else if error.access_denial_status().is_some() {{ "Access denied." }} else {{ "Page could not be rendered." }}).with_no_store()),
     }}
     let mut response = static_response(dist, &request.target)
         .unwrap_or_else(|| AxHttpResponse::text(404, "Not Found"));
@@ -13899,7 +13899,7 @@ fn handle_compiled_action(
         Ok(None) => AxHttpResponse::text(404, "action not found").with_no_store(),
         Err(error) => {{
             eprintln!("Axonyx compiled action error: {{error}}");
-            if let Some(status) = error.access_denial_status() {{
+            if let Some(status) = error.public_response_status() {{
                 return AxHttpResponse::json(status, &error.public_error_payload())
                     .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store();
             }}
@@ -13970,8 +13970,8 @@ fn render_native_form_error(
             Ok(Some(html)) => return AxHttpResponse::html(422, html).with_no_store(),
             Ok(None) => {{}},
             Err(error) => {{
-                if let Some(status) = error.access_denial_status() {{
-                    return AxHttpResponse::text(status, "Access denied.").with_no_store();
+                if let Some(status) = error.public_response_status() {{
+                    return AxHttpResponse::text(status, if status == 404 {{ "Not Found" }} else {{ "Access denied." }}).with_no_store();
                 }}
                 eprintln!("Axonyx form document render failed; using safe fallback");
             }},
@@ -14075,7 +14075,7 @@ fn handle_compiled_data(
         }},
         Err(error) => {{
             eprintln!("Axonyx compiled data error: {{error}}");
-            if let Some(status) = error.access_denial_status() {{
+            if let Some(status) = error.public_response_status() {{
                 return AxHttpResponse::json(status, &error.public_error_payload())
                     .unwrap_or_else(|_| AxHttpResponse::text(500, "Internal Server Error")).with_no_store();
             }}
@@ -21057,6 +21057,17 @@ fn render_error_response(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
+    if matches!(
+        error.downcast_ref::<axonyx_runtime::PreviewError>(),
+        Some(axonyx_runtime::PreviewError::NotFound)
+    ) {
+        return render_not_found_response(
+            state,
+            request_target,
+            inject_dev_client_script,
+            stream_response,
+        );
+    }
     if let Some(axonyx_runtime::PreviewError::AccessDenied { status }) =
         error.downcast_ref::<axonyx_runtime::PreviewError>()
     {
@@ -30290,6 +30301,36 @@ action RefreshSession() {
         assert!(raw.contains("Custom Axonyx not found"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn loader_not_found_uses_the_404_boundary_instead_of_the_500_boundary() {
+        let root = make_temp_dir("loader-not-found-boundary");
+        fs::create_dir_all(root.join("app")).unwrap();
+        fs::write(
+            root.join("app/not-found.asx"),
+            "page Missing() { return ASX { <p>Missing resource</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/error.asx"),
+            "page Error() { return ASX { <p>Internal failure</p> } }",
+        )
+        .unwrap();
+        let state = test_dev_state(&root);
+        let response = render_error_response(
+            &state,
+            "/posts/missing",
+            &anyhow::Error::new(axonyx_runtime::PreviewError::NotFound),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(response.status, 404);
+        let body = String::from_utf8(response.body.into_bytes()).unwrap();
+        assert!(body.contains("Missing resource"));
+        assert!(!body.contains("Internal failure"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
