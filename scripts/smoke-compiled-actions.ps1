@@ -228,6 +228,26 @@ action ValidateForm(email: String) {
   return ok()
 }
 
+action ExpressionProbe(name: String) {
+  data missing = db.users.where({ id: "missing-expression-probe" }).first()
+  require missing == null else forbidden()
+  data users = db.users.all()
+  require users.length >= 1 else forbidden()
+  data user = db.users.where({ id: "user-42" }).first()
+  require user != null else forbidden()
+  require user["id"] == "user-42" else forbidden()
+  return json({ length: input.name.length, count: users.length })
+}
+
+action ConflictProbe() {
+  transaction {
+    db.users.insert({ id: "conflict-probe", email: "conflict-probe@example.com", role: "member" })
+    db.users.insert({ id: "user-42", email: "duplicate@example.com", role: "member" })
+  }
+  Session.create("conflict-probe", {})
+  return ok()
+}
+
 action CountInvalid() {
   db.posts.where({ slug: "fresh-compiled-post" }).update({ excerpt: "Invocation probe" })
   require false else invalid({email: "Test validation error."})
@@ -368,6 +388,24 @@ type Credential {
 
 query resolveCredential(email: String) -> Credential? {
   return db.credentials.where({ email: input.email }).first()
+}
+
+action QuerySignIn(email: String, password: String) {
+  data credential = resolveCredential(input.email)
+  data verified = Password.verifyOptional(input.password, credential?.password_hash)
+  require verified else invalid({ email: "Invalid credentials." })
+  require credential else invalid({ email: "Invalid credentials." })
+  Session.create(credential.user_id, {})
+  return ok()
+}
+
+query actionSubject() -> String {
+  require Auth.subject else forbidden()
+  return Auth.subject
+}
+action ReadSubject() {
+  data subject = actionSubject()
+  return json(subject)
 }
 
 route POST "/api/addition-probe" {
@@ -825,6 +863,29 @@ route GET "/api/forbidden-loader" {
   $registrationToken = ($registrationProof.Body | ConvertFrom-Json).token
   $registrationAnonCookie = ([string] $registrationProof.Headers["Set-Cookie"]).Split(';')[0]
   $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
+  $expression = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ExpressionProbe" -Body "name=A%F0%9F%94%A5&__ax_patch=true" -Headers $registrationHeaders
+  $expressionPayload = $expression.Body | ConvertFrom-Json
+  if ($expressionPayload.ok -ne $true -or $expressionPayload.value.length -ne 3 -or $expressionPayload.value.count -lt 1) { throw "Compiled null/record/UTF-16 length expression parity failed: $($expression.Body)" }
+  $actionConflict = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ConflictProbe" -Body "__ax_patch=true" -Headers $registrationHeaders -ExpectedStatus 409
+  $conflictPayload = $actionConflict.Body | ConvertFrom-Json
+  if ($conflictPayload.error.value.error -ne "conflict" -or $actionConflict.Headers["Set-Cookie"] -or $actionConflict.Headers["Cache-Control"] -ne "no-store" -or $actionConflict.Body -match 'unique_violation|INSERT|duplicate@example') { throw "Compiled action conflict boundary leaked internals or created a session" }
+  $rolledBack = & $python.Source -c 'import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);print(d.execute("select count(*) from users where id = ?", ("conflict-probe",)).fetchone()[0]);d.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or [int]$rolledBack -ne 0) { throw "Compiled action conflict did not roll back its earlier write" }
+  $queryLoginUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=QuerySignIn"
+  foreach ($email in @("unknown%40example.com", "foundry%40example.com")) {
+    $rejected = Invoke-AxRequest -Url $queryLoginUrl -Body "email=$email&password=wrong&__ax_patch=true" -Headers $registrationHeaders -ExpectedStatus 422
+    $rejectedPayload = $rejected.Body | ConvertFrom-Json
+    if ($rejectedPayload.ok -ne $false -or $rejectedPayload.error.status -ne 422 -or $rejectedPayload.error.value.fields.email -ne "Invalid credentials." -or $rejected.Headers["Set-Cookie"]) { throw "Typed action query leaked account existence or issued a session" }
+  }
+  $queryLogin = Invoke-AxRequest -Url $queryLoginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password&__ax_patch=true" -Headers $registrationHeaders
+  $queryCookie = ([string]$queryLogin.Headers["Set-Cookie"]).Split(';')[0]
+  if (!$queryCookie -or $queryLogin.Body -match 'password_hash|argon2') { throw "Typed action login failed" }
+  $queryProof = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method GET -Headers @{ Origin = $baseUrl; Cookie = $queryCookie }
+  $queryHeaders = @{ Origin = $baseUrl; Cookie = $queryCookie; "X-Axonyx-CSRF" = ($queryProof.Body | ConvertFrom-Json).token; Accept = "application/ax-patch+json" }
+  $subject = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts%2Fforged&name=ReadSubject" -Body "__ax_patch=true" -Headers $queryHeaders
+  if (($subject.Body | ConvertFrom-Json).value -ne "user-42") { throw "Action query lost its verified request session" }
+  Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fadmin&name=ReadSubject" -Body "__ax_patch=true" -Headers $registrationHeaders -ExpectedStatus 403 | Out-Null
+  Invoke-AxRequest -Url $logoutUrl -Body "__ax_patch=true" -Headers $queryHeaders | Out-Null
   $registrationBody = "email=registered%40example.com&password=registration-proof-secret&role=admin&id=user-42"
   foreach ($missingBody in @("password=registration-proof-secret", "email=invalid%40example.com")) {
     $missingRegistration = Invoke-AxRequest -Url $registerUrl -Body $missingBody -Headers $registrationHeaders -ExpectedStatus 422
