@@ -96,7 +96,14 @@ try {
 
   $actionsPath = Join-Path $appRoot "app/posts/actions.ax"
   New-Item -ItemType Directory -Path (Join-Path $appRoot "app/absent/[id]") -Force | Out-Null
-  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/[id]/page.asx"), 'page Missing() { data value: String = loadMissing(params.id) return ASX { <p>{value}</p> } }')
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/[id]/page.asx"), @'
+page Missing() {
+  data value: String = loadMissing(params.id)
+  return ASX {
+    <p>{value}</p>
+  }
+}
+'@)
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/[id]/loader.ax"), @'
 export query loadMissing(id: String) -> String {
   require false else notFound()
