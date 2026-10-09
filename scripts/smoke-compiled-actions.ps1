@@ -228,6 +228,10 @@ action ValidateForm(email: String) {
   return ok()
 }
 
+action RedirectProbe(destination: String) {
+  return redirect(input.destination)
+}
+
 action ExpressionProbe(name: String) {
   data missing = db.users.where({ id: "missing-expression-probe" }).first()
   require missing == null else forbidden()
@@ -995,6 +999,10 @@ route GET "/api/forbidden-loader" {
 
   $fallback = Invoke-AxRequest -Url $actionUrl -Body "theme=silver" -ExpectedStatus 303
   if ($fallback.Headers["Location"] -ne "/posts") { throw "Compiled no-JS redirect fallback is invalid" }
+  $explicitRedirect = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=RedirectProbe" -Body "destination=%2Fexplicit-target" -ExpectedStatus 303
+  if ($explicitRedirect.Headers["Location"] -ne "/explicit-target") { throw "Explicit action redirect was replaced by the current route" }
+  $redirectPatch = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=RedirectProbe" -Body "destination=%2Fexplicit-target&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  if (($redirectPatch.Body | ConvertFrom-Json).redirect -ne "/explicit-target") { throw "Action patch lost the explicit redirect" }
   $safeFallback = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2F%2Fevil.example&name=Noop" -Body "noop=1" -ExpectedStatus 303
   if ($safeFallback.Headers["Location"] -ne "/") { throw "Compiled action allowed an unsafe redirect" }
 
