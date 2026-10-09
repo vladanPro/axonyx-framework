@@ -228,6 +228,26 @@ action ValidateForm(email: String) {
   return ok()
 }
 
+action ExpressionProbe(name: String) {
+  data missing = db.users.where({ id: "missing-expression-probe" }).first()
+  require missing == null else forbidden()
+  data users = db.users.all()
+  require users.length >= 1 else forbidden()
+  data user = db.users.where({ id: "user-42" }).first()
+  require user != null else forbidden()
+  require user["id"] == "user-42" else forbidden()
+  return json({ length: input.name.length, count: users.length })
+}
+
+action ConflictProbe() {
+  transaction {
+    db.users.insert({ id: "conflict-probe", email: "conflict-probe@example.com", role: "member" })
+    db.users.insert({ id: "user-42", email: "duplicate@example.com", role: "member" })
+  }
+  Session.create("conflict-probe", {})
+  return ok()
+}
+
 action CountInvalid() {
   db.posts.where({ slug: "fresh-compiled-post" }).update({ excerpt: "Invocation probe" })
   require false else invalid({email: "Test validation error."})
@@ -843,6 +863,14 @@ route GET "/api/forbidden-loader" {
   $registrationToken = ($registrationProof.Body | ConvertFrom-Json).token
   $registrationAnonCookie = ([string] $registrationProof.Headers["Set-Cookie"]).Split(';')[0]
   $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
+  $expression = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ExpressionProbe" -Body "name=A%F0%9F%94%A5&__ax_patch=true" -Headers $registrationHeaders
+  $expressionPayload = $expression.Body | ConvertFrom-Json
+  if ($expressionPayload.ok -ne $true -or $expressionPayload.value.length -ne 3 -or $expressionPayload.value.count -lt 1) { throw "Compiled null/record/UTF-16 length expression parity failed: $($expression.Body)" }
+  $actionConflict = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ConflictProbe" -Body "__ax_patch=true" -Headers $registrationHeaders -ExpectedStatus 409
+  $conflictPayload = $actionConflict.Body | ConvertFrom-Json
+  if ($conflictPayload.error.value.error -ne "conflict" -or $actionConflict.Headers["Set-Cookie"] -or $actionConflict.Headers["Cache-Control"] -ne "no-store" -or $actionConflict.Body -match 'unique_violation|INSERT|duplicate@example') { throw "Compiled action conflict boundary leaked internals or created a session" }
+  $rolledBack = & $python.Source -c 'import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);print(d.execute("select count(*) from users where id = ?", ("conflict-probe",)).fetchone()[0]);d.close()' $dbPath
+  if ($LASTEXITCODE -ne 0 -or [int]$rolledBack -ne 0) { throw "Compiled action conflict did not roll back its earlier write" }
   $queryLoginUrl = "$baseUrl/__axonyx/action?path=%2Fposts&name=QuerySignIn"
   foreach ($email in @("unknown%40example.com", "foundry%40example.com")) {
     $rejected = Invoke-AxRequest -Url $queryLoginUrl -Body "email=$email&password=wrong&__ax_patch=true" -Headers $registrationHeaders -ExpectedStatus 422

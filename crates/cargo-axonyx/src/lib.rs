@@ -13908,10 +13908,14 @@ fn handle_compiled_action(
                 let payload = error.public_error_payload();
                 return render_native_form_error(runtime, request, &name, &route, payload.get("fields").unwrap_or(&Value::Null));
             }}
+            let conflict = matches!(&error, axonyx_runtime::backend::AxRuntimeError::Database {{ error }}
+                if error.code == "db.unique_violation" || error.code == "db.constraint_violation");
+            let invalid = matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }});
+            let status = if invalid {{ 422 }} else if conflict {{ 409 }} else {{ 500 }};
             let body = json!({{
                 "ok": false,
                 "redirect": route,
-                "error": {{ "message": "Action failed.", "status": if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{ 422 }} else {{ 500 }}, "value": if matches!(&error, axonyx_runtime::backend::AxRuntimeError::InvalidInput {{ .. }}) {{ error.public_error_payload() }} else {{ json!({{"error":"internal_server_error"}}) }} }},
+                "error": {{ "message": if conflict {{ "Request conflicts with existing data." }} else {{ "Action failed." }}, "status": status, "value": if invalid {{ error.public_error_payload() }} else if conflict {{ json!({{"error":"conflict"}}) }} else {{ json!({{"error":"internal_server_error"}}) }} }},
                 "patches": [],
                 "invalidations": [],
                 "refreshes": [],
@@ -14185,8 +14189,9 @@ fn url_decode(value: &str) -> String {{
         match bytes[index] {{
             b'+' => {{ decoded.push(b' '); index += 1; }}
             b'%' if index + 2 < bytes.len() => {{
-                let pair = &value[index + 1..index + 3];
-                if let Ok(byte) = u8::from_str_radix(pair, 16) {{ decoded.push(byte); index += 3; }}
+                let high = (bytes[index + 1] as char).to_digit(16);
+                let low = (bytes[index + 2] as char).to_digit(16);
+                if let (Some(high), Some(low)) = (high, low) {{ decoded.push((high * 16 + low) as u8); index += 3; }}
                 else {{ decoded.push(bytes[index]); index += 1; }}
             }}
             byte => {{ decoded.push(byte); index += 1; }}
@@ -21827,33 +21832,34 @@ fn path_segments(path: &str) -> Vec<String> {
 
 fn url_decode(value: &str) -> String {
     let bytes = value.as_bytes();
-    let mut out = String::with_capacity(value.len());
+    let mut out = Vec::with_capacity(value.len());
     let mut index = 0;
 
     while index < bytes.len() {
         match bytes[index] {
             b'+' => {
-                out.push(' ');
+                out.push(b' ');
                 index += 1;
             }
             b'%' if index + 2 < bytes.len() => {
-                let hex = &value[index + 1..index + 3];
-                if let Ok(decoded) = u8::from_str_radix(hex, 16) {
-                    out.push(decoded as char);
+                let high = (bytes[index + 1] as char).to_digit(16);
+                let low = (bytes[index + 2] as char).to_digit(16);
+                if let (Some(high), Some(low)) = (high, low) {
+                    out.push((high * 16 + low) as u8);
                     index += 3;
                 } else {
-                    out.push('%');
+                    out.push(b'%');
                     index += 1;
                 }
             }
             byte => {
-                out.push(byte as char);
+                out.push(byte);
                 index += 1;
             }
         }
     }
 
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn html_escape(value: &str) -> String {
@@ -29070,6 +29076,17 @@ axonyx-runtime = "0.1.0"
             r#"<Theme default="silver" storageKey="axonyx-site-theme" preflight="true" />"#
         ));
         assert!(!updated.contains("<Theme>silver</Theme>"));
+    }
+
+    #[test]
+    fn form_decode_preserves_utf8_and_handles_non_ascii_after_percent() {
+        let fields = parse_form_body(b"name=%C4%8C%C4%87+A%F0%9F%94%A5");
+        assert_eq!(
+            fields.get("name").map(String::as_str),
+            Some("\u{10c}\u{107} A\u{1f525}")
+        );
+        assert_eq!(url_decode("%\u{10c}"), "%\u{10c}");
+        assert_eq!(url_decode("\u{10c}"), "\u{10c}");
     }
 
     #[test]
