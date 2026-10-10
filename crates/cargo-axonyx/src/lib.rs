@@ -13456,10 +13456,28 @@ fn collect_compiled_module_sources(
 
 fn compiled_loader_arg_source(expr: &AxExpr) -> Option<String> {
     match expr {
+        AxExpr::Binary {
+            op: AxBinaryOp::Fallback,
+            left,
+            right,
+        } => {
+            let left = compiled_loader_arg_source(left)?;
+            let right = compiled_loader_arg_source(right)?;
+            Some(format!(
+                "{{ let value = {left}; if value.is_null() {{ {right} }} else {{ value }} }}"
+            ))
+        }
         AxExpr::String(value) => Some(format!("Value::String({value:?}.to_string())")),
         AxExpr::Number(value) => Some(format!("Value::from({value})")),
         AxExpr::Float(value) => Some(format!("Value::from({:?}_f64)", value.get())),
         AxExpr::Bool(value) => Some(format!("Value::Bool({value})")),
+        AxExpr::Member { object, property }
+            if matches!(object.as_ref(), AxExpr::Identifier(name) if name == "query")
+                || matches!(object.as_ref(), AxExpr::Member { object, property }
+                    if property == "query" && matches!(object.as_ref(), AxExpr::Identifier(name) if name == "request")) =>
+        {
+            Some(format!("compiled_query_arg(path, {property:?})"))
+        }
         AxExpr::Member { object, property }
             if matches!(object.as_ref(), AxExpr::Identifier(name) if name == "params")
                 || matches!(
@@ -13948,7 +13966,7 @@ fn render_compiled_route_document(
     if form.is_none() {{ read_request.target = request.target.clone(); }}
     let mut values = BTreeMap::new();
     for binding in compiled_route_bindings(path) {{
-        let args = compiled_binding_args(&binding, path)?;
+        let args = compiled_binding_args(&binding, &read_request.target)?;
         let value = backend::dispatch_loader(runtime, binding.loader, binding.pattern, &read_request, &args)?
             .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page loader missing"))?;
         values.insert(compiled_loader_call_key(binding.loader, &args), value);
@@ -14024,6 +14042,7 @@ fn handle_compiled_data(
     let Some(name) = action_query_param(&request.target, "name") else {{
         return AxHttpResponse::text(400, "missing data binding name").with_no_store();
     }};
+    let target = path.clone();
     let Some(path) = safe_route_path(&path) else {{
         return AxHttpResponse::text(400, "invalid data route path").with_no_store();
     }};
@@ -14036,8 +14055,8 @@ fn handle_compiled_data(
         let mut binding_values = BTreeMap::new();
         for route_binding in &bindings {{
             let mut loader_request = request.clone();
-            loader_request.target = path.clone();
-            let args = compiled_binding_args(route_binding, &path)?;
+            loader_request.target = target.clone();
+            let args = compiled_binding_args(route_binding, &target)?;
             let value = backend::dispatch_loader(
                 runtime,
                 route_binding.loader,
@@ -14052,7 +14071,7 @@ fn handle_compiled_data(
         let html = if let Some((pattern, document, imports)) = compiled_page_renderer(&path) {{
             let params = route_params(pattern, &path)
                 .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page route did not match"))?;
-            Some(render_compiled_page_fragment(document, imports, &path, &params, &loader_values)
+            Some(render_compiled_page_fragment(document, imports, &target, &params, &loader_values)
                 .map_err(|error| axonyx_runtime::backend::AxRuntimeError::message(error.to_string()))?)
         }} else {{
             None
@@ -14102,6 +14121,16 @@ fn compiled_route_param(pattern: &str, path: &str, name: &str) -> Result<Value, 
         .and_then(|params| params.get(name).cloned())
         .map(Value::String)
         .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message(format!("missing compiled route param `{{name}}`")))
+}}
+
+fn compiled_query_arg(target: &str, name: &str) -> Value {{
+    let Some((_, query)) = target.split_once('?') else {{ return Value::Null; }};
+    let mut value = Value::Null;
+    for pair in query.split('#').next().unwrap_or_default().split('&').filter(|pair| !pair.is_empty()) {{
+        let (key, field) = pair.split_once('=').unwrap_or((pair, ""));
+        if url_decode(key) == name {{ value = Value::String(url_decode(field)); }}
+    }}
+    value
 }}
 
 fn compiled_page_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
@@ -27171,6 +27200,8 @@ data featured = loadPost("featured")
 data current = loadPost(params.slug)
 data requested = loadPost(request.params.slug)
 data page = loadPage(2, true)
+data filtered = loadPosts(query.status ?? "all", query.page ?? "1")
+data requestFiltered = loadPosts(request.query.status ?? "all")
 data unsupported = loadPost(currentSlug)
 data unsupportedList = loadPosts(["draft", "published"])
 return ASX { <Copy>{posts}</Copy> }
@@ -27181,7 +27212,7 @@ return ASX { <Copy>{posts}</Copy> }
 
         let bindings = compiled_data_bindings(&root).expect("bindings should collect");
 
-        assert_eq!(bindings.len(), 5);
+        assert_eq!(bindings.len(), 7);
         assert_eq!(bindings[0].route_pattern, "/posts/:slug");
         assert_eq!(bindings[0].name, "posts");
         assert_eq!(bindings[0].loader, "loadPosts");
@@ -27193,6 +27224,13 @@ return ASX { <Copy>{posts}</Copy> }
             [AxExpr::ident("request").member("params").member("slug")]
         );
         assert_eq!(bindings[4].args, [AxExpr::number(2), AxExpr::bool(true)]);
+        let generated = compiled_loader_arg_source(&bindings[5].args[0]).unwrap();
+        assert!(generated.contains("compiled_query_arg(path, \"status\")"));
+        assert!(generated.contains("if value.is_null()"));
+        assert!(generated.contains("Value::String(\"all\".to_string())"));
+        assert!(compiled_loader_arg_source(&bindings[6].args[0])
+            .unwrap()
+            .contains("compiled_query_arg(path, \"status\")"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
