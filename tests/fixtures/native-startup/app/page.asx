@@ -1,0 +1,3 @@
+page NativeStartup() {
+  return ASX { <p>Native startup smoke</p> }
+}

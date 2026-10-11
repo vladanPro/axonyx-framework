@@ -1,0 +1,11 @@
+[app]
+name = "native-startup-smoke"
+runtime = "native"
+
+[ui]
+entry = "app/page.asx"
+render_mode = "server"
+
+[server]
+routes_dir = "routes"
+generated_dir = "src/generated"
