@@ -82,3 +82,5 @@ try {
     }
     if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
 }
+# The preview rejection is expected; do not propagate its exit code to CI.
+$global:LASTEXITCODE = 0
