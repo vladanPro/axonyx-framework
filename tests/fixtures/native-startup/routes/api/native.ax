@@ -1,0 +1,14 @@
+route GET "/api/native" {
+  data prepared = Native.call("content.prepare", {text: query.text})
+  return json(prepared)
+}
+
+route GET "/api/native-invalid" {
+  data prepared = Native.call("content.prepare", {text: 42})
+  return json(prepared)
+}
+
+route GET "/api/native-unknown" {
+  data prepared = Native.call("content.missing", {text: "hello"})
+  return json(prepared)
+}
