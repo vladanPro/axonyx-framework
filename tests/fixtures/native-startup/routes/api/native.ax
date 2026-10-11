@@ -1,6 +1,6 @@
 route GET "/api/native" {
   data prepared = Native.call("content.prepare", {text: query.text})
-  return json(prepared)
+  return json({text: prepared.text})
 }
 
 route GET "/api/native-invalid" {
