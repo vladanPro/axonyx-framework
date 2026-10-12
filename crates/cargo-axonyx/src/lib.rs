@@ -89,8 +89,8 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.6.5";
-const AXONYX_UI_VERSION: &str = "0.0.81";
+const AXONYX_RUNTIME_VERSION: &str = "0.6.7";
+const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -28873,8 +28873,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-ui = "0.0.81"
-"#,
+axonyx-ui = "{{UI_VERSION}}"
+"#
+            .replace("{{UI_VERSION}}", AXONYX_UI_VERSION),
         )
         .expect("newer manifest should write");
 
@@ -28884,6 +28885,21 @@ axonyx-ui = "0.0.81"
         );
         let unchanged = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(unchanged.contains(&format!("axonyx-ui = \"{AXONYX_UI_VERSION}\"")));
+
+        let mut newer = semver::Version::parse(AXONYX_UI_VERSION).expect("UI version must parse");
+        newer.patch += 1;
+        fs::write(
+            &cargo_toml,
+            unchanged.replace(AXONYX_UI_VERSION, &newer.to_string()),
+        )
+        .expect("newer manifest should write");
+        assert!(
+            !upgrade_cargo_dependency_version(&cargo_toml, "axonyx-ui", AXONYX_UI_VERSION)
+                .expect("newer UI dependency should not downgrade")
+        );
+        assert!(fs::read_to_string(&cargo_toml)
+            .expect("manifest should read")
+            .contains(&format!("axonyx-ui = \"{newer}\"")));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

@@ -10,9 +10,9 @@ use clap::{Parser, ValueEnum};
 
 const DEFAULT_RUNTIME_GIT_URL: &str = "https://github.com/vladanPro/axonyx-runtime";
 const DEFAULT_RUNTIME_PACKAGE: &str = "axonyx-runtime";
-const DEFAULT_RUNTIME_VERSION: &str = "0.6.5";
+const DEFAULT_RUNTIME_VERSION: &str = "0.6.7";
 const DEFAULT_UI_PACKAGE: &str = "axonyx-ui";
-const DEFAULT_UI_VERSION: &str = "0.0.81";
+const DEFAULT_UI_VERSION: &str = "0.0.86";
 
 #[derive(Debug, Parser)]
 #[command(name = "create-axonyx")]
