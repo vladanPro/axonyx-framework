@@ -89,7 +89,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.6.7";
+const AXONYX_RUNTIME_VERSION: &str = "0.6.8";
 const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -25051,9 +25051,12 @@ loader PostsList
                 assert_eq!(source_count, 2);
                 let module =
                     fs::read_to_string(output_path).expect("generated backend should be readable");
-                assert!(module.contains("pub fn normalizeStatus(status: String) -> String"));
-                assert!(module
-                    .contains(r#"let status = json!(&normalizeStatus("published".to_string()));"#));
+                assert!(module.contains(
+                    "pub fn normalizeStatus(status: String) -> Result<String, AxRuntimeError>"
+                ));
+                assert!(module.contains(
+                    r#"let status = json!(&normalizeStatus(("published".to_string()).clone())?);"#
+                ));
             }
             BackendBuildStatus::NoSources { .. } => panic!("backend sources should be found"),
         }
