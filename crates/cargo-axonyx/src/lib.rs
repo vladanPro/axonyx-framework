@@ -89,8 +89,8 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.6.5";
-const AXONYX_UI_VERSION: &str = "0.0.81";
+const AXONYX_RUNTIME_VERSION: &str = "0.6.7";
+const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
 const AXONYX_UI_SCRIPT_HREF: &str = "/_ax/pkg/axonyx-ui/js/index.js";
@@ -12893,6 +12893,7 @@ fn run_stream_server(args: DevArgs) -> Result<()> {
 
 fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Result<()> {
     let root = app_root()?;
+    ensure_preview_has_no_native_registration(&root)?;
     if mode == AxServerMode::Start {
         ensure_no_check_diagnostics_for(&root, "production start")?;
     }
@@ -13075,6 +13076,23 @@ fn compile_backend_from_app_root(root: &Path) -> Result<BackendBuildStatus> {
     })
 }
 
+fn application_has_native_registration(root: &Path) -> Result<bool> {
+    let source = root.join("src/native.rs");
+    match fs::metadata(&source) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => bail!("application native registration must be a file: src/native.rs"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("failed to inspect src/native.rs"),
+    }
+}
+
+fn ensure_preview_has_no_native_registration(root: &Path) -> Result<()> {
+    if application_has_native_registration(root)? {
+        bail!("src/native.rs requires the application compiled server; run cargo ax build --compiled, then cargo ax run start --compiled. The noncompiled server cannot execute application Rust callbacks");
+    }
+    Ok(())
+}
+
 fn build_compiled_production_binary(
     root: &Path,
     out_dir: &Path,
@@ -13115,6 +13133,7 @@ fn build_compiled_production_binary(
         &data_bindings,
         &page_renderers,
         CompiledProductionOptions {
+            native_registration: application_has_native_registration(root)?,
             sessions_required: project_uses_session_runtime(root)?,
             public_origin: runtime_config.public_origin.as_deref(),
             database_runtime_defaults: &database_runtime_defaults,
@@ -13515,6 +13534,7 @@ fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
 
 #[derive(Debug, Clone, Copy)]
 struct CompiledProductionOptions<'a> {
+    native_registration: bool,
     sessions_required: bool,
     public_origin: Option<&'a str>,
     database_runtime_defaults: &'a str,
@@ -13531,6 +13551,7 @@ fn compiled_production_source(
     options: CompiledProductionOptions<'_>,
 ) -> String {
     let CompiledProductionOptions {
+        native_registration,
         sessions_required,
         public_origin,
         database_runtime_defaults,
@@ -13538,6 +13559,16 @@ fn compiled_production_source(
         validate_api_responses,
         storage_configs,
     } = options;
+    let native_module = if native_registration {
+        "#[path = \"../native.rs\"]\nmod native;\n"
+    } else {
+        ""
+    };
+    let runtime_init = if native_registration {
+        "    let mut registry = axonyx_runtime::native::AxNativeRegistry::default();\n    native::register(&mut registry)?;\n    let runtime = Arc::new(lazy_runtime_from_env(env)?.with_native_functions(registry));\n"
+    } else {
+        "    let runtime = Arc::new(lazy_runtime_from_env(env)?);\n"
+    };
     let public_origin_literal = match public_origin {
         Some(origin) => format!("Some({origin:?})"),
         None => "None".to_string(),
@@ -13645,6 +13676,7 @@ use serde_json::{{json, Value}};
 
 #[path = "../generated/backend.rs"]
 mod backend;
+{native_module}
 
 #[derive(Clone, Copy)]
 struct CompiledBinding {{
@@ -13665,7 +13697,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let bind = format!("{{host}}:{{port}}");
     let dist = PathBuf::from({dist_literal});
     let mut env = AxEnv::from_env();
-{database_runtime_defaults}    let runtime = Arc::new(lazy_runtime_from_env(env)?);
+{database_runtime_defaults}{runtime_init}
 {storage_init}
     let handler: AxCompiledHandler =
         Arc::new(move |request| handle_request(&dist, runtime.as_ref(), storage.as_ref(), request));
@@ -27012,6 +27044,58 @@ action ValidPost
     }
 
     #[test]
+    fn native_registration_is_optional_and_preview_rejects_it_explicitly() {
+        let root = make_temp_dir("native-startup-detection");
+        assert!(!application_has_native_registration(&root).unwrap());
+        ensure_preview_has_no_native_registration(&root).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/native.rs"), "// application owned").unwrap();
+        assert!(application_has_native_registration(&root).unwrap());
+        let error = ensure_preview_has_no_native_registration(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cargo ax build --compiled"));
+        assert!(error.contains("cargo ax run start --compiled"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/native.rs")).unwrap(),
+            "// application owned"
+        );
+        fs::remove_file(root.join("src/native.rs")).unwrap();
+        fs::create_dir(root.join("src/native.rs")).unwrap();
+        assert!(application_has_native_registration(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compiled_production_source_registers_native_functions_before_serving() {
+        let source = compiled_production_source(
+            "\"dist\"",
+            &[],
+            &[],
+            &[],
+            CompiledProductionOptions {
+                native_registration: true,
+                sessions_required: false,
+                public_origin: None,
+                database_runtime_defaults: "",
+                database_required: false,
+                validate_api_responses: false,
+                storage_configs: &[],
+            },
+        );
+        assert!(source.contains("#[path = \"../native.rs\"]\nmod native;"));
+        assert_eq!(
+            source.matches("native::register(&mut registry)?;").count(),
+            1
+        );
+        assert_eq!(source.matches("lazy_runtime_from_env(env)").count(), 1);
+        let register = source.find("native::register(&mut registry)?;").unwrap();
+        let runtime = source.find("with_native_functions(registry)").unwrap();
+        let serve = source.find("    serve_compiled_axum(bind").unwrap();
+        assert!(register < runtime && runtime < serve);
+    }
+
+    #[test]
     fn compiled_production_source_uses_generated_dispatch_and_safe_static_paths() {
         let source = compiled_production_source(
             "\"dist\"",
@@ -27035,6 +27119,7 @@ action ValidPost
                 import_sources: Vec::new(),
             }],
             CompiledProductionOptions {
+                native_registration: false,
                 sessions_required: true,
                 public_origin: Some("https://axonyx.dev"),
                 database_runtime_defaults: "",
@@ -27085,6 +27170,8 @@ action ValidPost
         );
         assert!(!source.contains("compiled actions are not enabled"));
         assert!(!source.contains("read_to_string"));
+        assert!(!source.contains("mod native;"));
+        assert!(!source.contains("with_native_functions"));
     }
 
     #[test]
@@ -27095,6 +27182,7 @@ action ValidPost
             &[],
             &[],
             CompiledProductionOptions {
+                native_registration: false,
                 sessions_required: false,
                 public_origin: None,
                 database_runtime_defaults: "",
@@ -27117,6 +27205,7 @@ action ValidPost
             &[],
             &[],
             CompiledProductionOptions {
+                native_registration: false,
                 sessions_required: false,
                 public_origin: None,
                 database_runtime_defaults: "",
@@ -28784,8 +28873,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axonyx-ui = "0.0.81"
-"#,
+axonyx-ui = "{{UI_VERSION}}"
+"#
+            .replace("{{UI_VERSION}}", AXONYX_UI_VERSION),
         )
         .expect("newer manifest should write");
 
@@ -28795,6 +28885,21 @@ axonyx-ui = "0.0.81"
         );
         let unchanged = fs::read_to_string(&cargo_toml).expect("cargo manifest should read");
         assert!(unchanged.contains(&format!("axonyx-ui = \"{AXONYX_UI_VERSION}\"")));
+
+        let mut newer = semver::Version::parse(AXONYX_UI_VERSION).expect("UI version must parse");
+        newer.patch += 1;
+        fs::write(
+            &cargo_toml,
+            unchanged.replace(AXONYX_UI_VERSION, &newer.to_string()),
+        )
+        .expect("newer manifest should write");
+        assert!(
+            !upgrade_cargo_dependency_version(&cargo_toml, "axonyx-ui", AXONYX_UI_VERSION)
+                .expect("newer UI dependency should not downgrade")
+        );
+        assert!(fs::read_to_string(&cargo_toml)
+            .expect("manifest should read")
+            .contains(&format!("axonyx-ui = \"{newer}\"")));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

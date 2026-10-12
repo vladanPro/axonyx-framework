@@ -56,6 +56,10 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-compiled-actions.ps1
 
+      - name: Smoke native application startup
+        shell: pwsh
+        run: ./scripts/smoke-native-startup.ps1
+
   runtime:
     name: Runtime Tests
     runs-on: ubuntu-latest

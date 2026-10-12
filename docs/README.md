@@ -13,6 +13,7 @@ This folder is the first structured documentation layer for the Axonyx framework
 - [Release Runbook](./release-runbook.md)
 - [Templates](./templates.md)
 - [Backend Authoring](./backend-authoring.md)
+- [Application Native Functions V0](./native-functions.md)
 
 ## Draft References
 
