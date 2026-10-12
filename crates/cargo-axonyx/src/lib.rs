@@ -25051,9 +25051,12 @@ loader PostsList
                 assert_eq!(source_count, 2);
                 let module =
                     fs::read_to_string(output_path).expect("generated backend should be readable");
-                assert!(module.contains("pub fn normalizeStatus(status: String) -> String"));
-                assert!(module
-                    .contains(r#"let status = json!(&normalizeStatus("published".to_string()));"#));
+                assert!(module.contains(
+                    "pub fn normalizeStatus(status: String) -> Result<String, AxRuntimeError>"
+                ));
+                assert!(module.contains(
+                    r#"let status = json!(&normalizeStatus(("published".to_string()).clone())?);"#
+                ));
             }
             BackendBuildStatus::NoSources { .. } => panic!("backend sources should be found"),
         }
