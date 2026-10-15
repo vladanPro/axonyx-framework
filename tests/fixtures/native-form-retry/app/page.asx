@@ -1,0 +1,12 @@
+page RetryForm() {
+  return ASX {
+    <h1>Native form retry smoke</h1>
+    <form method="post" action={action SaveDocument} data-ax-retain-fields="title,content_document,ignored">
+      <input name="title" value="" />
+      <p data-ax-field-error="title"></p>
+      <textarea name="content_document" data-ax-retain-disabled="true" hidden="true" disabled="true">stored snapshot</textarea>
+      <textarea name="ignored" hidden="true" disabled="true">original</textarea>
+      <button type="submit">Save</button>
+    </form>
+  }
+}
