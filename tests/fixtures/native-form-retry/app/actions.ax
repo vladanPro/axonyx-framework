@@ -1,0 +1,4 @@
+export action SaveDocument(title: String, content_document: String, ignored: String = "") {
+  require input.title != "" else invalid({ title: "Enter a title." })
+  return ok()
+}
