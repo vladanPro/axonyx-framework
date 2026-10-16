@@ -27383,6 +27383,20 @@ return ASX { <Copy>{posts}</Copy> }
     }
 
     #[test]
+    fn add_docs_templates_use_the_shared_formatter() {
+        for (name, source) in [
+            ("layout", DOCS_LAYOUT_AX),
+            ("home", DOCS_HOME_AX),
+            ("getting-started", DOCS_GETTING_STARTED_AX),
+            ("reference", DOCS_REFERENCE_AX),
+            ("examples", DOCS_EXAMPLES_AX),
+        ] {
+            let source = source.replace("\r\n", "\n");
+            assert_eq!(source, format_ax_source(&source), "docs template: {name}");
+        }
+    }
+
+    #[test]
     fn parses_fmt_file_and_stdin_commands() {
         let file = Cli::try_parse_from(["cargo-ax", "fmt", "--file", "app/page.asx", "--check"])
             .expect("fmt file command should parse");

@@ -59,3 +59,22 @@ intentional author request. Do not format generated contracts as hand-written co
 Generated database contract verification accepts equivalent LF/CRLF line endings
 but still rejects changed type content. A formatting rollout must not require
 database/schema regeneration merely because Git uses Windows line endings.
+
+## Scaffold Templates
+
+Template inputs end in `.asx.tpl` or `.ax.tpl`, not ordinary source extensions.
+Format only the scaffold and add-docs template directories with:
+
+```bash
+bash scripts/format-templates.sh
+bash scripts/format-templates.sh --check
+```
+
+This wrapper feeds each template to the workspace CLI through `fmt --stdin`.
+`AXONYX_FORMATTER` can select an already built CLI. Existing placeholders and
+legacy syntax are preserved. Parser fixtures, snapshots, generated sources and
+the runtime submodule are deliberately outside this formatting pass.
+
+The create-axonyx test suite checks scaffold formatting; the cargo-axonyx suite
+checks add-docs templates. Both use the same core formatter, including LF/CRLF
+equivalence. CI never rewrites template files.
