@@ -23,10 +23,18 @@ page BlogLayout() {
           </span>
           <TextLink href="/">Writing</TextLink>
           <TextLink href="/about">About</TextLink>
-          <ThemeSwitcher label="Theme" size="sm" surface="forged" storageKey="{{APP_SLUG}}-theme" ariaLabel="Choose reading theme" />
+          <ThemeSwitcher
+            label="Theme"
+            size="sm"
+            surface="forged"
+            storageKey="{{APP_SLUG}}-theme"
+            ariaLabel="Choose reading theme"
+          />
         </Navbar>
       </Header>
-      <main><Slot /></main>
+      <main>
+        <Slot />
+      </main>
       <footer class="ax-site-footer">
         <span>{{APP_NAME}} Field Notes</span>
         <span>Markdown in. Static HTML out.</span>

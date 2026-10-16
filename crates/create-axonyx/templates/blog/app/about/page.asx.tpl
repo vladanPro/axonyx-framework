@@ -5,7 +5,9 @@ import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page AboutBlog() {
   return ASX {
-    <Head><Title>{{APP_NAME}} | About the journal</Title></Head>
+    <Head>
+      <Title>{{APP_NAME}} | About the journal</Title>
+    </Head>
     <Container max="md">
       <Stack gap="xl">
         <PageHeader title="A public workbench">
