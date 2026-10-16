@@ -3293,6 +3293,18 @@ mod tests {
     }
 
     #[test]
+    fn expands_compact_asx_through_the_document_formatting_protocol() {
+        let uri = "file:///workspace/app/page.asx";
+        let source = "page Home() {\nreturn ASX {\n<Card><Copy>Ready</Copy><Button>Open</Button></Card>\n}\n}";
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": { "uri": uri, "text": source } } }),
+            json!({ "jsonrpc": "2.0", "id": "format-compact", "method": "textDocument/formatting", "params": { "textDocument": { "uri": uri }, "options": { "tabSize": 2, "insertSpaces": true } } }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+        assert_eq!(messages[1]["result"][0]["newText"], "page Home() {\n  return ASX {\n    <Card>\n      <Copy>Ready</Copy>\n      <Button>Open</Button>\n    </Card>\n  }\n}\n");
+    }
+
+    #[test]
     fn rejects_unknown_requests_with_json_rpc_error() {
         let messages = run(vec![
             json!({ "jsonrpc": "2.0", "id": 7, "method": "axonyx/unknown" }),
