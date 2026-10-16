@@ -3305,6 +3305,16 @@ mod tests {
     }
 
     #[test]
+    fn wraps_long_asx_attributes_in_document_edits() {
+        let source = "page Home() {\nreturn ASX {\n<Input label=\"A long accessible label that forces automatic wrapping in the shared Axonyx formatter\" value={count > 0} />\n}\n}\n";
+        let edits = formatting_edits(source);
+        let formatted = edits[0]["newText"].as_str().unwrap();
+        assert!(formatted.contains("    <Input\n      label="));
+        assert!(formatted.contains("      value={count > 0}\n    />"));
+        assert!(formatting_edits(formatted).is_empty());
+    }
+
+    #[test]
     fn rejects_unknown_requests_with_json_rpc_error() {
         let messages = run(vec![
             json!({ "jsonrpc": "2.0", "id": 7, "method": "axonyx/unknown" }),
