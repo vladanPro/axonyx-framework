@@ -7,7 +7,9 @@ import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page About() {
   return ASX {
-    <Head><Title>{{APP_NAME}} | About</Title></Head>
+    <Head>
+      <Title>{{APP_NAME}} | About</Title>
+    </Head>
     <Container max="lg">
       <Stack gap="xl">
         <PageHeader title="Small team. Deliberate work.">
@@ -15,9 +17,18 @@ page About() {
           <Copy tone="lead">We turn ambitious ideas into useful, durable products.</Copy>
         </PageHeader>
         <ContentGrid cols={3} gap="lg">
-          <SectionCard title="Clarity"><Badge>01</Badge><Copy>Understand the real problem before choosing the shape.</Copy></SectionCard>
-          <SectionCard title="Craft"><Badge>02</Badge><Copy>Sweat the details that make a product calm and trustworthy.</Copy></SectionCard>
-          <SectionCard title="Momentum"><Badge>03</Badge><Copy>Ship useful steps early and improve them with evidence.</Copy></SectionCard>
+          <SectionCard title="Clarity">
+            <Badge>01</Badge>
+            <Copy>Understand the real problem before choosing the shape.</Copy>
+          </SectionCard>
+          <SectionCard title="Craft">
+            <Badge>02</Badge>
+            <Copy>Sweat the details that make a product calm and trustworthy.</Copy>
+          </SectionCard>
+          <SectionCard title="Momentum">
+            <Badge>03</Badge>
+            <Copy>Ship useful steps early and improve them with evidence.</Copy>
+          </SectionCard>
         </ContentGrid>
         <SectionCard title="How to make this page yours">
           <Copy>

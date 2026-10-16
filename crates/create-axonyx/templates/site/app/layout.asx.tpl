@@ -10,7 +10,10 @@ page RootLayout() {
     <Head>
       <Title>{{APP_NAME}}</Title>
       <Theme storageKey="{{APP_SLUG}}-theme" default="silver" preflight="true" />
-      <Meta name="description" content="{{APP_NAME}} is a fast static site built with Axonyx and Foundry UI." />
+      <Meta
+        name="description"
+        content="{{APP_NAME}} is a fast static site built with Axonyx and Foundry UI."
+      />
       <Link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     </Head>
 
@@ -24,7 +27,13 @@ page RootLayout() {
           <TextLink href="/">Home</TextLink>
           <TextLink href="/about">About</TextLink>
           <TextLink href="/contact">Contact</TextLink>
-          <ThemeSwitcher label="Theme" size="sm" surface="raised" storageKey="{{APP_SLUG}}-theme" ariaLabel="Choose theme" />
+          <ThemeSwitcher
+            label="Theme"
+            size="sm"
+            surface="raised"
+            storageKey="{{APP_SLUG}}-theme"
+            ariaLabel="Choose theme"
+          />
         </Navbar>
       </Header>
 

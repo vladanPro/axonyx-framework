@@ -41,8 +41,8 @@ page Examples() {
             Keep the dev server running, then run `cargo ax test` to execute the
             starter's fast route checks before deploy.
           </Copy>
-        </SectionCard>
-      </ContentGrid>
-    </Container>
-  }
-}
+          </SectionCard>
+          </ContentGrid>
+          </Container>
+          }
+          }

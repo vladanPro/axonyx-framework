@@ -27,7 +27,13 @@ page DocsLayout() {
         <a href="/getting-started">Docs</a>
         <a href="/components">Components</a>
         <a href="/reference">Reference</a>
-        <ThemeSwitcher label="Theme" size="sm" surface="forged" storageKey="{{APP_SLUG}}-theme" ariaLabel="Theme switcher" />
+        <ThemeSwitcher
+          label="Theme"
+          size="sm"
+          surface="forged"
+          storageKey="{{APP_SLUG}}-theme"
+          ariaLabel="Theme switcher"
+        />
       </Navbar>
 
       <AppShell rail="left" railWidth="md">
