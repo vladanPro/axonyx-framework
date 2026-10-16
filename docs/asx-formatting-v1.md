@@ -47,3 +47,15 @@ Spaced assignment syntax is conservatively left alone.
 
 This is still not full Prettier parity: complete inline function bodies and
 embedded JavaScript/CSS are not automatically reflowed.
+
+## Rollout Safety
+
+Files containing legacy indentation-based declarations or standalone query clauses
+(`where`, `order`, `limit`, `offset`) are preserved instead of being flattened.
+This is conservative compatibility handling, not a legacy syntax migration.
+Project-wide formatting excludes `app/generated`; explicit `--file` remains an
+intentional author request. Do not format generated contracts as hand-written code.
+
+Generated database contract verification accepts equivalent LF/CRLF line endings
+but still rejects changed type content. A formatting rollout must not require
+database/schema regeneration merely because Git uses Windows line endings.
