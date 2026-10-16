@@ -39,6 +39,11 @@ toolchain. To enable saving-time formatting:
 }
 ```
 
-V1 does not automatically wrap long attribute lists or complete inline function
-bodies. Existing multiline attributes are indented by the existing formatter.
-These are future layout rules, not claims of full Prettier parity.
+Opening tags wider than 100 characters (including indentation) with at least
+two attributes are wrapped with one attribute per line. The closing `>` or `/>`
+aligns with the opening tag. Quoted values and braced expressions remain intact;
+short tags stay compact. Already multiline tags keep their existing layout.
+Spaced assignment syntax is conservatively left alone.
+
+This is still not full Prettier parity: complete inline function bodies and
+embedded JavaScript/CSS are not automatically reflowed.
