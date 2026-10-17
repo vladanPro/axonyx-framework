@@ -1,0 +1,16 @@
+action UploadCustom(image: File, key: String = "") {
+  require input.key == "fixture-only" else forbidden()
+  data saved = Storage.save("custom", input.image)
+  return json(saved)
+}
+
+action UploadRaw(image: File, key: String = "") {
+  require input.key == "fixture-only" else forbidden()
+  data saved = Storage.save("raw", input.image)
+  return json(saved)
+}
+
+action UploadMissing(image: File) {
+  data saved = Storage.save("missing", input.image)
+  return json(saved)
+}

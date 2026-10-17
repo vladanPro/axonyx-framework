@@ -6,6 +6,6 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-axonyx-runtime = { path = "{{RUNTIME_PATH}}", features = ["axum"] }
+axonyx-runtime = { path = "{{RUNTIME_PATH}}", features = ["axum", "storage"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
