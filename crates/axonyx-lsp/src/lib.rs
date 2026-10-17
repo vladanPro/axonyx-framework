@@ -3293,6 +3293,28 @@ mod tests {
     }
 
     #[test]
+    fn expands_compact_asx_through_the_document_formatting_protocol() {
+        let uri = "file:///workspace/app/page.asx";
+        let source = "page Home() {\nreturn ASX {\n<Card><Copy>Ready</Copy><Button>Open</Button></Card>\n}\n}";
+        let messages = run(vec![
+            json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": { "uri": uri, "text": source } } }),
+            json!({ "jsonrpc": "2.0", "id": "format-compact", "method": "textDocument/formatting", "params": { "textDocument": { "uri": uri }, "options": { "tabSize": 2, "insertSpaces": true } } }),
+            json!({ "jsonrpc": "2.0", "method": "exit" }),
+        ]);
+        assert_eq!(messages[1]["result"][0]["newText"], "page Home() {\n  return ASX {\n    <Card>\n      <Copy>Ready</Copy>\n      <Button>Open</Button>\n    </Card>\n  }\n}\n");
+    }
+
+    #[test]
+    fn wraps_long_asx_attributes_in_document_edits() {
+        let source = "page Home() {\nreturn ASX {\n<Input label=\"A long accessible label that forces automatic wrapping in the shared Axonyx formatter\" value={count > 0} />\n}\n}\n";
+        let edits = formatting_edits(source);
+        let formatted = edits[0]["newText"].as_str().unwrap();
+        assert!(formatted.contains("    <Input\n      label="));
+        assert!(formatted.contains("      value={count > 0}\n    />"));
+        assert!(formatting_edits(formatted).is_empty());
+    }
+
+    #[test]
     fn rejects_unknown_requests_with_json_rpc_error() {
         let messages = run(vec![
             json!({ "jsonrpc": "2.0", "id": 7, "method": "axonyx/unknown" }),

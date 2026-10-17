@@ -89,7 +89,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.6.9";
+const AXONYX_RUNTIME_VERSION: &str = "0.6.10";
 const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -2239,13 +2239,7 @@ fn fmt_command(args: FmtArgs) -> Result<()> {
     }
 
     let root = app_root()?;
-    let mut paths = Vec::new();
-    for relative in ["app", "routes", "features", "jobs"] {
-        collect_ax_files(&root.join(relative), &mut paths)?;
-    }
-    paths.sort();
-    paths.dedup();
-
+    let paths = collect_fmt_source_paths(&root)?;
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
         let source = read_fmt_source(&path)?;
@@ -2253,6 +2247,17 @@ fn fmt_command(args: FmtArgs) -> Result<()> {
         files.push((path, source, formatted));
     }
     finish_fmt_files(files, args.check)
+}
+
+fn collect_fmt_source_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for relative in ["app", "routes", "features", "jobs"] {
+        collect_ax_files(&root.join(relative), &mut paths)?;
+    }
+    paths.retain(|path| !path.starts_with(root.join("app/generated")));
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn resolve_fmt_file(file: &Path) -> Result<PathBuf> {
@@ -8256,7 +8261,10 @@ fn check_generated_database_contract(root: &Path) -> Result<Vec<CheckDiagnostic>
     };
     let expected = render_db_schema_types(&schema);
     let actual = fs::read_to_string(&path).ok();
-    if actual.as_deref() == Some(expected.as_str()) {
+    if actual
+        .as_ref()
+        .is_some_and(|source| source.replace("\r\n", "\n") == expected)
+    {
         return Ok(Vec::new());
     }
 
@@ -26506,6 +26514,20 @@ query loadPosts()
         let generated = parse_backend_ax(&types).expect("generated database types should parse");
         assert_eq!(generated.types.len(), 3);
 
+        assert!(check_generated_database_contract(&root).unwrap().is_empty());
+        fs::write(
+            root.join("app/generated/db.ax"),
+            types.replace('\n', "\r\n"),
+        )
+        .unwrap();
+        assert!(check_generated_database_contract(&root).unwrap().is_empty());
+        fs::write(
+            root.join("app/generated/db.ax"),
+            types.replace("title: String", "title: Int"),
+        )
+        .unwrap();
+        assert_eq!(check_generated_database_contract(&root).unwrap().len(), 1);
+
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
@@ -27361,6 +27383,38 @@ return ASX { <Copy>{posts}</Copy> }
     }
 
     #[test]
+    fn add_docs_templates_use_the_shared_formatter() {
+        for (name, source) in [
+            ("layout", DOCS_LAYOUT_AX),
+            ("home", DOCS_HOME_AX),
+            ("getting-started", DOCS_GETTING_STARTED_AX),
+            ("reference", DOCS_REFERENCE_AX),
+            ("examples", DOCS_EXAMPLES_AX),
+        ] {
+            let source = source.replace("\r\n", "\n");
+            assert_eq!(source, format_ax_source(&source), "docs template: {name}");
+        }
+    }
+
+    #[test]
+    fn release_runtime_defaults_match_the_workspace_dependency() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let manifest: toml::Value = toml::from_str(
+            &fs::read_to_string(root.join("Cargo.toml")).expect("workspace manifest should exist"),
+        )
+        .expect("workspace manifest should parse");
+        let runtime_version = manifest["workspace"]["dependencies"]["axonyx-runtime"]["version"]
+            .as_str()
+            .expect("workspace runtime version should be explicit");
+        assert_eq!(AXONYX_RUNTIME_VERSION, runtime_version);
+        let scaffold = fs::read_to_string(root.join("crates/create-axonyx/src/main.rs"))
+            .expect("scaffolder source should exist");
+        assert!(scaffold.contains(&format!(
+            "const DEFAULT_RUNTIME_VERSION: &str = {runtime_version:?};"
+        )));
+    }
+
+    #[test]
     fn parses_fmt_file_and_stdin_commands() {
         let file = Cli::try_parse_from(["cargo-ax", "fmt", "--file", "app/page.asx", "--check"])
             .expect("fmt file command should parse");
@@ -27418,6 +27472,30 @@ return ASX { <Copy>{posts}</Copy> }
         let source = "page Home() {\r\n  return ASX { <Copy>Ready</Copy> }\r\n}\r\n";
 
         assert_eq!(format_ax_file_source(source), source);
+    }
+
+    #[test]
+    fn project_formatter_excludes_generated_database_contracts() {
+        let root = make_temp_dir("fmt-generated");
+        fs::create_dir_all(root.join("app/generated")).unwrap();
+        fs::create_dir_all(root.join("app/generated-content")).unwrap();
+        fs::write(root.join("app/page.asx"), "page Home() {}\n").unwrap();
+        fs::write(root.join("app/generated/db.ax"), "generated contract\n").unwrap();
+        fs::write(
+            root.join("app/generated-content/page.asx"),
+            "page Docs() {}\n",
+        )
+        .unwrap();
+        let paths = collect_fmt_source_paths(&root).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&root.join("app/page.asx")));
+        assert!(paths.contains(&root.join("app/generated-content/page.asx")));
+        assert!(!paths.contains(&root.join("app/generated/db.ax")));
+        assert_eq!(
+            fs::read_to_string(root.join("app/generated/db.ax")).unwrap(),
+            "generated contract\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

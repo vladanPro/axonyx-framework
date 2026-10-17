@@ -10,7 +10,9 @@ page BlogHome() {
   data posts = loadPosts()
 
   return ASX {
-    <Head><Title>{{APP_NAME}} | Field Notes</Title></Head>
+    <Head>
+      <Title>{{APP_NAME}} | Field Notes</Title>
+    </Head>
     <Container max="lg">
       <Stack gap="xl">
         <PageHeader title="Notes from the workbench">
@@ -32,7 +34,9 @@ page BlogHome() {
               </Card>
             </Each>
             <Else>
-              <Card title="No notes yet"><Copy>Add a Markdown file under `content/posts`.</Copy></Card>
+              <Card title="No notes yet">
+                <Copy>Add a Markdown file under `content/posts`.</Copy>
+              </Card>
             </Else>
           </If>
         </ContentGrid>

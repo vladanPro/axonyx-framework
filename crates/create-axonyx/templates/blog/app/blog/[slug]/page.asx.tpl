@@ -26,7 +26,9 @@ page BlogPost() {
             </article>
           </Each>
           <Else>
-            <Card title="Article not found"><Copy>No Markdown entry matched this slug.</Copy></Card>
+            <Card title="Article not found">
+              <Copy>No Markdown entry matched this slug.</Copy>
+            </Card>
           </Else>
         </If>
       </Stack>

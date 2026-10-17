@@ -6,7 +6,9 @@ import { Stack } from "@axonyx/ui/foundry/Stack.asx"
 
 page Contact() {
   return ASX {
-    <Head><Title>{{APP_NAME}} | Contact</Title></Head>
+    <Head>
+      <Title>{{APP_NAME}} | Contact</Title>
+    </Head>
     <Container max="md">
       <Stack gap="xl">
         <PageHeader title="Let us build the next useful thing.">
