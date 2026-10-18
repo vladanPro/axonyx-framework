@@ -193,7 +193,7 @@ foundation for live state patch streams, CMS events, and build/runtime signals.
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.6.11"
+axonyx-runtime = "0.7.0"
 axonyx-ui = "0.0.86"
 ```
 
@@ -241,6 +241,29 @@ the ordinary budget; preview and fallback hosts refuse scoped configuration for
 now. This is bounded buffering, not upload authorization, image validation or
 streaming. Handwritten action URLs must supply both literal `path` and `name`
 query keys exactly once.
+
+## Private Binary Routes (0.7)
+
+Compiled backend routes can return private bytes separately from JSON:
+
+```ax
+route GET "/api/files/:id" -> Binary {
+  return Native.privateResponse("files.read", { id: params.id })
+}
+```
+
+Register `files.read` in the application's Rust native registry using
+`register_private_response`. The runtime verifies the session before invoking
+the typed callback; the application must recheck current product permissions.
+The callback returns nonempty bounded PNG/JPEG/octet-stream bytes, not arbitrary
+HTML/SVG, headers or cookies. Responses enforce private/no-store/nosniff policy
+and safe 403/404/500 failures, including when API validation is disabled.
+
+Use `cargo ax check`, `cargo ax api --openapi`, and the compiled build/start flow.
+OpenAPI describes binary content rather than a JSON record. Preview refuses this
+compiled-only route. This is not streaming or aggregate memory protection.
+Old 0.6.x native Rust consumers must update exhaustive compiler/runtime enum
+matches when moving to 0.7; upgrading an app does not replace its installed CLI.
 
 ## Architecture Direction
 
