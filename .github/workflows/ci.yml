@@ -64,6 +64,10 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-native-startup.ps1 -Scoped -Port 3928
 
+      - name: Smoke compiled private Binary HTTP routes
+        shell: pwsh
+        run: ./scripts/smoke-private-binary.ps1
+
       - name: Smoke native form retry in preview and compiled servers
         shell: pwsh
         run: ./scripts/smoke-native-form-retry.ps1
