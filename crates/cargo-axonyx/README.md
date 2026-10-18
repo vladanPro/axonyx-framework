@@ -193,8 +193,8 @@ foundation for live state patch streams, CMS events, and build/runtime signals.
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.6.0"
-axonyx-ui = "0.0.74"
+axonyx-runtime = "0.6.11"
+axonyx-ui = "0.0.86"
 ```
 
 Local path and package override flows are still supported for framework development and UI dogfooding.
@@ -219,6 +219,28 @@ Copy a block into the app when you want to customize it locally:
 ```bash
 cargo ax add block marketing-01
 ```
+
+## Scoped Upload Budgets
+
+Compiled Axum hosts can keep ordinary forms small while explicitly allowing a
+larger request for a known page/action pair:
+
+```toml
+[server]
+max_body_bytes = "64kb"
+
+[[server.action_body_limits]]
+path = "/admin/media"
+action = "UploadImage"
+max_body_bytes = "9mb"
+```
+
+Run `cargo ax check`, `cargo ax build --compiled`, then `cargo ax run start --compiled`.
+The route and action must exist. Unknown or ambiguous request selectors retain
+the ordinary budget; preview and fallback hosts refuse scoped configuration for
+now. This is bounded buffering, not upload authorization, image validation or
+streaming. Handwritten action URLs must supply both literal `path` and `name`
+query keys exactly once.
 
 ## Architecture Direction
 

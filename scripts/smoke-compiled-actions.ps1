@@ -1033,8 +1033,8 @@ route GET "/api/forbidden-loader" {
   if ($explicitRedirect.Headers["Location"] -ne "/explicit-target") { throw "Explicit action redirect was replaced by the current route" }
   $redirectPatch = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=RedirectProbe" -Body "destination=%2Fexplicit-target&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
   if (($redirectPatch.Body | ConvertFrom-Json).redirect -ne "/explicit-target") { throw "Action patch lost the explicit redirect" }
-  $safeFallback = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2F%2Fevil.example&name=Noop" -Body "noop=1" -ExpectedStatus 303
-  if ($safeFallback.Headers["Location"] -ne "/") { throw "Compiled action allowed an unsafe redirect" }
+  $unsafeSelector = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2F%2Fevil.example&name=Noop" -Body "noop=1" -ExpectedStatus 400
+  if ($unsafeSelector.Headers["Location"] -or $unsafeSelector.Headers["Cache-Control"] -ne "no-store") { throw "Compiled action did not reject an unsafe selector without redirecting" }
 
   # A database trigger counts effects so an accidental second action dispatch is observable.
   & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.executescript("CREATE TABLE invocation_probe (id INTEGER); CREATE TRIGGER count_probe AFTER UPDATE ON posts BEGIN INSERT INTO invocation_probe VALUES (1); END;");db.commit();db.close()' $dbPath

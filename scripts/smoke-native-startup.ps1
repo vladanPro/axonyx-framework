@@ -1,4 +1,4 @@
-param([int] $Port = 3927)
+param([int] $Port = 3927, [switch] $Scoped)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('axonyx-native-startup-' + [guid]::NewGuid().ToString('N'))
@@ -10,6 +10,12 @@ $originalStorageFail = $env:AXONYX_TEST_STORAGE_FAIL
 try {
     New-Item -ItemType Directory -Path $fixture | Out-Null
     Copy-Item -Path (Join-Path $root 'tests/fixtures/native-startup/*') -Destination $fixture -Recurse
+    if ($Scoped) {
+        $configPath = Join-Path $fixture 'Axonyx.toml'
+        $config = [IO.File]::ReadAllText($configPath).Replace('max_body_bytes = "4kb"', 'max_body_bytes = "64kb"')
+        $config += "`n[[server.action_body_limits]]`npath = `"/upload`"`naction = `"UploadCustom`"`nmax_body_bytes = `"9mb`"`n"
+        [IO.File]::WriteAllText($configPath, $config)
+    }
     $runtime = (Join-Path $root 'vendor/axonyx-runtime/crates/axonyx-runtime').Replace('\', '/')
     (Get-Content -LiteralPath (Join-Path $fixture 'Cargo.toml.tpl') -Raw).Replace('{{RUNTIME_PATH}}', $runtime) |
         Set-Content -LiteralPath (Join-Path $fixture 'Cargo.toml') -Encoding utf8
@@ -83,16 +89,21 @@ try {
     }
     $client = [Net.Http.HttpClient]::new()
     try {
-        function Send-Upload([string]$Action, [string]$Key, [string]$Bytes, [int]$Status, [string]$Origin = $base) {
+        function Send-Upload([string]$Action, [string]$Key, [string]$Bytes, [int]$Status, [string]$Origin = $base, [int]$Padding = 0, [bool]$Chunked = $false) {
             $body = [Net.Http.MultipartFormDataContent]::new()
             $body.Add([Net.Http.StringContent]::new($Key), 'key')
             $body.Add([Net.Http.ByteArrayContent]::new([Text.Encoding]::UTF8.GetBytes($Bytes)), 'image', 'untrusted.txt')
+            # Keep the independent 64 KiB text-field limit intact in this proof.
+            if ($Padding -gt 0) { $body.Add([Net.Http.ByteArrayContent]::new([byte[]]::new($Padding)), 'padding', 'padding.bin') }
             $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Post, "$base/__axonyx/action?path=%2Fupload&name=$Action")
             $request.Content = $body
+            $request.Headers.ExpectContinue = $true
+            if ($Chunked) { $request.Headers.TransferEncodingChunked = $true }
             $request.Headers.TryAddWithoutValidation('Origin', $Origin) | Out-Null
             $request.Headers.TryAddWithoutValidation('Accept', 'application/ax-patch+json') | Out-Null
             try {
-                $response = $client.SendAsync($request).GetAwaiter().GetResult()
+                try { $response = $client.SendAsync($request).GetAwaiter().GetResult() }
+                catch { throw "Upload $Action expected HTTP $Status (padding=$Padding, chunked=$Chunked): $_" }
                 try {
                     $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
                     if ([int]$response.StatusCode -ne $Status) { throw "Upload $Action expected $Status, got $($response.StatusCode): $text" }
@@ -102,11 +113,40 @@ try {
         }
         Send-Upload UploadCustom wrong source 403 | Out-Null
         Send-Upload UploadCustom fixture-only source 403 'https://attacker.example' | Out-Null
-        # Current parser exposes an over-budget multipart body as HTTP 400.
-        Send-Upload UploadCustom fixture-only ('x' * 5000) 400 | Out-Null
+        if ($Scoped) {
+            # Larger transport budget does not bypass custom storage validation.
+            Send-Upload UploadCustom fixture-only ('x' * 70000) 422 | Out-Null
+            Send-Upload UploadRaw fixture-only source 413 $base 70000 | Out-Null
+            Send-Upload UploadRaw fixture-only source 413 $base 70000 $true | Out-Null
+            Send-Upload UploadCustom fixture-only source 413 $base (9 * 1024 * 1024 + 1024) $true | Out-Null
+            foreach ($invalid in @('Missing', 'UploadCustom&name=UploadRaw', 'UploadCustom&%6Eame=UploadRaw', 'UploadCustom&path=%2Fother')) {
+                Send-Upload $invalid fixture-only source 413 $base 70000 | Out-Null
+            }
+        } else {
+            # Legacy parser behavior stays unchanged without scoped limits.
+            Send-Upload UploadCustom fixture-only ('x' * 5000) 400 | Out-Null
+        }
         Send-Upload UploadMissing fixture-only source 500 | Out-Null
+        foreach ($invalid in @('UploadCustom&name=UploadRaw', 'UploadCustom&%6Eame=UploadRaw', 'UploadCustom&path=%2Fother', 'UploadCustom&extra=%FF')) {
+            Send-Upload $invalid fixture-only source 400 | Out-Null
+        }
+        # HttpClient rewrites invalid percent escapes; send this case verbatim.
+        $rawBody = "--AXSELECT`r`nContent-Disposition: form-data; name=`"key`"`r`n`r`nfixture-only`r`n--AXSELECT`r`nContent-Disposition: form-data; name=`"image`"; filename=`"image.txt`"`r`n`r`nsource`r`n--AXSELECT--`r`n"
+        $raw = "POST /__axonyx/action?path=%2Fupload&name=UploadCustom&extra=%GG HTTP/1.1`r`nHost: 127.0.0.1:$Port`r`nOrigin: $base`r`nAccept: application/ax-patch+json`r`nContent-Type: multipart/form-data; boundary=AXSELECT`r`nContent-Length: $([Text.Encoding]::ASCII.GetByteCount($rawBody))`r`nConnection: close`r`n`r`n$rawBody"
+        $tcp = [Net.Sockets.TcpClient]::new('127.0.0.1', $Port)
+        try {
+            $stream = $tcp.GetStream()
+            $stream.ReadTimeout = 5000
+            $stream.WriteTimeout = 5000
+            $bytes = [Text.Encoding]::ASCII.GetBytes($raw)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII)
+            try { $rawResponse = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if (!$rawResponse.StartsWith('HTTP/1.1 400 ', [StringComparison]::Ordinal)) { throw 'Malformed raw action selector was not rejected' }
+        } finally { $tcp.Dispose() }
         if (Test-Path (Join-Path $fixture 'custom-saved')) { throw 'Rejected upload reached custom storage' }
-        $saved = (Send-Upload UploadCustom fixture-only source 200 | ConvertFrom-Json).value
+        $padding = if ($Scoped) { 70000 } else { 0 }
+        $saved = (Send-Upload 'Upload%43ustom' fixture-only source 200 $base $padding ([bool]$Scoped) | ConvertFrom-Json).value
         if ($saved.id -ne 'custom-id' -or $saved.file_name -ne 'canonical.bin' -or $saved.size -ne 9) { throw 'Custom FileRef metadata mismatch' }
         if ((Get-Content (Join-Path $fixture 'custom-saved') -Raw) -ne 'canonical') { throw 'Custom storage did not receive actual multipart bytes' }
         $raw = (Send-Upload UploadRaw fixture-only fallback 200 | ConvertFrom-Json).value
