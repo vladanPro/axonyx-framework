@@ -1,6 +1,6 @@
 # Application storage startup V0
 
-Development source feature, not yet published in a CLI release. Applications can
+Prepared for CLI 0.6.15; publication is a separate release gate. Applications can
 provide `src/native_storage.rs` alongside, or without, `src/native.rs`:
 
 ```rust
@@ -59,8 +59,10 @@ body-limit rejection, unknown capability failure and fallback storage continuity
 Its custom fixture is not Legura image validation; it deliberately transforms a
 small fixed payload to prove the application adapter receives actual file bytes.
 Fixture guard keys are test-only, not administrator/session authentication.
-Legura's session/CSRF upload and metadata transaction need a separate consumer
-proof before issue #356's complete media integration gate can be closed.
+Legura's separate consumer proof now covers session/CSRF upload, validated image
+metadata, persistence and isolated recovery startup (Legura PRs 55 and 56).
+Issue #356 tracks the completed hook. Operator media activation and CLI registry
+publication remain separate gates, not outcomes implied by that issue closure.
 
 The existing compiled Axum adapter dispatches synchronous handlers through
 spawn_blocking; the hook does not move storage/decoder work onto async I/O tasks.
