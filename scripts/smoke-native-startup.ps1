@@ -105,8 +105,11 @@ try {
         # Current parser exposes an over-budget multipart body as HTTP 400.
         Send-Upload UploadCustom fixture-only ('x' * 5000) 400 | Out-Null
         Send-Upload UploadMissing fixture-only source 500 | Out-Null
+        foreach ($invalid in @('UploadCustom&name=UploadRaw', 'UploadCustom&%6Eame=UploadRaw', 'UploadCustom&path=%2Fother', 'UploadCustom&extra=%GG')) {
+            Send-Upload $invalid fixture-only source 400 | Out-Null
+        }
         if (Test-Path (Join-Path $fixture 'custom-saved')) { throw 'Rejected upload reached custom storage' }
-        $saved = (Send-Upload UploadCustom fixture-only source 200 | ConvertFrom-Json).value
+        $saved = (Send-Upload 'Upload%43ustom' fixture-only source 200 | ConvertFrom-Json).value
         if ($saved.id -ne 'custom-id' -or $saved.file_name -ne 'canonical.bin' -or $saved.size -ne 9) { throw 'Custom FileRef metadata mismatch' }
         if ((Get-Content (Join-Path $fixture 'custom-saved') -Raw) -ne 'canonical') { throw 'Custom storage did not receive actual multipart bytes' }
         $raw = (Send-Upload UploadRaw fixture-only fallback 200 | ConvertFrom-Json).value
