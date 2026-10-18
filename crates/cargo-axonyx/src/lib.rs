@@ -8456,6 +8456,7 @@ fn check_action_patch_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
 }
 
 fn check_storage_action_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    let custom_storage = application_has_native_storage(root)?;
     let Ok(max_body_bytes) = configured_max_request_body_bytes(root) else {
         return Ok(Vec::new());
     };
@@ -8490,6 +8491,9 @@ fn check_storage_action_contracts(root: &Path) -> Result<Vec<CheckDiagnostic>> {
                 };
                 let line = line_for_source_pattern(&source, "Storage.save(");
                 match capabilities.get(capability.as_str()) {
+                    // Trusted application Rust may provide additional capabilities.
+                    // Configured read-only capabilities still fail below.
+                    None if custom_storage => {}
                     None => diagnostics.push(CheckDiagnostic {
                         file: file.clone(),
                         line,
@@ -13098,7 +13102,19 @@ fn ensure_preview_has_no_native_registration(root: &Path) -> Result<()> {
     if application_has_native_registration(root)? {
         bail!("src/native.rs requires the application compiled server; run cargo ax build --compiled, then cargo ax run start --compiled. The noncompiled server cannot execute application Rust callbacks");
     }
+    if application_has_native_storage(root)? {
+        bail!("src/native_storage.rs requires the application compiled server; run cargo ax build --compiled, then cargo ax run start --compiled. The noncompiled server cannot execute application storage configuration");
+    }
     Ok(())
+}
+
+fn application_has_native_storage(root: &Path) -> Result<bool> {
+    match fs::metadata(root.join("src/native_storage.rs")) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => bail!("application storage configuration must be a file: src/native_storage.rs"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("failed to inspect src/native_storage.rs"),
+    }
 }
 
 fn build_compiled_production_binary(
@@ -13142,6 +13158,8 @@ fn build_compiled_production_binary(
         &page_renderers,
         CompiledProductionOptions {
             native_registration: application_has_native_registration(root)?,
+            native_storage_registration: application_has_native_storage(root)?,
+            max_body_bytes: runtime_config.max_body_bytes,
             sessions_required: project_uses_session_runtime(root)?,
             public_origin: runtime_config.public_origin.as_deref(),
             database_runtime_defaults: &database_runtime_defaults,
@@ -13543,6 +13561,8 @@ fn compiled_database_runtime_defaults(root: &Path) -> Result<String> {
 #[derive(Debug, Clone, Copy)]
 struct CompiledProductionOptions<'a> {
     native_registration: bool,
+    native_storage_registration: bool,
+    max_body_bytes: usize,
     sessions_required: bool,
     public_origin: Option<&'a str>,
     database_runtime_defaults: &'a str,
@@ -13560,6 +13580,8 @@ fn compiled_production_source(
 ) -> String {
     let CompiledProductionOptions {
         native_registration,
+        native_storage_registration,
+        max_body_bytes,
         sessions_required,
         public_origin,
         database_runtime_defaults,
@@ -13577,6 +13599,21 @@ fn compiled_production_source(
     } else {
         "    let runtime = Arc::new(lazy_runtime_from_env(env)?);\n"
     };
+    let native_storage_module = if native_storage_registration {
+        r#"#[path = "../native_storage.rs"]
+mod native_storage;
+
+struct ApplicationFileStorage(Arc<dyn AxFileStorage>);
+impl AxFileStorage for ApplicationFileStorage {
+    fn save_file(&self, capability: &str, file: &axonyx_runtime::server::AxIncomingFile)
+        -> axonyx_runtime::backend::AxRuntimeResult<axonyx_runtime::server::AxFileRef> {
+        self.0.save_file(capability, file)
+    }
+}
+"#
+    } else {
+        ""
+    };
     let public_origin_literal = match public_origin {
         Some(origin) => format!("Some({origin:?})"),
         None => "None".to_string(),
@@ -13588,11 +13625,16 @@ fn compiled_production_source(
         "use axonyx_runtime::server_prelude::AxFileStorage;\nuse axonyx_runtime::storage_prelude::{AxCapabilityStorage, AxStorageAccess, AxStorageError, AxStorageRegistry};\n"
             .to_string()
     };
-    let storage_init = if storage_configs.is_empty() {
+    let mut storage_init = if storage_configs.is_empty() {
         "    let storage = Arc::new(AxUnavailableFileStorage);\n".to_string()
     } else {
         "    let storage = Arc::new(configured_file_storage()?);\n".to_string()
     };
+    if native_storage_registration {
+        storage_init.push_str(
+            "    let storage = Arc::new(ApplicationFileStorage(native_storage::configure(storage)?));\n",
+        );
+    }
     let storage_bootstrap = compiled_storage_bootstrap(storage_configs);
     let signal_match_arms = signal_aliases
         .iter()
@@ -13685,6 +13727,7 @@ use serde_json::{{json, Value}};
 #[path = "../generated/backend.rs"]
 mod backend;
 {native_module}
+{native_storage_module}
 
 #[derive(Clone, Copy)]
 struct CompiledBinding {{
@@ -13710,7 +13753,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let handler: AxCompiledHandler =
         Arc::new(move |request| handle_request(&dist, runtime.as_ref(), storage.as_ref(), request));
     println!("Axonyx compiled production server listening at http://{{bind}}");
-    serve_compiled_axum(bind, 1024 * 1024, handler)
+    serve_compiled_axum(bind, {max_body_bytes}, handler)
 }}
 
 fn handle_request(
@@ -27100,6 +27143,8 @@ action ValidPost
             &[],
             CompiledProductionOptions {
                 native_registration: true,
+                native_storage_registration: false,
+                max_body_bytes: MAX_REQUEST_BODY_BYTES,
                 sessions_required: false,
                 public_origin: None,
                 database_runtime_defaults: "",
@@ -27118,6 +27163,94 @@ action ValidPost
         let runtime = source.find("with_native_functions(registry)").unwrap();
         let serve = source.find("    serve_compiled_axum(bind").unwrap();
         assert!(register < runtime && runtime < serve);
+    }
+
+    #[test]
+    fn native_storage_is_optional_and_preview_rejects_it_without_native_callbacks() {
+        let root = make_temp_dir("native-storage-detection");
+        assert!(!application_has_native_storage(&root).unwrap());
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/native_storage.rs"), "// application owned").unwrap();
+        assert!(application_has_native_storage(&root).unwrap());
+        assert!(!application_has_native_registration(&root).unwrap());
+        let error = ensure_preview_has_no_native_registration(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("src/native_storage.rs"));
+        assert!(error.contains("cargo ax build --compiled"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/native_storage.rs")).unwrap(),
+            "// application owned"
+        );
+        fs::remove_file(root.join("src/native_storage.rs")).unwrap();
+        fs::create_dir(root.join("src/native_storage.rs")).unwrap();
+        assert!(application_has_native_storage(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_storage_defers_unknown_names_but_preserves_configured_read_only_checks() {
+        let root = make_temp_dir("native-storage-contracts");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"test\"\n").unwrap();
+        fs::create_dir_all(root.join("app")).unwrap();
+        let action = "action Upload(image: File) -> FileRef {\n  data saved = Storage.save(\"custom\", input.image)\n  return json(saved)\n}\n";
+        let document = parse_backend_ax(action).unwrap();
+        lower_backend_document(&document).unwrap();
+        fs::write(root.join("app/actions.ax"), action).unwrap();
+        assert!(check_storage_action_contracts(&root)
+            .unwrap()
+            .iter()
+            .any(|d| d.code == "axonyx-storage-capability"));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/native_storage.rs"), "// application owned").unwrap();
+        assert!(check_storage_action_contracts(&root).unwrap().is_empty());
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[storage.custom]\nroot = \"storage/private\"\naccess = \"read\"\nmax_file_bytes = \"1kb\"\n",
+        )
+        .unwrap();
+        assert!(check_storage_action_contracts(&root)
+            .unwrap()
+            .iter()
+            .any(|d| d.code == "axonyx-storage-access"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compiled_source_configures_custom_storage_once_before_listening() {
+        let source = compiled_production_source(
+            "\"dist\"",
+            &[],
+            &[],
+            &[],
+            CompiledProductionOptions {
+                native_registration: false,
+                native_storage_registration: true,
+                max_body_bytes: 4096,
+                sessions_required: false,
+                public_origin: None,
+                database_runtime_defaults: "",
+                database_required: false,
+                validate_api_responses: false,
+                storage_configs: &[],
+            },
+        );
+        assert!(source.contains("#[path = \"../native_storage.rs\"]\nmod native_storage;"));
+        assert_eq!(
+            source
+                .matches("native_storage::configure(storage)?")
+                .count(),
+            1
+        );
+        assert!(!source.contains("mod native;"));
+        let fallback = source
+            .find("let storage = Arc::new(AxUnavailableFileStorage)")
+            .unwrap();
+        let configure = source.find("native_storage::configure(storage)?").unwrap();
+        let serve = source.find("    serve_compiled_axum(bind").unwrap();
+        assert!(fallback < configure && configure < serve);
+        assert!(source.contains("storage.as_ref(), request"));
+        assert!(source.contains("serve_compiled_axum(bind, 4096, handler)"));
     }
 
     #[test]
@@ -27146,6 +27279,8 @@ action ValidPost
             CompiledProductionOptions {
                 native_registration: false,
                 sessions_required: true,
+                native_storage_registration: false,
+                max_body_bytes: MAX_REQUEST_BODY_BYTES,
                 public_origin: Some("https://axonyx.dev"),
                 database_runtime_defaults: "",
                 database_required: true,
@@ -27197,6 +27332,8 @@ action ValidPost
         assert!(!source.contains("read_to_string"));
         assert!(!source.contains("mod native;"));
         assert!(!source.contains("with_native_functions"));
+        assert!(!source.contains("native_storage::configure"));
+        assert!(!source.contains("mod native_storage;"));
     }
 
     #[test]
@@ -27209,6 +27346,8 @@ action ValidPost
             CompiledProductionOptions {
                 native_registration: false,
                 sessions_required: false,
+                native_storage_registration: false,
+                max_body_bytes: MAX_REQUEST_BODY_BYTES,
                 public_origin: None,
                 database_runtime_defaults: "",
                 database_required: false,
@@ -27232,6 +27371,8 @@ action ValidPost
             CompiledProductionOptions {
                 native_registration: false,
                 sessions_required: false,
+                native_storage_registration: false,
+                max_body_bytes: MAX_REQUEST_BODY_BYTES,
                 public_origin: None,
                 database_runtime_defaults: "",
                 database_required: false,

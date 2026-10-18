@@ -1,0 +1,3 @@
+page Upload() {
+  return ASX { <p>Isolated custom storage proof</p> }
+}
