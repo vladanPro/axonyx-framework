@@ -60,9 +60,9 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-native-startup.ps1
 
-        - name: Smoke scoped compiled upload budgets
-          shell: pwsh
-          run: ./scripts/smoke-native-startup.ps1 -Scoped -Port 3928
+      - name: Smoke scoped compiled upload budgets
+        shell: pwsh
+        run: ./scripts/smoke-native-startup.ps1 -Scoped -Port 3928
 
       - name: Smoke native form retry in preview and compiled servers
         shell: pwsh
