@@ -65,6 +65,10 @@ use axonyx_runtime::{
     AX_STATE_WASM_PATH,
 };
 
+#[cfg(test)]
+mod action_routes;
+#[cfg(test)]
+mod action_routes_tests;
 mod action_selector;
 #[cfg(test)]
 mod action_selector_tests;
@@ -4147,6 +4151,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
     }
     checks.push(doctor_server_streaming_check(root));
     checks.push(doctor_server_body_limit_check(root));
+    checks.push(doctor_action_body_limits_check(root));
     checks.push(doctor_server_request_timeout_check(root));
     checks.push(doctor_server_shutdown_grace_check(root));
     checks.push(doctor_server_max_connections_check(root));
@@ -4279,6 +4284,26 @@ fn doctor_server_body_limit_check(root: &Path) -> DoctorCheck {
             hint: Some(
                 "Set [server].max_body_bytes to a positive number, or a string such as \"1mb\".",
             ),
+        },
+    }
+}
+
+fn doctor_action_body_limits_check(root: &Path) -> DoctorCheck {
+    match configured_action_body_limits(root) {
+        Ok(limits) => DoctorCheck {
+            code: "server-action-body-limits",
+            severity: DoctorSeverity::Ok,
+            message: format!(
+                "{} scoped action body limits (compiled host only).",
+                limits.len()
+            ),
+            hint: None,
+        },
+        Err(message) => DoctorCheck {
+            code: "server-action-body-limits",
+            severity: DoctorSeverity::Error,
+            message,
+            hint: Some("Fix [[server.action_body_limits]] and use a compiled production host."),
         },
     }
 }
@@ -8686,6 +8711,16 @@ fn check_axonyx_config(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         }
     };
     let mut diagnostics = Vec::new();
+    if let Err(message) = configured_action_body_limits(root) {
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(&path),
+            line: line_for_config_key(&source, "action_body_limits"),
+            column: 1,
+            severity: "error",
+            code: "axonyx-config-action-body-limits",
+            message,
+        });
+    }
     if let Some(db) = value.get("db").and_then(toml::Value::as_table) {
         for (key, _) in DB_RUNTIME_CONFIG_KEYS {
             let Some(value) = db.get(key) else {
@@ -12909,6 +12944,7 @@ fn run_stream_server(args: DevArgs) -> Result<()> {
 fn run_http_server(args: DevArgs, mode: AxServerMode, stream_probe: bool) -> Result<()> {
     let root = app_root()?;
     ensure_preview_has_no_native_registration(&root)?;
+    ensure_no_preview_action_body_limits(&root)?;
     if mode == AxServerMode::Start {
         ensure_no_check_diagnostics_for(&root, "production start")?;
     }
@@ -13143,6 +13179,8 @@ fn build_compiled_production_binary(
     let dist_relative = dist.strip_prefix(root).unwrap_or(&dist);
     let dist_literal = format!("{:?}", dist_relative.to_string_lossy());
     let signal_aliases = compiled_action_signal_aliases(root)?;
+    let action_routes = compiled_action_routes(root)?;
+    let action_body_limits = configured_action_body_limits(root).map_err(anyhow::Error::msg)?;
     let data_bindings = compiled_data_bindings(root)?;
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
@@ -13169,6 +13207,8 @@ fn build_compiled_production_binary(
             database_required,
             validate_api_responses,
             storage_configs: &storage_configs,
+            action_routes: &action_routes,
+            action_body_limits: &action_body_limits,
         },
     );
     fs::write(&source_path, source).with_context(|| {
@@ -13257,6 +13297,35 @@ fn compiled_action_signal_aliases(root: &Path) -> Result<Vec<(String, String, St
         );
     }
     Ok(aliases)
+}
+
+fn action_names_from_sources(sources: &[String]) -> Result<Vec<String>> {
+    let mut names = std::collections::BTreeSet::new();
+    for source in sources {
+        for block in parse_backend_ax(source)?.blocks {
+            if let AxBackendBlock::Action(action) = block {
+                names.insert(action.name);
+            }
+        }
+    }
+    Ok(names.into_iter().collect())
+}
+
+fn compiled_action_routes(root: &Path) -> Result<Vec<(String, Vec<String>)>> {
+    collect_page_route_manifest(root)?
+        .into_iter()
+        .map(|route| {
+            let names = match &route.actions {
+                Some(path) => action_names_from_sources(&collect_route_action_source_strings(
+                    root,
+                    &root.join(path),
+                )?)?,
+                None => Vec::new(),
+            };
+            // Actionless pages must still shadow matching dynamic routes.
+            Ok((route.route, names))
+        })
+        .collect()
 }
 
 fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
@@ -13572,6 +13641,8 @@ struct CompiledProductionOptions<'a> {
     database_required: bool,
     validate_api_responses: bool,
     storage_configs: &'a [AxStorageCapabilityConfig],
+    action_routes: &'a [(String, Vec<String>)],
+    action_body_limits: &'a [(String, String, usize)],
 }
 
 fn compiled_production_source(
@@ -13591,6 +13662,8 @@ fn compiled_production_source(
         database_required,
         validate_api_responses,
         storage_configs,
+        action_routes,
+        action_body_limits,
     } = options;
     let native_module = if native_registration {
         "#[path = \"../native.rs\"]\nmod native;\n"
@@ -13643,6 +13716,34 @@ impl AxFileStorage for ApplicationFileStorage {
         "mod action_selector {{\n{}\n}}\n",
         include_str!("action_selector.rs")
     );
+    let mut action_route_module = format!(
+        "mod action_routes {{\n{}\n}}\n",
+        include_str!("action_routes.rs")
+    );
+    let action_route_table = action_routes
+        .iter()
+        .map(|(pattern, names)| {
+            let names = names
+                .iter()
+                .map(|name| format!("{name:?}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({pattern:?}, &[{names}]),\n")
+        })
+        .collect::<String>();
+    let server_call = if action_body_limits.is_empty() {
+        action_route_module.clear();
+        format!("    serve_compiled_axum(bind, {max_body_bytes}, handler)")
+    } else {
+        let limits = action_body_limits
+            .iter()
+            .map(|(route, action, bytes)| format!("({route:?}, {action:?}, {bytes}),\n"))
+            .collect::<String>();
+        action_route_module.push_str(&format!(
+            "const ACTION_ROUTES: &[action_routes::Route<'_>] = &[\n{action_route_table}];\nconst ACTION_BODY_LIMITS: &[(&str, &str, usize)] = &[\n{limits}];\n"
+        ));
+        format!("    let resolver: axonyx_runtime::server_prelude::AxBodyLimitResolver = Arc::new(|method, target| action_routes::body_limit(ACTION_ROUTES, ACTION_BODY_LIMITS, method, target));\n    axonyx_runtime::server_prelude::serve_compiled_axum_with_body_limits(bind, {max_body_bytes}, handler, resolver)")
+    };
     let signal_match_arms = signal_aliases
         .iter()
         .map(|(route, alias, canonical)| {
@@ -13734,6 +13835,7 @@ use serde_json::{{json, Value}};
 #[path = "../generated/backend.rs"]
 mod backend;
 {action_selector_module}
+{action_route_module}
 {native_module}
 {native_storage_module}
 
@@ -13761,7 +13863,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {{
     let handler: AxCompiledHandler =
         Arc::new(move |request| handle_request(&dist, runtime.as_ref(), storage.as_ref(), request));
     println!("Axonyx compiled production server listening at http://{{bind}}");
-    serve_compiled_axum(bind, {max_body_bytes}, handler)
+{server_call}
 }}
 
 fn handle_request(
@@ -19128,6 +19230,88 @@ fn configured_max_request_body_bytes(root: &Path) -> std::result::Result<usize, 
     }
 }
 
+type ActionBodyLimits = Vec<(String, String, usize)>;
+
+fn ensure_no_preview_action_body_limits(root: &Path) -> Result<()> {
+    if !configured_action_body_limits(root)
+        .map_err(anyhow::Error::msg)?
+        .is_empty()
+    {
+        bail!("scoped action body limits require `cargo ax build --compiled` and `cargo ax run start --compiled`; preview and std/Tokio fallback hosts do not support them yet");
+    }
+    Ok(())
+}
+
+fn configured_action_body_limits(root: &Path) -> std::result::Result<ActionBodyLimits, String> {
+    let path = root.join("Axonyx.toml");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let value: toml::Value = source
+        .parse()
+        .map_err(|error: toml::de::Error| error.to_string())?;
+    let Some(entries) = value
+        .get("server")
+        .and_then(|server| server.get("action_body_limits"))
+    else {
+        return Ok(Vec::new());
+    };
+    let routes = compiled_action_routes(root).map_err(|error| error.to_string())?;
+    parse_action_body_limits(entries, &routes)
+}
+
+fn parse_action_body_limits(
+    value: &toml::Value,
+    routes: &[(String, Vec<String>)],
+) -> std::result::Result<ActionBodyLimits, String> {
+    let entries = value
+        .as_array()
+        .ok_or("server.action_body_limits must be an array of tables.")?;
+    let mut result = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let label = format!("server.action_body_limits[{}]", index + 1);
+        let table = entry
+            .as_table()
+            .ok_or_else(|| format!("{label} must be a table."))?;
+        if table
+            .keys()
+            .any(|key| !matches!(key.as_str(), "path" | "action" | "max_body_bytes"))
+        {
+            return Err(format!(
+                "{label} only accepts path, action and max_body_bytes."
+            ));
+        }
+        let path = table
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("{label}.path must be a route pattern string."))?;
+        let action = table
+            .get("action")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("{label}.action must be a string."))?;
+        if !routes
+            .iter()
+            .any(|(route, names)| route == path && names.iter().any(|name| name == action))
+        {
+            return Err(format!(
+                "{label} must name a known page route and an action available to that route."
+            ));
+        }
+        if !seen.insert((path, action)) {
+            return Err(format!("{label} repeats a route/action limit."));
+        }
+        let bytes = table
+            .get("max_body_bytes")
+            .ok_or_else(|| format!("{label}.max_body_bytes is required."))?;
+        let bytes =
+            parse_max_body_bytes_value(bytes).map_err(|message| format!("{label}: {message}"))?;
+        result.push((path.to_string(), action.to_string(), bytes));
+    }
+    Ok(result)
+}
+
 fn configured_request_timeout_duration(root: &Path) -> std::result::Result<Duration, String> {
     match axonyx_config_value(root, "server", "request_timeout_seconds") {
         Some(value) => parse_request_timeout_seconds_value(&value),
@@ -22034,7 +22218,7 @@ mod tests {
             .expect("test env lock should not be poisoned")
     }
 
-    fn make_temp_dir(name: &str) -> PathBuf {
+    pub(super) fn make_temp_dir(name: &str) -> PathBuf {
         let unique = format!(
             "axonyx-cargo-test-{}-{}",
             name,
@@ -27153,6 +27337,8 @@ action ValidPost
                 database_required: false,
                 validate_api_responses: false,
                 storage_configs: &[],
+                action_routes: &[],
+                action_body_limits: &[],
             },
         );
         assert!(source.contains("#[path = \"../native.rs\"]\nmod native;"));
@@ -27235,6 +27421,8 @@ action ValidPost
                 database_required: false,
                 validate_api_responses: false,
                 storage_configs: &[],
+                action_routes: &[],
+                action_body_limits: &[],
             },
         );
         assert!(source.contains("#[path = \"../native_storage.rs\"]\nmod native_storage;"));
@@ -27288,6 +27476,8 @@ action ValidPost
                 database_required: true,
                 validate_api_responses: false,
                 storage_configs: &[],
+                action_routes: &[],
+                action_body_limits: &[],
             },
         );
 
@@ -27357,6 +27547,8 @@ action ValidPost
                 database_required: false,
                 validate_api_responses: false,
                 storage_configs: &[],
+                action_routes: &[],
+                action_body_limits: &[],
             },
         );
 
@@ -27387,6 +27579,8 @@ action ValidPost
                     access: AxStorageAccess::Write,
                     max_file_bytes: 2 * 1024 * 1024,
                 }],
+                action_routes: &[],
+                action_body_limits: &[],
             },
         );
 
