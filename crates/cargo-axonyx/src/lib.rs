@@ -96,7 +96,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.6.10";
+const AXONYX_RUNTIME_VERSION: &str = "0.6.11";
 const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -13731,6 +13731,11 @@ impl AxFileStorage for ApplicationFileStorage {
             format!("({pattern:?}, &[{names}]),\n")
         })
         .collect::<String>();
+    let legacy_server_import = if action_body_limits.is_empty() {
+        "serve_compiled_axum, "
+    } else {
+        ""
+    };
     let server_call = if action_body_limits.is_empty() {
         action_route_module.clear();
         format!("    serve_compiled_axum(bind, {max_body_bytes}, handler)")
@@ -13828,7 +13833,7 @@ use std::path::{{Component, Path, PathBuf}};
 use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
-use axonyx_runtime::server_prelude::{{serve_compiled_axum, AxBody, AxCompiledHandler, AxCookie, AxHttpRequest, AxHttpResponse}};
+use axonyx_runtime::server_prelude::{{{legacy_server_import}AxBody, AxCompiledHandler, AxCookie, AxHttpRequest, AxHttpResponse}};
 {storage_import}use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
 use serde_json::{{json, Value}};
 

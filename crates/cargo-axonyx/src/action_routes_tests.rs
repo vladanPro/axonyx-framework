@@ -223,4 +223,5 @@ fn compiled_host_embeds_policy_only_for_explicit_scoped_limits() {
     assert!(source.contains("(\"/upload/new\", &[]),"));
     assert!(source.contains("(\"/upload\", \"Upload\", 9437184),"));
     assert!(source.contains("serve_compiled_axum_with_body_limits(bind, 65536, handler, resolver)"));
+    assert!(!source.contains("server_prelude::{serve_compiled_axum,"));
 }
