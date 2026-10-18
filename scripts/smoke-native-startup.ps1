@@ -105,8 +105,25 @@ try {
         # Current parser exposes an over-budget multipart body as HTTP 400.
         Send-Upload UploadCustom fixture-only ('x' * 5000) 400 | Out-Null
         Send-Upload UploadMissing fixture-only source 500 | Out-Null
+        foreach ($invalid in @('UploadCustom&name=UploadRaw', 'UploadCustom&%6Eame=UploadRaw', 'UploadCustom&path=%2Fother', 'UploadCustom&extra=%FF')) {
+            Send-Upload $invalid fixture-only source 400 | Out-Null
+        }
+        # HttpClient rewrites invalid percent escapes; send this case verbatim.
+        $rawBody = "--AXSELECT`r`nContent-Disposition: form-data; name=`"key`"`r`n`r`nfixture-only`r`n--AXSELECT`r`nContent-Disposition: form-data; name=`"image`"; filename=`"image.txt`"`r`n`r`nsource`r`n--AXSELECT--`r`n"
+        $raw = "POST /__axonyx/action?path=%2Fupload&name=UploadCustom&extra=%GG HTTP/1.1`r`nHost: 127.0.0.1:$Port`r`nOrigin: $base`r`nAccept: application/ax-patch+json`r`nContent-Type: multipart/form-data; boundary=AXSELECT`r`nContent-Length: $([Text.Encoding]::ASCII.GetByteCount($rawBody))`r`nConnection: close`r`n`r`n$rawBody"
+        $tcp = [Net.Sockets.TcpClient]::new('127.0.0.1', $Port)
+        try {
+            $stream = $tcp.GetStream()
+            $stream.ReadTimeout = 5000
+            $stream.WriteTimeout = 5000
+            $bytes = [Text.Encoding]::ASCII.GetBytes($raw)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII)
+            try { $rawResponse = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if (!$rawResponse.StartsWith('HTTP/1.1 400 ', [StringComparison]::Ordinal)) { throw 'Malformed raw action selector was not rejected' }
+        } finally { $tcp.Dispose() }
         if (Test-Path (Join-Path $fixture 'custom-saved')) { throw 'Rejected upload reached custom storage' }
-        $saved = (Send-Upload UploadCustom fixture-only source 200 | ConvertFrom-Json).value
+        $saved = (Send-Upload 'Upload%43ustom' fixture-only source 200 | ConvertFrom-Json).value
         if ($saved.id -ne 'custom-id' -or $saved.file_name -ne 'canonical.bin' -or $saved.size -ne 9) { throw 'Custom FileRef metadata mismatch' }
         if ((Get-Content (Join-Path $fixture 'custom-saved') -Raw) -ne 'canonical') { throw 'Custom storage did not receive actual multipart bytes' }
         $raw = (Send-Upload UploadRaw fixture-only fallback 200 | ConvertFrom-Json).value

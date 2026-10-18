@@ -65,6 +65,9 @@ use axonyx_runtime::{
     AX_STATE_WASM_PATH,
 };
 
+mod action_selector;
+#[cfg(test)]
+mod action_selector_tests;
 mod remote_contract;
 
 use chrono::Utc;
@@ -13636,6 +13639,10 @@ impl AxFileStorage for ApplicationFileStorage {
         );
     }
     let storage_bootstrap = compiled_storage_bootstrap(storage_configs);
+    let action_selector_module = format!(
+        "mod action_selector {{\n{}\n}}\n",
+        include_str!("action_selector.rs")
+    );
     let signal_match_arms = signal_aliases
         .iter()
         .map(|(route, alias, canonical)| {
@@ -13726,6 +13733,7 @@ use serde_json::{{json, Value}};
 
 #[path = "../generated/backend.rs"]
 mod backend;
+{action_selector_module}
 {native_module}
 {native_storage_module}
 
@@ -13931,16 +13939,11 @@ fn handle_compiled_action(
             .with_no_store();
     }}
 
-    let Some(name) = action_query_param(&request.target, "name") else {{
-        return AxHttpResponse::text(400, "missing action name").with_no_store();
+    let Some(selector) = action_selector::parse(&request.target) else {{
+        return AxHttpResponse::text(400, "invalid action selector").with_no_store();
     }};
-    if name.is_empty() {{
-        return AxHttpResponse::text(400, "missing action name").with_no_store();
-    }}
-    let route = action_query_param(&request.target, "path")
-        .as_deref()
-        .map(safe_action_route)
-        .unwrap_or_else(|| "/".to_string());
+    let name = selector.name;
+    let route = safe_action_route(&selector.path);
 
     let dispatched = backend::dispatch_action(runtime, storage, &name, request);
 
@@ -19353,12 +19356,11 @@ fn handle_action_request(
         .with_no_store());
     }
 
-    let request_path =
-        extract_action_query_param(&request.target, "path").unwrap_or_else(|| "/".to_string());
-    let action_name = extract_action_query_param(&request.target, "name").unwrap_or_default();
-    if action_name.is_empty() {
-        return Ok(AxHttpResponse::text(400, "missing action name").with_no_store());
-    }
+    let Some(selector) = action_selector::parse(&request.target) else {
+        return Ok(AxHttpResponse::text(400, "invalid action selector").with_no_store());
+    };
+    let request_path = selector.path;
+    let action_name = selector.name;
 
     let Some(route) = resolve_route(&state.root, &request_path)? else {
         return Ok(AxHttpResponse::text(404, "route not found").with_no_store());
@@ -27291,6 +27293,8 @@ action ValidPost
 
         assert!(source.contains("backend::dispatch_api_route"));
         assert!(source.contains("backend::dispatch_action"));
+        assert!(source.contains(include_str!("action_selector.rs")));
+        assert!(source.contains("action_selector::parse(&request.target)"));
         assert!(source.contains("backend::dispatch_loader"));
         assert!(source.contains("serve_compiled_axum"));
         assert!(source.contains("let started = std::time::Instant::now()"));
@@ -30953,6 +30957,31 @@ action RefreshSession() {
         let response = reject_cross_site_action_request(&request, None)
             .expect("cross-site browser action should be rejected");
         assert_eq!(response.status, 403);
+    }
+
+    #[test]
+    fn invalid_action_selectors_fail_before_preview_or_production_route_lookup() {
+        let root = make_temp_dir("invalid-action-selectors");
+        let state = test_dev_state(&root);
+        for mode in [AxServerMode::Dev, AxServerMode::Start] {
+            for target in [
+                "/__axonyx/action?path=%2F&name=Save&name=Other",
+                "/__axonyx/action?path=%2F&name=Save&%6Eame=Other",
+                "/__axonyx/action?path=%2F&path=%2Fother&name=Save",
+                "/__axonyx/action?path=%2F&name=%GG",
+                "/__axonyx/action?path=%2F..%2Fprivate&name=Save",
+                "/__axonyx/action?name=Save",
+            ] {
+                let request = AxHttpRequest::new("POST", target)
+                    .with_header("Content-Type", "application/x-www-form-urlencoded")
+                    .with_body(b"title=Unchanged".to_vec());
+                let response = handle_action_request(&state, mode, &request).unwrap();
+                assert_eq!(response.status, 400, "{target}");
+                assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
+                assert_eq!(response.body.into_bytes(), b"invalid action selector");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
