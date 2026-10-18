@@ -1,0 +1,19 @@
+route GET "/api/private/:id" -> Binary {
+  return Native.privateResponse("media.read", { id: params.id })
+}
+
+route GET "/api/private-unknown" -> Binary {
+  return Native.privateResponse("media.unregistered", {})
+}
+
+route POST "/api/fixture-login" {
+  data key = query.key
+  require key == "isolated-fixture-only" else forbidden()
+  Session.create("fixture-owner", {})
+  return json({ ok: true })
+}
+
+route POST "/api/fixture-logout" {
+  Session.destroy()
+  return json({ ok: true })
+}

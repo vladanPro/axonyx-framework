@@ -72,6 +72,8 @@ mod action_routes_tests;
 mod action_selector;
 #[cfg(test)]
 mod action_selector_tests;
+#[cfg(test)]
+mod private_binary_tests;
 mod remote_contract;
 
 use chrono::Utc;
@@ -96,7 +98,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.6.11";
+const AXONYX_RUNTIME_VERSION: &str = "0.7.0";
 const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -6900,6 +6902,9 @@ fn referenced_api_schemas<'a>(
 }
 
 fn api_schema_type_names(annotation: &str) -> Vec<String> {
+    if annotation == "Binary" {
+        return Vec::new();
+    }
     let Ok(ty) = AxType::parse_annotation(annotation) else {
         return backend_return_contract_named_types(annotation)
             .into_iter()
@@ -9222,6 +9227,16 @@ fn check_backend_requirements(
     };
 
     let type_names = root.and_then(|root| collect_project_type_names(root).ok());
+    if let Err(error) = axonyx_core::ax_backend_codegen::validate_private_responses(&plan) {
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_source_pattern(source, "Native.privateResponse"),
+            column: 1,
+            severity: "error",
+            code: "axonyx-private-response-contract",
+            message: error.to_string(),
+        });
+    }
     diagnostics.extend(check_backend_route_inputs(path, source, document, &plan));
     if let Err(error) = axonyx_core::ax_backend_codegen::validate_request_record_inputs(&plan) {
         let field = match &error {
@@ -10764,6 +10779,11 @@ fn check_backend_return_contracts(
             continue;
         };
 
+        if matches!(&handler.kind, AxHandlerKind::Route { method, .. } if method == "GET")
+            && returns == "Binary"
+        {
+            continue;
+        }
         if !is_supported_backend_return_contract(returns) {
             diagnostics.push(CheckDiagnostic {
                 file: display_path(path),
@@ -11112,6 +11132,9 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
         AxStepPlan::Return(AxReturnPlan::Expr(expr) | AxReturnPlan::Json(expr)) => {
             expr_uses_input_scope(expr)
         }
+        AxStepPlan::Return(AxReturnPlan::PrivateResponse { args }) => {
+            args.iter().any(expr_uses_input_scope)
+        }
         AxStepPlan::Patch { signal, value } => {
             expr_uses_input_scope(signal) || expr_uses_input_scope(value)
         }
@@ -11181,6 +11204,7 @@ fn transaction_operation_uses_input_scope(operation: &AxTransactionOperationPlan
 fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
     plan.handlers.iter().any(|handler| {
         handler.steps.iter().any(|step| match step {
+            AxStepPlan::Return(AxReturnPlan::PrivateResponse { .. }) => true,
             AxStepPlan::Let {
                 value: AxValuePlan::Expr(expr),
                 ..
@@ -11439,6 +11463,11 @@ fn collect_env_refs_from_return(
     refs: &mut std::collections::BTreeSet<String>,
 ) {
     match value {
+        axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::PrivateResponse { args } => {
+            for argument in args {
+                collect_env_refs_from_expr(argument, refs);
+            }
+        }
         axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Expr(expr)
         | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::Json(expr) => {
             collect_env_refs_from_expr(expr, refs);
@@ -15523,6 +15552,10 @@ fn route_auth_from_body(body: &[AxBackendStmt]) -> Vec<ApiAuthReport> {
     let mut schemes = std::collections::BTreeSet::<&'static str>::new();
 
     for stmt in body {
+        if matches!(stmt, AxBackendStmt::Return(AxReturn::Expr(AxExpr::Call { path, .. })) if path == &["Native", "privateResponse"])
+        {
+            schemes.insert("signedSession");
+        }
         if let AxBackendStmt::Require(requirement) = stmt {
             collect_auth_from_expr(&requirement.value, &mut schemes);
         }
@@ -15595,6 +15628,12 @@ fn collect_responses_from_return(
     let AxReturn::Expr(AxExpr::Call { path, args }) = value else {
         return;
     };
+    if path == &["Native", "privateResponse"] {
+        responses.insert(403, "Forbidden");
+        responses.insert(404, "Not Found");
+        responses.insert(500, "Internal Server Error");
+        return;
+    }
     let Some(name) = path.last().map(String::as_str) else {
         return;
     };
@@ -16340,16 +16379,34 @@ fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
         .map(openapi_schema_for_ax_type)
         .unwrap_or_else(|| serde_json::json!({ "type": "object" }));
 
-    let mut responses = serde_json::json!({
-        "200": {
-            "description": "OK",
-            "content": {
-                "application/json": {
-                    "schema": response_schema
+    let mut responses = if route.returns.as_deref() == Some("Binary") {
+        let schema = serde_json::json!({ "type": "string", "format": "binary" });
+        serde_json::json!({
+            "200": {
+                "description": "Private binary response (1..=8 MiB)",
+                "headers": {
+                    "Cache-Control": { "schema": { "const": "private, no-store" } },
+                    "X-Content-Type-Options": { "schema": { "const": "nosniff" } }
+                },
+                "content": {
+                    "image/png": { "schema": schema },
+                    "image/jpeg": { "schema": schema },
+                    "application/octet-stream": { "schema": schema }
                 }
             }
-        }
-    });
+        })
+    } else {
+        serde_json::json!({
+            "200": {
+                "description": "OK",
+                "content": {
+                    "application/json": {
+                        "schema": response_schema
+                    }
+                }
+            }
+        })
+    };
     if let serde_json::Value::Object(responses) = &mut responses {
         for response in &route.responses {
             responses
