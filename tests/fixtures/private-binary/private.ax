@@ -7,8 +7,7 @@ route GET "/api/private-unknown" -> Binary {
 }
 
 route POST "/api/fixture-login" {
-  data key = query.key
-  require key == "isolated-fixture-only" else forbidden()
+  require query.key == "isolated-fixture-only" else forbidden()
   Session.create("fixture-owner", {})
   return json({ ok: true })
 }
@@ -16,4 +15,13 @@ route POST "/api/fixture-login" {
 route POST "/api/fixture-logout" {
   Session.destroy()
   return json({ ok: true })
+}
+
+route GET "/api/guard/:id" {
+  require Auth.subject != "" else forbidden()
+  require params.id == "allowed" && request.method == "GET" else forbidden()
+  require request.headers.x_fixture == "yes" else forbidden()
+  require query.mode in ["preview", "compiled"] else forbidden()
+  require query.public == "yes" || query.key == "isolated-fixture-only" else forbidden()
+  return json({ subject: Auth.subject, mode: query.mode, literal: "query.key params.id Auth.subject" })
 }

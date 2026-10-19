@@ -1,9 +1,9 @@
-# Private Binary CLI Integration V0 (Unpublished)
+# Private Binary CLI Integration V0
 
-This adopts the source runtime's private Binary route contract. It does not
-publish packages or change an installed application's CLI/runtime dependencies.
-The enum changes require a coordinated next 0.7 release, not a compatible 0.6.x
-patch. Until that release, use the pinned source submodule for these proofs.
+The private Binary contract is published in core/runtime/tooling 0.7.0. Its
+public Rust enum changes required that minor boundary, not a compatible 0.6.x
+patch. This source smoke uses the pinned runtime submodule; running it does not
+upgrade an installed application's CLI/runtime dependencies.
 
 ```ax
 route GET "/api/private/:id" -> Binary {
@@ -30,5 +30,21 @@ key-guarded session endpoint is test scaffolding only, NOT a product login flow.
 It never uses the operator CMS, database or production environment file. Fixture
 process cleanup affects only the process it started and its own generated path.
 
-Legura endpoint adoption, isolated CMS acceptance and coordinated registry
-publication remain separate gates. No private media is copied into public/dist.
+Legura registry adoption (PR 65) passed its seven CI gates and merged into dev;
+operator activation remains separate. No private media is copied into public/dist.
+
+## Compound Request Guard Regression
+
+The runtime source fix from PR 269 resolves framework issue 368's inline guard
+failure. The fixture no longer works around it with an intermediate binding:
+
+```ax
+require query.key == "isolated-fixture-only" else forbidden()
+```
+
+The real compiled Axum HTTP proof checks rejection before session creation,
+accepted/rejected query/parameter/header and membership guards, a short-circuit
+that does not read a missing RHS, compound Auth.subject session discovery,
+literal preservation and post-logout denial. API validation stays always on.
+These new regression checks require the adopted source runtime until a later
+patch is actually published; they do not imply that immutable 0.7.0 was changed.

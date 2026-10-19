@@ -73,6 +73,11 @@ try {
     if (-not $ready) { throw 'Private binary server did not become ready' }
     if ([int]$reply.StatusCode -ne 403) { throw 'Anonymous binary request was not denied' }
     $reply.Dispose()
+    $client.DefaultRequestHeaders.Add('X-Fixture', 'yes')
+    $reply = $client.GetAsync("$base/api/guard/allowed?mode=compiled&public=yes").GetAwaiter().GetResult()
+    try {
+        if ([int]$reply.StatusCode -ne 403) { throw 'Anonymous compound subject guard retained access' }
+    } finally { $reply.Dispose(); $null = $client.DefaultRequestHeaders.Remove('X-Fixture') }
     $reply = $client.GetAsync("$base/__axonyx/csrf").GetAwaiter().GetResult()
     if ([int]$reply.StatusCode -ne 200) { throw 'Pre-login CSRF token request failed' }
     $csrf = ($reply.Content.ReadAsStringAsync().Result | ConvertFrom-Json).token
@@ -81,11 +86,38 @@ try {
     $client.DefaultRequestHeaders.Add('X-Axonyx-CSRF', $csrf)
     $empty = [Net.Http.StringContent]::new('')
     try {
+        $reply = $client.PostAsync("$base/api/fixture-login?key=wrong", $empty).GetAwaiter().GetResult()
+        try {
+            if ([int]$reply.StatusCode -ne 403) { throw 'Incorrect inline query guard was not denied' }
+            if ($reply.Headers.Contains('Set-Cookie')) { throw 'Rejected fixture login created a session' }
+        } finally { $reply.Dispose() }
         $reply = $client.PostAsync("$base/api/fixture-login?key=isolated-fixture-only", $empty).GetAwaiter().GetResult()
         if ([int]$reply.StatusCode -ne 200) { throw "Fixture session failed: $($reply.Content.ReadAsStringAsync().Result)" }
         $reply.Dispose()
         $sessionCookie = $handler.CookieContainer.GetCookieHeader([uri]$base)
         if ([string]::IsNullOrEmpty($sessionCookie)) { throw 'Fixture login did not create a session' }
+        $client.DefaultRequestHeaders.Add('X-Fixture', 'yes')
+        foreach ($case in @(
+            @('allowed?mode=compiled&public=yes', 200),
+            @('allowed?mode=preview&public=no&key=isolated-fixture-only', 200),
+            @('allowed?mode=unknown&public=yes', 403),
+            @('denied?mode=compiled&public=yes', 403),
+            @('allowed?mode=compiled&public=no&key=wrong', 403)
+        )) {
+            $reply = $client.GetAsync("$base/api/guard/$($case[0])").GetAwaiter().GetResult()
+            try {
+                if ([int]$reply.StatusCode -ne $case[1]) { throw "Unexpected compound guard status for $($case[0])" }
+                if ($case[1] -eq 200) {
+                    $value = $reply.Content.ReadAsStringAsync().Result | ConvertFrom-Json
+                    if ($value.subject -ne 'fixture-owner' -or $value.literal -ne 'query.key params.id Auth.subject') { throw 'Compound guard altered session identity or literal text' }
+                }
+            } finally { $reply.Dispose() }
+        }
+        $null = $client.DefaultRequestHeaders.Remove('X-Fixture')
+        $reply = $client.GetAsync("$base/api/guard/allowed?mode=compiled&public=yes").GetAwaiter().GetResult()
+        try {
+            if ([int]$reply.StatusCode -ne 403) { throw 'Missing request-header guard was not denied' }
+        } finally { $reply.Dispose() }
         foreach ($case in @(@('image', 200), @('missing', 404), @('reject', 500))) {
             $reply = $client.GetAsync("$base/api/private/$($case[0])").GetAwaiter().GetResult()
             try {
@@ -117,8 +149,13 @@ try {
         $reply = $client.GetAsync("$base/api/private/image").GetAwaiter().GetResult()
         if ([int]$reply.StatusCode -ne 403) { throw 'Logged-out session retained binary access' }
         $reply.Dispose()
+        $client.DefaultRequestHeaders.Add('X-Fixture', 'yes')
+        $reply = $client.GetAsync("$base/api/guard/allowed?mode=compiled&public=yes").GetAwaiter().GetResult()
+        try {
+            if ([int]$reply.StatusCode -ne 403) { throw 'Logged-out compound subject guard retained access' }
+        } finally { $reply.Dispose() }
     } finally { $empty.Dispose() }
-    Write-Host 'Private Binary CLI proof passed: check, OpenAPI, compiled Axum HTTP, exact bytes, private headers, anonymous/logout denial and safe errors with validation always.'
+    Write-Host 'Private Binary CLI proof passed: check, OpenAPI, compiled Axum HTTP, compound request/session guards, exact bytes, private headers, anonymous/logout denial and safe errors with validation always.'
 } finally {
     if ($null -ne $client) { $client.Dispose() }
     if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
