@@ -23,5 +23,20 @@ pub fn register(registry: &mut AxNativeRegistry) -> Result<(), AxNativeError> {
             "missing" => Err(AxNativeResponseError::NotFound),
             _ => Err(AxNativeResponseError::Unavailable),
         }
+    })?;
+    let published = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let grant = published.clone();
+    registry.register_public_response("media.public", 1024, move |input: ImageRequest| {
+        if input.id == "reject" {
+            return Err(AxNativeResponseError::Unavailable);
+        }
+        if input.id != "image" || !grant.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AxNativeResponseError::NotFound);
+        }
+        AxNativeBinaryResponse::new(AxNativeBinaryType::Png, vec![0, 255, 128, 42])
+    })?;
+    registry.register("fixture.unpublish", move |_: serde_json::Value| {
+        published.store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok::<_, ()>(serde_json::json!({ "ok": true }))
     })
 }
