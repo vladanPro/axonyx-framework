@@ -64,7 +64,7 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-native-startup.ps1 -Scoped -Port 3928
 
-      - name: Smoke compiled private Binary HTTP routes
+      - name: Smoke compiled private/public Binary HTTP routes
         shell: pwsh
         run: ./scripts/smoke-private-binary.ps1
 

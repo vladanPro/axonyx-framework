@@ -193,7 +193,7 @@ foundation for live state patch streams, CMS events, and build/runtime signals.
 Generated apps depend on published Cargo packages by default:
 
 ```toml
-axonyx-runtime = "0.7.1"
+axonyx-runtime = "0.8.0"
 axonyx-ui = "0.0.86"
 ```
 
@@ -264,6 +264,27 @@ OpenAPI describes binary content rather than a JSON record. Preview refuses this
 compiled-only route. This is not streaming or aggregate memory protection.
 Old 0.6.x native Rust consumers must update exhaustive compiler/runtime enum
 matches when moving to 0.7; upgrading an app does not replace its installed CLI.
+
+## Public Binary Routes (0.8)
+
+```ax
+route GET "/api/posts/:slug/image/:id" -> Binary {
+  return Native.publicResponse("post.image", { slug: params.slug, id: params.id })
+}
+```
+
+Register `post.image` with `register_public_response` in the application's Rust
+native registry. This admits anonymous GET requests without inventing a session;
+the trusted callback must check the current published post and its selected image
+before reading bytes. Knowing an arbitrary media ID is not authorization. Public
+invocations cannot dispatch to private callbacks or serialize bytes via Native.call.
+
+The same bounded binary MIME, no-store/nosniff and safe failure rules apply.
+Conditional headers do not bypass the callback or retain a revoked read grant.
+Use the compiled build/start flow; interpretive preview does not execute native
+application Rust. OpenAPI describes binary content without a session requirement
+unless explicitly authored auth needs it. Move CLI and runtime to 0.8 together;
+native Rust consumers must handle the new PublicResponse compiler-plan variant.
 
 ## Architecture Direction
 

@@ -6,6 +6,24 @@ route GET "/api/private-unknown" -> Binary {
   return Native.privateResponse("media.unregistered", {})
 }
 
+route GET "/api/public/:id" -> Binary {
+  return Native.publicResponse("media.public", { id: params.id })
+}
+
+route GET "/api/public-private-channel" -> Binary {
+  return Native.publicResponse("media.read", { id: "image" })
+}
+
+route GET "/api/public-unknown" -> Binary {
+  return Native.publicResponse("media.unregistered", {})
+}
+
+route POST "/api/fixture-unpublish" {
+  require Auth.subject != "" else forbidden()
+  data result = Native.call("fixture.unpublish", {})
+  return json(result)
+}
+
 route POST "/api/fixture-login" {
   require query.key == "isolated-fixture-only" else forbidden()
   Session.create("fixture-owner", {})

@@ -74,6 +74,8 @@ mod action_selector;
 mod action_selector_tests;
 #[cfg(test)]
 mod private_binary_tests;
+#[cfg(test)]
+mod public_binary_tests;
 mod remote_contract;
 
 use chrono::Utc;
@@ -98,7 +100,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.7.1";
+const AXONYX_RUNTIME_VERSION: &str = "0.8.0";
 const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -9228,12 +9230,24 @@ fn check_backend_requirements(
 
     let type_names = root.and_then(|root| collect_project_type_names(root).ok());
     if let Err(error) = axonyx_core::ax_backend_codegen::validate_private_responses(&plan) {
+        let public = source.contains("Native.publicResponse");
         diagnostics.push(CheckDiagnostic {
             file: display_path(path),
-            line: line_for_source_pattern(source, "Native.privateResponse"),
+            line: line_for_source_pattern(
+                source,
+                if public {
+                    "Native.publicResponse"
+                } else {
+                    "Native.privateResponse"
+                },
+            ),
             column: 1,
             severity: "error",
-            code: "axonyx-private-response-contract",
+            code: if public {
+                "axonyx-public-response-contract"
+            } else {
+                "axonyx-private-response-contract"
+            },
             message: error.to_string(),
         });
     }
@@ -11132,9 +11146,9 @@ fn handler_steps_use_input_scope(steps: &[AxStepPlan]) -> bool {
         AxStepPlan::Return(AxReturnPlan::Expr(expr) | AxReturnPlan::Json(expr)) => {
             expr_uses_input_scope(expr)
         }
-        AxStepPlan::Return(AxReturnPlan::PrivateResponse { args }) => {
-            args.iter().any(expr_uses_input_scope)
-        }
+        AxStepPlan::Return(
+            AxReturnPlan::PrivateResponse { args } | AxReturnPlan::PublicResponse { args },
+        ) => args.iter().any(expr_uses_input_scope),
         AxStepPlan::Patch { signal, value } => {
             expr_uses_input_scope(signal) || expr_uses_input_scope(value)
         }
@@ -11205,6 +11219,9 @@ fn backend_plan_uses_signed_session(plan: &AxBackendPlan) -> bool {
     plan.handlers.iter().any(|handler| {
         handler.steps.iter().any(|step| match step {
             AxStepPlan::Return(AxReturnPlan::PrivateResponse { .. }) => true,
+            AxStepPlan::Return(AxReturnPlan::PublicResponse { .. }) => {
+                axonyx_core::ax_backend_lowering::ax_step_uses_auth_subject(step)
+            }
             AxStepPlan::Let {
                 value: AxValuePlan::Expr(expr),
                 ..
@@ -11463,7 +11480,8 @@ fn collect_env_refs_from_return(
     refs: &mut std::collections::BTreeSet<String>,
 ) {
     match value {
-        axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::PrivateResponse { args } => {
+        axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::PrivateResponse { args }
+        | axonyx_core::ax_backend_lowering_prelude::AxReturnPlan::PublicResponse { args } => {
             for argument in args {
                 collect_env_refs_from_expr(argument, refs);
             }
@@ -11486,16 +11504,37 @@ fn collect_env_refs_from_expr(
     expr: &axonyx_core::ax_backend_lowering_prelude::AxRustExpr,
     refs: &mut std::collections::BTreeSet<String>,
 ) {
-    let code = expr.code.as_str();
-    let prefix = "runtime.env().value(\"";
-    let suffix = "\")?";
-    let Some(key) = code
-        .strip_prefix(prefix)
-        .and_then(|key| key.strip_suffix(suffix))
-    else {
-        return;
-    };
-    refs.insert(key.to_string());
+    // Payload objects can contain environment reads at any depth. Token groups
+    // preserve that structure without treating quoted examples as actual reads.
+    fn scan(tokens: proc_macro2::TokenStream, refs: &mut std::collections::BTreeSet<String>) {
+        use proc_macro2::{Delimiter, TokenTree};
+        let tokens: Vec<_> = tokens.into_iter().collect();
+        for window in tokens.windows(7) {
+            if matches!(&window[0], TokenTree::Ident(name) if name == "runtime")
+                && matches!(&window[1], TokenTree::Punct(p) if p.as_char() == '.')
+                && matches!(&window[2], TokenTree::Ident(name) if name == "env")
+                && matches!(&window[3], TokenTree::Group(group) if group.delimiter() == Delimiter::Parenthesis && group.stream().is_empty())
+                && matches!(&window[4], TokenTree::Punct(p) if p.as_char() == '.')
+                && matches!(&window[5], TokenTree::Ident(name) if name == "value")
+            {
+                if let TokenTree::Group(args) = &window[6] {
+                    if args.delimiter() == Delimiter::Parenthesis {
+                        if let Ok(key) = syn::parse2::<syn::LitStr>(args.stream()) {
+                            refs.insert(key.value());
+                        }
+                    }
+                }
+            }
+        }
+        for token in tokens {
+            if let TokenTree::Group(group) = token {
+                scan(group.stream(), refs);
+            }
+        }
+    }
+    if let Ok(tokens) = expr.code.parse() {
+        scan(tokens, refs);
+    }
 }
 
 fn auth_secret_configured(root: Option<&Path>, key: &str) -> bool {
@@ -15550,6 +15589,8 @@ fn route_hooks_from_body(body: &[AxBackendStmt]) -> Vec<RouteHookReport> {
 
 fn route_auth_from_body(body: &[AxBackendStmt]) -> Vec<ApiAuthReport> {
     let mut schemes = std::collections::BTreeSet::<&'static str>::new();
+    let public_binary = body.iter().any(|stmt| matches!(stmt,
+        AxBackendStmt::Return(AxReturn::Expr(AxExpr::Call { path, .. })) if path == &["Native", "publicResponse"]));
 
     for stmt in body {
         if matches!(stmt, AxBackendStmt::Return(AxReturn::Expr(AxExpr::Call { path, .. })) if path == &["Native", "privateResponse"])
@@ -15558,6 +15599,16 @@ fn route_auth_from_body(body: &[AxBackendStmt]) -> Vec<ApiAuthReport> {
         }
         if let AxBackendStmt::Require(requirement) = stmt {
             collect_auth_from_expr(&requirement.value, &mut schemes);
+            if public_binary {
+                collect_public_binary_auth(&requirement.value, &mut schemes);
+            }
+        }
+        if let AxBackendStmt::Return(AxReturn::Expr(AxExpr::Call { path, args })) = stmt {
+            if path == &["Native", "publicResponse"] {
+                for arg in args {
+                    collect_public_binary_auth(arg, &mut schemes);
+                }
+            }
         }
     }
 
@@ -15570,6 +15621,42 @@ fn route_auth_from_body(body: &[AxBackendStmt]) -> Vec<ApiAuthReport> {
 fn collect_auth_from_expr(expr: &AxExpr, schemes: &mut std::collections::BTreeSet<&'static str>) {
     if expr_is_member_path(expr, &["Auth", "signedSession"]) {
         schemes.insert("signedSession");
+    }
+}
+
+fn collect_public_binary_auth(
+    expr: &AxExpr,
+    schemes: &mut std::collections::BTreeSet<&'static str>,
+) {
+    if expr_is_member_path(expr, &["Auth", "signedSession"])
+        || expr_is_member_path(expr, &["Auth", "subject"])
+    {
+        schemes.insert("signedSession");
+    }
+    match expr {
+        AxExpr::Member { object, .. } | AxExpr::OptionalMember { object, .. } => {
+            collect_public_binary_auth(object, schemes)
+        }
+        AxExpr::Unary { expr, .. } => collect_public_binary_auth(expr, schemes),
+        AxExpr::Binary { left, right, .. } => {
+            collect_public_binary_auth(left, schemes);
+            collect_public_binary_auth(right, schemes);
+        }
+        AxExpr::Index { object, index } => {
+            collect_public_binary_auth(object, schemes);
+            collect_public_binary_auth(index, schemes);
+        }
+        AxExpr::List(items) | AxExpr::Call { args: items, .. } => {
+            for item in items {
+                collect_public_binary_auth(item, schemes);
+            }
+        }
+        AxExpr::Object(fields) => {
+            for value in fields.values() {
+                collect_public_binary_auth(value, schemes);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -15628,7 +15715,7 @@ fn collect_responses_from_return(
     let AxReturn::Expr(AxExpr::Call { path, args }) = value else {
         return;
     };
-    if path == &["Native", "privateResponse"] {
+    if path == &["Native", "privateResponse"] || path == &["Native", "publicResponse"] {
         responses.insert(403, "Forbidden");
         responses.insert(404, "Not Found");
         responses.insert(500, "Internal Server Error");
@@ -16383,7 +16470,7 @@ fn openapi_operation_for_route(route: &ApiRouteReport) -> serde_json::Value {
         let schema = serde_json::json!({ "type": "string", "format": "binary" });
         serde_json::json!({
             "200": {
-                "description": "Private binary response (1..=8 MiB)",
+                "description": "Bounded binary response (1..=8 MiB; no-store)",
                 "headers": {
                     "Cache-Control": { "schema": { "const": "private, no-store" } },
                     "X-Content-Type-Options": { "schema": { "const": "nosniff" } }
