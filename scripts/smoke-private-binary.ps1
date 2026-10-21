@@ -38,6 +38,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Binary OpenAPI export failed' }
         $contract = Get-Content 'public/openapi.json' -Raw | ConvertFrom-Json
         if ($contract.paths.'/api/private/{id}'.get.responses.'200'.content.'application/octet-stream'.schema.format -ne 'binary') { throw 'Binary OpenAPI contract mismatch' }
+        if ($contract.paths.'/api/public/{id}'.get.security) { throw 'Public binary OpenAPI incorrectly requires a session' }
+        if ($contract.paths.'/api/public/{id}'.get.responses.'200'.content.'image/png'.schema.format -ne 'binary') { throw 'Public Binary OpenAPI mismatch' }
         $env:CARGO_TARGET_DIR = Join-Path $target 'native-startup-proof'
         & $cli build --clean --compiled
         if ($LASTEXITCODE -ne 0) { throw 'Compiled Binary application build failed' }
@@ -73,6 +75,21 @@ try {
     if (-not $ready) { throw 'Private binary server did not become ready' }
     if ([int]$reply.StatusCode -ne 403) { throw 'Anonymous binary request was not denied' }
     $reply.Dispose()
+    $client.DefaultRequestHeaders.Add('If-None-Match', '*')
+    foreach ($case in @(@('public/image', 200), @('public/missing', 404), @('public/reject', 500), @('public-private-channel', 500), @('public-unknown', 500))) {
+        $reply = $client.GetAsync("$base/api/$($case[0])").GetAwaiter().GetResult()
+        try {
+            if ([int]$reply.StatusCode -ne $case[1]) { throw "Unexpected anonymous public status for $($case[0])" }
+            if (-not $reply.Headers.CacheControl.NoStore) { throw 'Public response was cacheable' }
+            if (($reply.Headers.GetValues('X-Content-Type-Options') -join '') -ne 'nosniff') { throw 'Public nosniff missing' }
+            if ($reply.Headers.Contains('Set-Cookie')) { throw 'Public response created a session' }
+            $bytes = $reply.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+            if ($case[1] -eq 200) {
+                if (($bytes -join ',') -ne '0,255,128,42' -or $reply.Content.Headers.ContentType.MediaType -ne 'image/png') { throw 'Public binary bytes/MIME changed' }
+            } elseif ($case[1] -eq 500 -and [Text.Encoding]::UTF8.GetString($bytes) -ne 'binary response unavailable') { throw 'Public failure leaked diagnostics' }
+        } finally { $reply.Dispose() }
+    }
+    $null = $client.DefaultRequestHeaders.Remove('If-None-Match')
     $client.DefaultRequestHeaders.Add('X-Fixture', 'yes')
     $reply = $client.GetAsync("$base/api/guard/allowed?mode=compiled&public=yes").GetAwaiter().GetResult()
     try {
@@ -142,6 +159,15 @@ try {
         if ([string]::IsNullOrEmpty($csrf)) { throw 'Fixture CSRF token missing' }
         $null = $client.DefaultRequestHeaders.Remove('X-Axonyx-CSRF')
         $client.DefaultRequestHeaders.Add('X-Axonyx-CSRF', $csrf)
+        $reply = $client.PostAsync("$base/api/fixture-unpublish", $empty).GetAwaiter().GetResult()
+        try {
+            if ([int]$reply.StatusCode -ne 200) { throw 'Fixture unpublish failed' }
+        } finally { $reply.Dispose() }
+        $client.DefaultRequestHeaders.Add('If-None-Match', '*')
+        $reply = $client.GetAsync("$base/api/public/image").GetAwaiter().GetResult()
+        try {
+            if ([int]$reply.StatusCode -ne 404 -or -not $reply.Headers.CacheControl.NoStore) { throw 'Revoked public grant retained access' }
+        } finally { $reply.Dispose(); $null = $client.DefaultRequestHeaders.Remove('If-None-Match') }
         $reply = $client.PostAsync("$base/api/fixture-logout", $empty).GetAwaiter().GetResult()
         if ([int]$reply.StatusCode -ne 200) { throw "Fixture logout failed ($([int]$reply.StatusCode)): $($reply.Content.ReadAsStringAsync().Result)" }
         $reply.Dispose()
@@ -155,7 +181,7 @@ try {
             if ([int]$reply.StatusCode -ne 403) { throw 'Logged-out compound subject guard retained access' }
         } finally { $reply.Dispose() }
     } finally { $empty.Dispose() }
-    Write-Host 'Private Binary CLI proof passed: check, OpenAPI, compiled Axum HTTP, compound request/session guards, exact bytes, private headers, anonymous/logout denial and safe errors with validation always.'
+    Write-Host 'Private/public Binary CLI proof passed: check, OpenAPI, compiled Axum HTTP, exact bytes, anonymous public admission, current grant revocation, private channel isolation/logout denial and safe errors with validation always.'
 } finally {
     if ($null -ne $client) { $client.Dispose() }
     if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
