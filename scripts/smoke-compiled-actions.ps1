@@ -1025,7 +1025,7 @@ route GET "/api/forbidden-loader" {
   if ($fallback.Headers["Location"] -ne "/posts") { throw "Compiled no-JS redirect fallback is invalid" }
   $explicitRedirect = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=RedirectProbe" -Body "destination=%2Fexplicit-target" -ExpectedStatus 303
   $missingPage = Invoke-AxRequest -Url "$baseUrl/absent/missing" -Method GET -ExpectedStatus 404
-  if ($missingPage.Body -ne "Not Found" -or $missingPage.Headers['Cache-Control'] -ne 'no-store') { throw "Missing loader did not return a fixed no-store 404" }
+  if ($missingPage.Body -notmatch 'Page not found' -or $missingPage.Headers['Content-Type'] -notmatch '^text/html' -or $missingPage.Headers['Cache-Control'] -ne 'no-store') { throw "Missing loader did not render the no-store 404 boundary" }
   Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fabsent%2Fmissing&name=value" -Method GET -ExpectedStatus 404 | Out-Null
   Invoke-AxRequest -Url "$baseUrl/api/not-found-probe" -Method GET -ExpectedStatus 404 | Out-Null
   Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=NotFoundProbe" -ExpectedStatus 404 | Out-Null
