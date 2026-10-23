@@ -204,6 +204,7 @@ fn compiled_host_embeds_policy_only_for_explicit_scoped_limits() {
         &[],
         &[],
         &[],
+        &[],
         super::CompiledProductionOptions {
             native_registration: false,
             native_storage_registration: false,

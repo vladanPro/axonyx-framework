@@ -1308,6 +1308,13 @@ struct CompiledPageRenderer {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct CompiledBoundaryRenderer {
+    name: String,
+    document_json: String,
+    import_sources: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SharedQueryReturn {
     file: String,
     ty: Option<AxType>,
@@ -13251,6 +13258,7 @@ fn build_compiled_production_binary(
     let action_body_limits = configured_action_body_limits(root).map_err(anyhow::Error::msg)?;
     let data_bindings = compiled_data_bindings(root)?;
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
+    let boundary_renderers = compiled_root_boundary_renderers(root)?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let database_required = project_uses_database_runtime(root)?;
     let runtime_config = AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?;
@@ -13265,6 +13273,7 @@ fn build_compiled_production_binary(
         &signal_aliases,
         &data_bindings,
         &page_renderers,
+        &boundary_renderers,
         CompiledProductionOptions {
             native_registration: application_has_native_registration(root)?,
             native_storage_registration: application_has_native_storage(root)?,
@@ -13591,6 +13600,108 @@ fn compiled_page_renderers(
     Ok(renderers)
 }
 
+fn compiled_root_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRenderer>> {
+    let app_root = root.join("app");
+    let mut renderers = Vec::new();
+    for name in ["not-found", "error"] {
+        let Some(page_path) = frontend_source_path(&app_root, name)? else {
+            continue;
+        };
+        let source = fs::read_to_string(&page_path)
+            .with_context(|| format!("failed to read boundary '{}'", page_path.display()))?;
+        let document = parse_ax_auto(&source).map_err(anyhow::Error::msg)?;
+        if document
+            .page
+            .body
+            .iter()
+            .any(|statement| matches!(statement, AxStatement::Data(_)))
+        {
+            bail!("compiled {name} boundary cannot load route data");
+        }
+
+        let layout_path = frontend_source_path(&app_root, "layout")?;
+        let layout_source = layout_path
+            .as_ref()
+            .map(|path| fs::read_to_string(path))
+            .transpose()?;
+        if let Some(layout) = &layout_source {
+            let parsed = parse_ax_auto(layout).map_err(anyhow::Error::msg)?;
+            if parsed
+                .page
+                .body
+                .iter()
+                .any(|statement| matches!(statement, AxStatement::Data(_)))
+            {
+                bail!("compiled {name} boundary layout cannot load route data");
+            }
+        }
+        let layout_refs = layout_source.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut full_document =
+            axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+        let uses_ui = layout_refs
+            .iter()
+            .any(|layout| source_uses_package(layout, "@axonyx/ui"))
+            || source_uses_package(&source, "@axonyx/ui");
+        if uses_ui && resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME).is_some() {
+            let (css, js) = axonyx_ui_asset_hrefs(root);
+            full_document.head.links.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("rel", "stylesheet")
+                    .attr("href", css),
+            );
+            full_document.head.scripts.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("src", js)
+                    .attr("defer", "true"),
+            );
+        }
+        let mut visited = std::collections::BTreeSet::new();
+        let mut scripts = std::collections::BTreeSet::new();
+        if let Some(layout_path) = &layout_path {
+            collect_component_client_script_hrefs(root, layout_path, &mut visited, &mut scripts)?;
+        }
+        collect_component_client_script_hrefs(root, &page_path, &mut visited, &mut scripts)?;
+        for script in scripts {
+            full_document.head.scripts.push(
+                axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                    .attr("src", script)
+                    .attr("defer", "true"),
+            );
+        }
+        if let Some(theme) = axonyx_config_table(root, "theme") {
+            if full_document.head.theme.is_none() {
+                if let Some(active) = theme
+                    .get("active")
+                    .and_then(toml::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    full_document.head.theme = Some(active.trim().into());
+                }
+            }
+            if let Some(css) = theme
+                .get("stylesheet")
+                .and_then(toml::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                full_document.head.links.push(
+                    axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                        .attr("rel", "stylesheet")
+                        .attr("href", css.trim()),
+                );
+            }
+        }
+        let mut import_sources = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        collect_compiled_import_sources(root, &full_document, &mut seen, &mut import_sources)?;
+        renderers.push(CompiledBoundaryRenderer {
+            name: name.to_string(),
+            document_json: serde_json::to_string(&full_document)?,
+            import_sources,
+        });
+    }
+    Ok(renderers)
+}
+
 fn collect_compiled_import_sources(
     root: &Path,
     document: &AxDocument,
@@ -13718,6 +13829,7 @@ fn compiled_production_source(
     signal_aliases: &[(String, String, String)],
     data_bindings: &[CompiledDataBinding],
     page_renderers: &[CompiledPageRenderer],
+    boundary_renderers: &[CompiledBoundaryRenderer],
     options: CompiledProductionOptions<'_>,
 ) -> String {
     let CompiledProductionOptions {
@@ -13895,6 +14007,22 @@ impl AxFileStorage for ApplicationFileStorage {
         let imports = renderer.import_sources.iter().map(|(source, contents)| format!("({source:?}, {contents:?})")).collect::<Vec<_>>().join(", ");
         format!("    if route_pattern_matches({pattern:?}, path) {{ return Some(({pattern:?}, {document:?}, &[{imports}])); }}\n", pattern = renderer.route_pattern, document = renderer.full_document_json)
     }).collect::<String>();
+    let boundary_renderer_arms = boundary_renderers
+        .iter()
+        .map(|renderer| {
+            let imports = renderer
+                .import_sources
+                .iter()
+                .map(|(source, contents)| format!("({source:?}, {contents:?})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "    if name == {name:?} {{ return Some(({document:?}, &[{imports}])); }}\n",
+                name = renderer.name,
+                document = renderer.document_json
+            )
+        })
+        .collect::<String>();
     format!(
         r#"use std::collections::BTreeMap;
 use std::path::{{Component, Path, PathBuf}};
@@ -14038,15 +14166,43 @@ fn handle_request_inner(
             return secure(response);
         }},
         Ok(None) => {{}},
-        Err(error) => return secure(AxHttpResponse::text(error.public_response_status().unwrap_or(500),
-            if error.public_response_status() == Some(404) {{ "Not Found" }} else if error.access_denial_status().is_some() {{ "Access denied." }} else {{ "Page could not be rendered." }}).with_no_store()),
+        Err(error) => {{
+            let mut response = if error.public_response_status() == Some(404) {{
+            compiled_boundary_response("not-found", 404)
+        }} else if let Some(status) = error.access_denial_status() {{
+            AxHttpResponse::text(status, "Access denied.").with_no_store()
+        }} else {{
+            compiled_boundary_response("error", 500)
+            }};
+            if request.method.eq_ignore_ascii_case("HEAD") {{ response.body = AxBody::fixed(Vec::new()); }}
+            return secure(response);
+        }},
     }}
     let mut response = static_response(dist, &request.target)
-        .unwrap_or_else(|| AxHttpResponse::text(404, "Not Found"));
+        .unwrap_or_else(|| compiled_boundary_response("not-found", 404));
     if request.method.eq_ignore_ascii_case("HEAD") {{
         response.body = AxBody::fixed(Vec::new());
     }}
     secure(response)
+}}
+
+fn compiled_boundary_response(name: &str, status: u16) -> AxHttpResponse {{
+    let fallback = || AxHttpResponse::text(status, if status == 404 {{ "Not Found" }} else {{ "Page could not be rendered." }}).with_no_store();
+    let Some((document, imports)) = compiled_boundary_document(name) else {{ return fallback(); }};
+    match axonyx_runtime::render_compiled_page_document(
+        document,
+        imports,
+        "/",
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        None,
+    ) {{
+        Ok(html) => AxHttpResponse::html(status, html).with_no_store(),
+        Err(_) => {{
+            eprintln!("Axonyx compiled boundary render failed; using safe fallback");
+            fallback()
+        }}
+    }}
 }}
 
 fn readiness_response(runtime: &impl AxBackendRuntime) -> AxHttpResponse {{
@@ -14396,6 +14552,10 @@ fn compiled_query_arg(target: &str, name: &str) -> Value {{
 
 fn compiled_page_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
 {page_renderer_arms}    None
+}}
+
+fn compiled_boundary_document(name: &str) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {{
+{boundary_renderer_arms}    None
 }}
 
 pub fn compiled_page_document_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
@@ -27476,6 +27636,7 @@ action ValidPost
             &[],
             &[],
             &[],
+            &[],
             CompiledProductionOptions {
                 native_registration: true,
                 native_storage_registration: false,
@@ -27500,6 +27661,65 @@ action ValidPost
         let runtime = source.find("with_native_functions(registry)").unwrap();
         let serve = source.find("    serve_compiled_axum(bind").unwrap();
         assert!(register < runtime && runtime < serve);
+    }
+
+    #[test]
+    fn compiled_root_boundaries_render_with_layout_and_no_route_data() {
+        let root = make_temp_dir("compiled-root-boundaries");
+        fs::write(
+            root.join("Axonyx.toml"),
+            "[theme]\nactive = \"gold\"\nstylesheet = \"/theme.css\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("app")).unwrap();
+        fs::write(
+            root.join("app/layout.asx"),
+            "page Shell() {\n  return ASX {\n    <main>Legura shell<Slot /></main>\n  }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/not-found.asx"),
+            "page Missing() {\n  return ASX {\n    <h1>Custom missing page</h1>\n  }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/error.asx"),
+            "page Failure() {\n  return ASX {\n    <h1>Safe error page</h1>\n  }\n}\n",
+        )
+        .unwrap();
+        let boundaries = compiled_root_boundary_renderers(&root).unwrap();
+        assert_eq!(boundaries.len(), 2);
+        for (name, expected) in [
+            ("not-found", "Custom missing page"),
+            ("error", "Safe error page"),
+        ] {
+            let boundary = boundaries.iter().find(|item| item.name == name).unwrap();
+            let imports = boundary
+                .import_sources
+                .iter()
+                .map(|(path, source)| (path.as_str(), source.as_str()))
+                .collect::<Vec<_>>();
+            let html = axonyx_runtime::render_compiled_page_document(
+                &boundary.document_json,
+                &imports,
+                "/",
+                &std::collections::BTreeMap::new(),
+                &std::collections::BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+            assert!(html.contains("Legura shell"));
+            assert!(html.contains(expected));
+            assert!(html.contains("data-theme=\"gold\""));
+            assert!(html.contains("/theme.css"));
+        }
+        fs::write(
+            root.join("app/error.asx"),
+            "page Failure() {\n  data secret = loadSecret()\n  return ASX {\n    <p>unsafe</p>\n  }\n}\n",
+        )
+        .unwrap();
+        assert!(compiled_root_boundary_renderers(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -27560,6 +27780,7 @@ action ValidPost
             &[],
             &[],
             &[],
+            &[],
             CompiledProductionOptions {
                 native_registration: false,
                 native_storage_registration: true,
@@ -27615,6 +27836,7 @@ action ValidPost
                 full_document_json: "{\"page\":\"posts\"}".to_string(),
                 import_sources: Vec::new(),
             }],
+            &[],
             CompiledProductionOptions {
                 native_registration: false,
                 sessions_required: true,
@@ -27686,6 +27908,7 @@ action ValidPost
             &[],
             &[],
             &[],
+            &[],
             CompiledProductionOptions {
                 native_registration: false,
                 sessions_required: false,
@@ -27710,6 +27933,7 @@ action ValidPost
     fn compiled_production_source_bootstraps_configured_file_storage() {
         let source = compiled_production_source(
             "\"dist\"",
+            &[],
             &[],
             &[],
             &[],
