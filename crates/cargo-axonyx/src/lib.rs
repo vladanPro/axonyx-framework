@@ -35737,6 +35737,23 @@ route GET "/api/admin" -> User {
     }
 
     #[test]
+    fn check_ax_source_accepts_grouped_coalescing_require_guard() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/guard.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+route GET "/guard" {
+  require (query.allowed ?? "") == "yes" else forbidden()
+  return json({ ok: true })
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
     fn check_ax_source_accepts_guarded_and_optional_query_field_access() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/account.ax");
         let guarded = check_ax_source_with_root(
