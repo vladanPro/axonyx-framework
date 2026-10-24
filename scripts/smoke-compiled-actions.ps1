@@ -300,7 +300,7 @@ action ExpressionProbe(name: String) {
   data user = db.users.where({ id: "user-42" }).first()
   require user != null else forbidden()
   require user["id"] == "user-42" else forbidden()
-  return json({ length: input.name.length, count: users.length })
+  return json({ length: input.name.length, count: users.length, existing: user?.role ?? "none", absent: missing?.role ?? "none", missingField: user?.unknown ?? "none", literal: "user?.role" })
 }
 
 action ConflictProbe() {
@@ -929,7 +929,7 @@ route GET "/api/forbidden-loader" {
   $registrationHeaders = @{ Origin = $baseUrl; Cookie = $registrationAnonCookie; "X-Axonyx-CSRF" = $registrationToken }
   $expression = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ExpressionProbe" -Body "name=A%F0%9F%94%A5&__ax_patch=true" -Headers $registrationHeaders
   $expressionPayload = $expression.Body | ConvertFrom-Json
-  if ($expressionPayload.ok -ne $true -or $expressionPayload.value.length -ne 3 -or $expressionPayload.value.count -lt 1) { throw "Compiled null/record/UTF-16 length expression parity failed: $($expression.Body)" }
+  if ($expressionPayload.ok -ne $true -or $expressionPayload.value.length -ne 3 -or $expressionPayload.value.count -lt 1 -or $expressionPayload.value.existing -ne "admin" -or $expressionPayload.value.absent -ne "none" -or $expressionPayload.value.missingField -ne "none" -or $expressionPayload.value.literal -ne "user?.role") { throw "Compiled null/record/optional JSON member expression parity failed: $($expression.Body)" }
   $actionConflict = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=ConflictProbe" -Body "__ax_patch=true" -Headers $registrationHeaders -ExpectedStatus 409
   $conflictPayload = $actionConflict.Body | ConvertFrom-Json
   if ($conflictPayload.error.value.error -ne "conflict" -or $actionConflict.Headers["Set-Cookie"] -or $actionConflict.Headers["Cache-Control"] -ne "no-store" -or $actionConflict.Body -match 'unique_violation|INSERT|duplicate@example') { throw "Compiled action conflict boundary leaked internals or created a session" }

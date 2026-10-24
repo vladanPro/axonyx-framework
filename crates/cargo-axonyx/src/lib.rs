@@ -100,7 +100,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.8.0";
+const AXONYX_RUNTIME_VERSION: &str = "0.8.1";
 const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -9237,6 +9237,23 @@ fn check_backend_requirements(
     };
 
     let type_names = root.and_then(|root| collect_project_type_names(root).ok());
+    if let Err(error) = axonyx_core::ax_backend_codegen::validate_action_context(&plan) {
+        let scope = match &error {
+            axonyx_core::ax_backend_codegen::AxBackendCodegenError::ActionContextUnavailable {
+                scope,
+                ..
+            } => scope.as_str(),
+            _ => "params",
+        };
+        diagnostics.push(CheckDiagnostic {
+            file: display_path(path),
+            line: line_for_source_pattern(source, &format!("{scope}.")),
+            column: 1,
+            severity: "error",
+            code: "axonyx-action-context",
+            message: error.to_string(),
+        });
+    }
     if let Err(error) = axonyx_core::ax_backend_codegen::validate_private_responses(&plan) {
         let public = source.contains("Native.publicResponse");
         diagnostics.push(CheckDiagnostic {
@@ -35737,6 +35754,23 @@ route GET "/api/admin" -> User {
     }
 
     #[test]
+    fn check_ax_source_accepts_grouped_coalescing_require_guard() {
+        let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/guard.ax");
+        let diagnostics = check_ax_source_with_root(
+            &path,
+            r#"
+route GET "/guard" {
+  require (query.allowed ?? "") == "yes" else forbidden()
+  return json({ ok: true })
+}
+"#,
+            None,
+        );
+
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    }
+
+    #[test]
     fn check_ax_source_accepts_guarded_and_optional_query_field_access() {
         let path = PathBuf::from("H:/CODE/axonyx/demo/routes/api/account.ax");
         let guarded = check_ax_source_with_root(
@@ -35851,6 +35885,19 @@ route POST "/api/posts"
         assert_eq!(diagnostics[0].code, "axonyx-record-input-contract");
         assert!(diagnostics[0].message.contains("PostInput.amount"));
         assert!(diagnostics[0].message.contains("Decimal"));
+    }
+
+    #[test]
+    fn check_ax_source_rejects_page_params_in_action_before_compiled_build() {
+        let source = "action Save(id: String) {\n  require input.id == params.id else notFound()\n  return redirect(\"/admin/posts\")\n}";
+        let diagnostics =
+            check_ax_source_with_root(&PathBuf::from("demo/app/posts/actions.ax"), source, None);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].line, 2);
+        assert_eq!(diagnostics[0].code, "axonyx-action-context");
+        assert!(diagnostics[0]
+            .message
+            .contains("action transport has no page route context"));
     }
 
     #[test]
