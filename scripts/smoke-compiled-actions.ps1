@@ -96,6 +96,28 @@ try {
 
   $actionsPath = Join-Path $appRoot "app/posts/actions.ax"
   New-Item -ItemType Directory -Path (Join-Path $appRoot "app/absent/[id]") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/not-found.asx"), @'
+page AbsentMissing() {
+  return ASX {
+    <h1>Absent section missing</h1>
+  }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/[id]/not-found.asx"), @'
+page AbsentRecordMissing() {
+  return ASX {
+    <h1>Specific absent record</h1>
+  }
+}
+'@)
+  New-Item -ItemType Directory -Path (Join-Path $appRoot "app/absent/fixed") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/fixed/not-found.asx"), @'
+page FixedRecordMissing() {
+  return ASX {
+    <h1>Fixed absent record</h1>
+  }
+}
+'@)
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/absent/[id]/page.asx"), @'
 page Missing() {
   data value: String = loadMissing(params.id)
@@ -144,6 +166,20 @@ page FormShell() {
   return ASX {
     <header>Form application header</header>
     <Slot />
+  }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/not-found.asx"), @'
+page FormsMissing() {
+  return ASX {
+    <h1>Forms section missing</h1>
+  }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/forms/error.asx"), @'
+page FormsFailure() {
+  return ASX {
+    <h1>Forms safe failure</h1>
   }
 }
 '@)
@@ -1025,7 +1061,19 @@ route GET "/api/forbidden-loader" {
   if ($fallback.Headers["Location"] -ne "/posts") { throw "Compiled no-JS redirect fallback is invalid" }
   $explicitRedirect = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=RedirectProbe" -Body "destination=%2Fexplicit-target" -ExpectedStatus 303
   $missingPage = Invoke-AxRequest -Url "$baseUrl/absent/missing" -Method GET -ExpectedStatus 404
-  if ($missingPage.Body -notmatch 'Page not found' -or $missingPage.Headers['Content-Type'] -notmatch '^text/html' -or $missingPage.Headers['Cache-Control'] -ne 'no-store') { throw "Missing loader did not render the no-store 404 boundary" }
+  if ($missingPage.Body -notmatch 'Specific absent record' -or $missingPage.Headers['Content-Type'] -notmatch '^text/html' -or $missingPage.Headers['Cache-Control'] -ne 'no-store') { throw "Missing loader did not render the nearest no-store 404 boundary" }
+  $parentMissing = Invoke-AxRequest -Url "$baseUrl/absent" -Method GET -ExpectedStatus 404
+  if ($parentMissing.Body -notmatch 'Absent section missing' -or $parentMissing.Body -match 'Specific absent record') { throw "Missing parent route did not use its parent boundary" }
+  $nestedMissing = Invoke-AxRequest -Url "$baseUrl/absent/other/child" -Method GET -ExpectedStatus 404
+  if ($nestedMissing.Body -notmatch 'Specific absent record') { throw "Missing nested route did not use the dynamic boundary" }
+  $fixedMissing = Invoke-AxRequest -Url "$baseUrl/absent/fixed/child" -Method GET -ExpectedStatus 404
+  if ($fixedMissing.Body -notmatch 'Fixed absent record' -or $fixedMissing.Body -match 'Specific absent record') { throw "Static boundary did not take precedence over a dynamic sibling" }
+  $nestedHead = Invoke-AxRequest -Url "$baseUrl/absent/other/child" -Method HEAD -ExpectedStatus 404
+  if ($nestedHead.Body -ne '' -or $nestedHead.Headers['Content-Type'] -notmatch '^text/html') { throw "Nested boundary HEAD returned a body or lost HTML content type" }
+  $formsMissing = Invoke-AxRequest -Url "$baseUrl/forms/unknown" -Method GET -ExpectedStatus 404
+  if ($formsMissing.Body -notmatch 'Forms section missing' -or $formsMissing.Body -notmatch 'Form application header') { throw "Forms subtree did not render its boundary with nested layout" }
+  $rootMissing = Invoke-AxRequest -Url "$baseUrl/unknown-route" -Method GET -ExpectedStatus 404
+  if ($rootMissing.Body -notmatch 'Page not found' -or $rootMissing.Body -match 'Forms section missing') { throw "Unknown root route did not use the global boundary" }
   Invoke-AxRequest -Url "$baseUrl/__axonyx/data?path=%2Fabsent%2Fmissing&name=value" -Method GET -ExpectedStatus 404 | Out-Null
   Invoke-AxRequest -Url "$baseUrl/api/not-found-probe" -Method GET -ExpectedStatus 404 | Out-Null
   Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=NotFoundProbe" -ExpectedStatus 404 | Out-Null
@@ -1061,7 +1109,9 @@ route GET "/api/forbidden-loader" {
   & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute("drop table posts");db.commit();db.close()' $dbPath
   if ($LASTEXITCODE -ne 0) { throw "Could not prepare loader failure fixture" }
   $failedPage = Invoke-AxRequest -Url "$baseUrl/forms/loaded" -Method GET -ExpectedStatus 500
-  if ($failedPage.Body -match "Original detail title|Fresh parameterized title|SQL|sqlite|no such table|SELECT" -or $failedPage.Headers["Cache-Control"] -ne "no-store") { throw "Failed loader exposed internals or served stale page data" }
+  if ($failedPage.Body -notmatch 'Forms safe failure' -or $failedPage.Body -notmatch 'Form application header' -or $failedPage.Body -match "Original detail title|Fresh parameterized title|SQL|sqlite|no such table|SELECT" -or $failedPage.Headers["Cache-Control"] -ne "no-store") { throw "Failed loader did not use the nested safe boundary" }
+  $failedHead = Invoke-AxRequest -Url "$baseUrl/forms/loaded" -Method HEAD -ExpectedStatus 500
+  if ($failedHead.Body -ne '' -or $failedHead.Headers['Content-Type'] -notmatch '^text/html') { throw "Nested error HEAD returned a body or lost HTML content type" }
   $failedRerender = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fforms%2Floaded&name=ValidateForm" -Body "email=invalid" -Headers @{ Accept = "text/html" } -ExpectedStatus 422
   if ($failedRerender.Body -notmatch "Return to the form" -or $failedRerender.Body -match "Original detail title|SQL|sqlite|no such table|SELECT" -or $failedRerender.Headers["Cache-Control"] -ne "no-store") { throw "Failed form loader did not use a safe validation fallback" }
 

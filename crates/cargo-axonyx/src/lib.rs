@@ -1310,6 +1310,7 @@ struct CompiledPageRenderer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompiledBoundaryRenderer {
     name: String,
+    route_prefix: String,
     document_json: String,
     import_sources: Vec<(String, String)>,
 }
@@ -13258,7 +13259,7 @@ fn build_compiled_production_binary(
     let action_body_limits = configured_action_body_limits(root).map_err(anyhow::Error::msg)?;
     let data_bindings = compiled_data_bindings(root)?;
     let page_renderers = compiled_page_renderers(root, &data_bindings)?;
-    let boundary_renderers = compiled_root_boundary_renderers(root)?;
+    let boundary_renderers = compiled_boundary_renderers(root)?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let database_required = project_uses_database_runtime(root)?;
     let runtime_config = AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?;
@@ -13600,106 +13601,164 @@ fn compiled_page_renderers(
     Ok(renderers)
 }
 
-fn compiled_root_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRenderer>> {
+fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRenderer>> {
     let app_root = root.join("app");
+    if !app_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut directories = Vec::new();
+    collect_boundary_directories(&app_root, &mut directories)?;
     let mut renderers = Vec::new();
-    for name in ["not-found", "error"] {
-        let Some(page_path) = frontend_source_path(&app_root, name)? else {
-            continue;
-        };
-        let source = fs::read_to_string(&page_path)
-            .with_context(|| format!("failed to read boundary '{}'", page_path.display()))?;
-        let document = parse_ax_auto(&source).map_err(anyhow::Error::msg)?;
-        if document
-            .page
-            .body
-            .iter()
-            .any(|statement| matches!(statement, AxStatement::Data(_)))
-        {
-            bail!("compiled {name} boundary cannot load route data");
-        }
-
-        let layout_path = frontend_source_path(&app_root, "layout")?;
-        let layout_source = layout_path
-            .as_ref()
-            .map(|path| fs::read_to_string(path))
-            .transpose()?;
-        if let Some(layout) = &layout_source {
-            let parsed = parse_ax_auto(layout).map_err(anyhow::Error::msg)?;
-            if parsed
+    for boundary_dir in directories {
+        for name in ["not-found", "error"] {
+            let Some(page_path) = frontend_source_path(&boundary_dir, name)? else {
+                continue;
+            };
+            let route = app_route_manifest_item(root, &app_root, &boundary_dir, &page_path)?;
+            let source = fs::read_to_string(&page_path)
+                .with_context(|| format!("failed to read boundary '{}'", page_path.display()))?;
+            let document = parse_ax_auto(&source).map_err(anyhow::Error::msg)?;
+            if document
                 .page
                 .body
                 .iter()
                 .any(|statement| matches!(statement, AxStatement::Data(_)))
             {
-                bail!("compiled {name} boundary layout cannot load route data");
+                bail!("compiled {name} boundary cannot load route data");
             }
-        }
-        let layout_refs = layout_source.iter().map(String::as_str).collect::<Vec<_>>();
-        let mut full_document =
-            axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
-        let uses_ui = layout_refs
-            .iter()
-            .any(|layout| source_uses_package(layout, "@axonyx/ui"))
-            || source_uses_package(&source, "@axonyx/ui");
-        if uses_ui && resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME).is_some() {
-            let (css, js) = axonyx_ui_asset_hrefs(root);
-            full_document.head.links.push(
-                axonyx_core::ax_ast_prelude::AxHeadTag::default()
-                    .attr("rel", "stylesheet")
-                    .attr("href", css),
-            );
-            full_document.head.scripts.push(
-                axonyx_core::ax_ast_prelude::AxHeadTag::default()
-                    .attr("src", js)
-                    .attr("defer", "true"),
-            );
-        }
-        let mut visited = std::collections::BTreeSet::new();
-        let mut scripts = std::collections::BTreeSet::new();
-        if let Some(layout_path) = &layout_path {
-            collect_component_client_script_hrefs(root, layout_path, &mut visited, &mut scripts)?;
-        }
-        collect_component_client_script_hrefs(root, &page_path, &mut visited, &mut scripts)?;
-        for script in scripts {
-            full_document.head.scripts.push(
-                axonyx_core::ax_ast_prelude::AxHeadTag::default()
-                    .attr("src", script)
-                    .attr("defer", "true"),
-            );
-        }
-        if let Some(theme) = axonyx_config_table(root, "theme") {
-            if full_document.head.theme.is_none() {
-                if let Some(active) = theme
-                    .get("active")
-                    .and_then(toml::Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
+
+            let layout_paths = route
+                .layouts
+                .iter()
+                .map(|path| root.join(path))
+                .collect::<Vec<_>>();
+            let layout_sources = layout_paths
+                .iter()
+                .map(fs::read_to_string)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            for layout in &layout_sources {
+                let parsed = parse_ax_auto(layout).map_err(anyhow::Error::msg)?;
+                if parsed
+                    .page
+                    .body
+                    .iter()
+                    .any(|statement| matches!(statement, AxStatement::Data(_)))
                 {
-                    full_document.head.theme = Some(active.trim().into());
+                    bail!("compiled {name} boundary layout cannot load route data");
                 }
             }
-            if let Some(css) = theme
-                .get("stylesheet")
-                .and_then(toml::Value::as_str)
-                .filter(|value| !value.trim().is_empty())
-            {
+            let layout_refs = layout_sources
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let mut full_document =
+                axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+            let uses_ui = layout_refs
+                .iter()
+                .any(|layout| source_uses_package(layout, "@axonyx/ui"))
+                || source_uses_package(&source, "@axonyx/ui");
+            if uses_ui && resolve_package_asset_root(root, AXONYX_UI_PACKAGE_NAME).is_some() {
+                let (css, js) = axonyx_ui_asset_hrefs(root);
                 full_document.head.links.push(
                     axonyx_core::ax_ast_prelude::AxHeadTag::default()
                         .attr("rel", "stylesheet")
-                        .attr("href", css.trim()),
+                        .attr("href", css),
+                );
+                full_document.head.scripts.push(
+                    axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                        .attr("src", js)
+                        .attr("defer", "true"),
                 );
             }
+            let mut visited = std::collections::BTreeSet::new();
+            let mut scripts = std::collections::BTreeSet::new();
+            for layout_path in &layout_paths {
+                collect_component_client_script_hrefs(
+                    root,
+                    layout_path,
+                    &mut visited,
+                    &mut scripts,
+                )?;
+            }
+            collect_component_client_script_hrefs(root, &page_path, &mut visited, &mut scripts)?;
+            for script in scripts {
+                full_document.head.scripts.push(
+                    axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                        .attr("src", script)
+                        .attr("defer", "true"),
+                );
+            }
+            if let Some(theme) = axonyx_config_table(root, "theme") {
+                if full_document.head.theme.is_none() {
+                    if let Some(active) = theme
+                        .get("active")
+                        .and_then(toml::Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        full_document.head.theme = Some(active.trim().into());
+                    }
+                }
+                if let Some(css) = theme
+                    .get("stylesheet")
+                    .and_then(toml::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    full_document.head.links.push(
+                        axonyx_core::ax_ast_prelude::AxHeadTag::default()
+                            .attr("rel", "stylesheet")
+                            .attr("href", css.trim()),
+                    );
+                }
+            }
+            let mut import_sources = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            collect_compiled_import_sources(root, &full_document, &mut seen, &mut import_sources)?;
+            renderers.push(CompiledBoundaryRenderer {
+                name: name.to_string(),
+                route_prefix: route.route,
+                document_json: serde_json::to_string(&full_document)?,
+                import_sources,
+            });
         }
-        let mut import_sources = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        collect_compiled_import_sources(root, &full_document, &mut seen, &mut import_sources)?;
-        renderers.push(CompiledBoundaryRenderer {
-            name: name.to_string(),
-            document_json: serde_json::to_string(&full_document)?,
-            import_sources,
-        });
     }
+    renderers.sort_by(|left, right| {
+        compare_boundary_prefixes(&left.route_prefix, &right.route_prefix)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     Ok(renderers)
+}
+
+fn compare_boundary_prefixes(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = left
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let right_parts = right
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let specificity = left_parts
+        .iter()
+        .zip(&right_parts)
+        .map(|(left, right)| (!right.starts_with(':')).cmp(&(!left.starts_with(':'))))
+        .find(|ordering| !ordering.is_eq())
+        .unwrap_or(std::cmp::Ordering::Equal);
+    right_parts
+        .len()
+        .cmp(&left_parts.len())
+        .then(specificity)
+        .then_with(|| left.cmp(right))
+}
+
+fn collect_boundary_directories(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    out.push(dir.to_path_buf());
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            collect_boundary_directories(&entry.path(), out)?;
+        }
+    }
+    Ok(())
 }
 
 fn collect_compiled_import_sources(
@@ -14017,8 +14076,9 @@ impl AxFileStorage for ApplicationFileStorage {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "    if name == {name:?} {{ return Some(({document:?}, &[{imports}])); }}\n",
+                "    if name == {name:?} && boundary_pattern_matches({pattern:?}, path) {{ return Some(({document:?}, &[{imports}])); }}\n",
                 name = renderer.name,
+                pattern = renderer.route_prefix,
                 document = renderer.document_json
             )
         })
@@ -14168,27 +14228,27 @@ fn handle_request_inner(
         Ok(None) => {{}},
         Err(error) => {{
             let mut response = if error.public_response_status() == Some(404) {{
-            compiled_boundary_response("not-found", 404)
+            compiled_boundary_response("not-found", path, 404)
         }} else if let Some(status) = error.access_denial_status() {{
             AxHttpResponse::text(status, "Access denied.").with_no_store()
         }} else {{
-            compiled_boundary_response("error", 500)
+            compiled_boundary_response("error", path, 500)
             }};
             if request.method.eq_ignore_ascii_case("HEAD") {{ response.body = AxBody::fixed(Vec::new()); }}
             return secure(response);
         }},
     }}
     let mut response = static_response(dist, &request.target)
-        .unwrap_or_else(|| compiled_boundary_response("not-found", 404));
+        .unwrap_or_else(|| compiled_boundary_response("not-found", path, 404));
     if request.method.eq_ignore_ascii_case("HEAD") {{
         response.body = AxBody::fixed(Vec::new());
     }}
     secure(response)
 }}
 
-fn compiled_boundary_response(name: &str, status: u16) -> AxHttpResponse {{
+fn compiled_boundary_response(name: &str, path: &str, status: u16) -> AxHttpResponse {{
     let fallback = || AxHttpResponse::text(status, if status == 404 {{ "Not Found" }} else {{ "Page could not be rendered." }}).with_no_store();
-    let Some((document, imports)) = compiled_boundary_document(name) else {{ return fallback(); }};
+    let Some((document, imports)) = compiled_boundary_document(name, path) else {{ return fallback(); }};
     match axonyx_runtime::render_compiled_page_document(
         document,
         imports,
@@ -14554,8 +14614,17 @@ fn compiled_page_renderer(path: &str) -> Option<(&'static str, &'static str, &'s
 {page_renderer_arms}    None
 }}
 
-fn compiled_boundary_document(name: &str) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {{
+fn compiled_boundary_document(name: &str, path: &str) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {{
 {boundary_renderer_arms}    None
+}}
+
+fn boundary_pattern_matches(pattern: &str, path: &str) -> bool {{
+    let expected = pattern.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let actual = path.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    expected.len() <= actual.len()
+        && expected.into_iter().zip(actual).all(|(part, value)| {{
+            part.strip_prefix(':').is_some_and(|name| !name.is_empty()) || part == value
+        }})
 }}
 
 pub fn compiled_page_document_renderer(path: &str) -> Option<(&'static str, &'static str, &'static [(&'static str, &'static str)])> {{
@@ -21043,15 +21112,45 @@ fn resolve_boundary_route(
     let app_root = root.join("app");
     let normalized = normalize_request_path(request_path).unwrap_or_else(|_| "/".to_string());
     let segments = path_segments(&normalized);
-    let mut candidate_dirs = Vec::new();
-    let mut current = app_root.clone();
-    candidate_dirs.push(current.clone());
+    let mut candidate_dirs = vec![app_root.clone()];
+    let mut frontier = vec![app_root.clone()];
     for segment in &segments {
-        current = current.join(segment);
-        candidate_dirs.push(current.clone());
+        let mut next = Vec::new();
+        for current in frontier {
+            let exact = current.join(segment);
+            if exact.is_dir() {
+                next.push(exact);
+            }
+            if let Ok(entries) = fs::read_dir(&current) {
+                for entry in entries.flatten() {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        && entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| parse_dynamic_app_segment(name).is_some())
+                    {
+                        next.push(entry.path());
+                    }
+                }
+            }
+        }
+        candidate_dirs.extend(next.iter().cloned());
+        frontier = next;
     }
+    candidate_dirs.sort_by(|left, right| {
+        let pattern = |dir: &Path| {
+            let segments = dir
+                .strip_prefix(&app_root)
+                .unwrap_or(dir)
+                .components()
+                .filter_map(|part| part.as_os_str().to_str())
+                .collect::<Vec<_>>();
+            route_pattern_from_segments(&segments)
+        };
+        compare_boundary_prefixes(&pattern(left), &pattern(right))
+    });
 
-    for boundary_dir in candidate_dirs.into_iter().rev() {
+    for boundary_dir in candidate_dirs {
         let stem = file_name
             .strip_suffix(".asx")
             .or_else(|| file_name.strip_suffix(".ax"))
@@ -27687,7 +27786,7 @@ action ValidPost
             "page Failure() {\n  return ASX {\n    <h1>Safe error page</h1>\n  }\n}\n",
         )
         .unwrap();
-        let boundaries = compiled_root_boundary_renderers(&root).unwrap();
+        let boundaries = compiled_boundary_renderers(&root).unwrap();
         assert_eq!(boundaries.len(), 2);
         for (name, expected) in [
             ("not-found", "Custom missing page"),
@@ -27718,7 +27817,64 @@ action ValidPost
             "page Failure() {\n  data secret = loadSecret()\n  return ASX {\n    <p>unsafe</p>\n  }\n}\n",
         )
         .unwrap();
-        assert!(compiled_root_boundary_renderers(&root).is_err());
+        assert!(compiled_boundary_renderers(&root).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compiled_nested_boundaries_include_ancestor_layouts_and_reject_data() {
+        let root = make_temp_dir("compiled-nested-boundaries");
+        fs::create_dir_all(root.join("app/docs/[slug]")).unwrap();
+        fs::write(
+            root.join("app/layout.asx"),
+            "page RootShell() {\n  return ASX {\n    <main>Root shell<Slot /></main>\n  }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/docs/layout.asx"),
+            "page DocsShell() {\n  return ASX {\n    <section>Docs shell<Slot /></section>\n  }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/not-found.asx"),
+            "page RootMissing() {\n  return ASX {\n    <h1>Root missing</h1>\n  }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/docs/not-found.asx"),
+            "page DocsMissing() {\n  return ASX {\n    <h1>Docs missing</h1>\n  }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/docs/[slug]/not-found.asx"),
+            "page ArticleMissing() {\n  return ASX {\n    <h1>Article missing</h1>\n  }\n}\n",
+        )
+        .unwrap();
+
+        let boundaries = compiled_boundary_renderers(&root).unwrap();
+        assert_eq!(boundaries.len(), 3);
+        assert_eq!(boundaries[0].route_prefix, "/docs/:slug");
+        assert_eq!(boundaries[1].route_prefix, "/docs");
+        assert_eq!(boundaries[2].route_prefix, "/");
+        let html = axonyx_runtime::render_compiled_page_document(
+            &boundaries[0].document_json,
+            &[],
+            "/docs/article",
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+        assert!(html.contains("Root shell"));
+        assert!(html.contains("Docs shell"));
+        assert!(html.contains("Article missing"));
+
+        fs::write(
+            root.join("app/docs/layout.asx"),
+            "page UnsafeShell() {\n  data secret = loadSecret()\n  return ASX {\n    <Slot />\n  }\n}\n",
+        )
+        .unwrap();
+        assert!(compiled_boundary_renderers(&root).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -31323,6 +31479,31 @@ action RefreshSession() {
         assert!(!raw.contains("Root not found"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn nested_boundary_resolution_prefers_static_over_dynamic_paths() {
+        let root = make_temp_dir("nested-boundary-precedence");
+        fs::create_dir_all(root.join("app/absent/[id]")).unwrap();
+        fs::create_dir_all(root.join("app/absent/fixed")).unwrap();
+        for path in [
+            "app/not-found.asx",
+            "app/absent/not-found.asx",
+            "app/absent/[id]/not-found.asx",
+            "app/absent/fixed/not-found.asx",
+        ] {
+            fs::write(root.join(path), "page Missing()\n<Copy>Missing</Copy>\n").unwrap();
+        }
+        for (url, expected) in [
+            ("/unknown", "app/not-found.asx"),
+            ("/absent", "app/absent/not-found.asx"),
+            ("/absent/other/child", "app/absent/[id]/not-found.asx"),
+            ("/absent/fixed/child", "app/absent/fixed/not-found.asx"),
+        ] {
+            let route = resolve_boundary_route(&root, "not-found.asx", url).unwrap();
+            assert_eq!(route.page_path, root.join(expected), "{url}");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
