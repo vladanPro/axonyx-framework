@@ -7,6 +7,20 @@ on:
   pull_request:
 
 jobs:
+  registry-beta:
+    name: Registry-only Beta 1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout smoke script
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Smoke published tools outside the checkout
+        shell: pwsh
+        run: ./scripts/smoke-registry-beta.ps1
+
   msrv:
     name: Rust 1.82 MSRV
     runs-on: ubuntu-latest
