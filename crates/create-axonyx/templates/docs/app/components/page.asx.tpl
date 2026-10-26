@@ -1,6 +1,7 @@
 import { Alert } from "@axonyx/ui/foundry/Alert.asx"
 import { Badge } from "@axonyx/ui/foundry/Badge.asx"
 import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { ButtonGroup } from "@axonyx/ui/foundry/ButtonGroup.asx"
 import { Card } from "@axonyx/ui/foundry/Card.asx"
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
@@ -22,7 +23,7 @@ page ComponentsShowcase() {
           A small set of practical UI pieces that prove the docs template can look
           like a real site without becoming a React app.
         </Copy>
-        <Button slot="actions" href="/reference" variant="ghost">Reference</Button>
+        <LinkButton slot="actions" href="/reference" variant="ghost">Reference</LinkButton>
       </PageHeader>
 
       <ContentGrid cols={2} gap="lg">

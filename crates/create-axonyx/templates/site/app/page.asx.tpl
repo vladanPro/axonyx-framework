@@ -1,5 +1,5 @@
 import { Badge } from "@axonyx/ui/foundry/Badge.asx"
-import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { ButtonGroup } from "@axonyx/ui/foundry/ButtonGroup.asx"
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
 import { Copy } from "@axonyx/ui/foundry/Copy.asx"
@@ -24,8 +24,8 @@ page Home() {
             browser JavaScript.
           </Copy>
           <ButtonGroup>
-            <Button href="/contact" variant="primary">Start a conversation</Button>
-            <Button href="/about" variant="ghost">Meet the team</Button>
+            <LinkButton href="/contact" variant="primary">Start a conversation</LinkButton>
+            <LinkButton href="/about" variant="ghost">Meet the team</LinkButton>
           </ButtonGroup>
         </HeroCard>
 
@@ -66,7 +66,7 @@ page Home() {
             Change the brand mark, choose bronze, silver, or gold, and make the
             first version yours without rebuilding a frontend stack.
           </Copy>
-          <Button href="/contact" variant="primary">Make the first move</Button>
+          <LinkButton href="/contact" variant="primary">Make the first move</LinkButton>
         </SectionCard>
 
         <ContentGrid cols={3} gap="lg">

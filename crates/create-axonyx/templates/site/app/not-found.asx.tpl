@@ -1,4 +1,4 @@
-import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
 
 page NotFound() {
@@ -17,8 +17,8 @@ page NotFound() {
         <Copy>
           Add a new app folder with page.asx, or head back to the homepage.
         </Copy>
-        <Button slot="actions" href="/" variant="primary">Back to home</Button>
-        <Button slot="actions" href="/contact" variant="ghost">Contact us</Button>
+        <LinkButton slot="actions" href="/" variant="primary">Back to home</LinkButton>
+        <LinkButton slot="actions" href="/contact" variant="ghost">Contact us</LinkButton>
       </PageHeader>
     </Container>
   }
