@@ -41,6 +41,17 @@ function Invoke-Step {
   }
 }
 
+function Assert-Link {
+  param([string] $Path, [string] $Href, [string] $Label)
+
+  $html = Get-Content -LiteralPath $Path -Raw
+  $pattern = '(?s)<a\b[^>]*\bhref="' + [regex]::Escape($Href) + '"[^>]*>\s*' +
+    [regex]::Escape($Label) + '\s*</a>'
+  if ($html -notmatch $pattern) {
+    throw "Expected navigation link '$Label' to '$Href' in $Path"
+  }
+}
+
 try {
   try {
     Push-Location $WorkDir
@@ -77,6 +88,9 @@ try {
     if (!(Test-Path -LiteralPath $about) -or !(Test-Path -LiteralPath $contact)) {
       throw "Expected site about/contact route output"
     }
+    Assert-Link $index "/contact" "Start a conversation"
+    Assert-Link $index "/about" "Meet the team"
+    Assert-Link $contact "mailto:hello@example.com" "hello@example.com"
   }
 
   if ($Template -eq "blog") {
@@ -92,6 +106,7 @@ try {
     if (!$articleHtml.Contains("Hello from the Axonyx workbench")) {
       throw "Expected prerendered blog article content"
     }
+    Assert-Link $article "/" "Back to all notes"
   }
 
   if ($Template -eq "docs") {
@@ -100,6 +115,8 @@ try {
     if (!(Test-Path -LiteralPath $gettingStarted) -or !(Test-Path -LiteralPath $reference)) {
       throw "Expected docs route output"
     }
+    Assert-Link $index "/getting-started" "Get started"
+    Assert-Link $index "/components" "View components"
   }
 
   Write-Host "Axonyx core loop smoke passed."

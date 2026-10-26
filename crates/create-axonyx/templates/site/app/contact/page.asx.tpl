@@ -1,4 +1,4 @@
-import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { Copy } from "@axonyx/ui/foundry/Copy.asx"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
 import { SectionCard } from "@axonyx/ui/foundry/SectionCard.asx"
@@ -17,7 +17,7 @@ page Contact() {
         </PageHeader>
         <SectionCard title="Start with an email">
           <Copy>Replace the address below with your real inbox before publishing.</Copy>
-          <Button href="mailto:hello@example.com" variant="primary">hello@example.com</Button>
+          <LinkButton href="mailto:hello@example.com" variant="primary">hello@example.com</LinkButton>
         </SectionCard>
         <SectionCard title="Why no form yet?">
           <Copy>

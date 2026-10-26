@@ -1,4 +1,4 @@
-import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
 
 page NotFound() {
@@ -17,8 +17,8 @@ page NotFound() {
         <Copy>
           Create a new app/**/page.asx file or return to the docs index.
         </Copy>
-        <Button slot="actions" href="/" variant="primary">Docs home</Button>
-        <Button slot="actions" href="/getting-started" variant="ghost">Getting started</Button>
+        <LinkButton slot="actions" href="/" variant="primary">Docs home</LinkButton>
+        <LinkButton slot="actions" href="/getting-started" variant="ghost">Getting started</LinkButton>
       </PageHeader>
     </Container>
   }

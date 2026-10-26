@@ -1,5 +1,5 @@
 import { Badge } from "@axonyx/ui/foundry/Badge.asx"
-import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { Card } from "@axonyx/ui/foundry/Card.asx"
 import { Copy } from "@axonyx/ui/foundry/Copy.asx"
 import { Stack } from "@axonyx/ui/foundry/Stack.asx"
@@ -10,7 +10,7 @@ page BlogPost() {
   return ASX {
     <Container max="md">
       <Stack gap="xl">
-        <Button href="/" variant="ghost" size="sm">Back to all notes</Button>
+        <LinkButton href="/" variant="ghost" size="sm">Back to all notes</LinkButton>
         <If when={posts}>
           <Each items={posts} as="post">
             <article class="ax-article">

@@ -1,7 +1,7 @@
 use "@axonyx/ui"
 import { AppShell } from "@axonyx/ui/foundry/AppShell.asx"
 import { Badge } from "@axonyx/ui/foundry/Badge.asx"
-import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { Navbar } from "@axonyx/ui/foundry/Navbar.asx"
 import { SiteShell } from "@axonyx/ui/foundry/SiteShell.asx"
 import { ThemeSwitcher } from "@axonyx/ui/foundry/ThemeSwitcher.asx"
@@ -72,7 +72,7 @@ page DocsLayout() {
               </div>
             </section>
 
-            <Button href="/components" variant="primary" size="sm">Explore UI</Button>
+            <LinkButton href="/components" variant="primary" size="sm">Explore UI</LinkButton>
           </div>
         </aside>
 
