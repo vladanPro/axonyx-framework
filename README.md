@@ -50,7 +50,7 @@ axonyx-ui = "0.0.86"
 Install the public CLI tools:
 
 ```bash
-cargo install create-axonyx --version 0.8.1 --locked
+cargo install create-axonyx --version 0.8.2 --locked
 cargo install cargo-axonyx --version 0.8.3 --locked
 ```
 

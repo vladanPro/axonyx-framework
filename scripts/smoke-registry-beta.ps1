@@ -22,13 +22,24 @@ function Invoke-CargoStep {
   if ($LASTEXITCODE -ne 0) { throw "$Label failed with exit code $LASTEXITCODE" }
 }
 
+function Assert-Link {
+  param([string] $Path, [string] $Href, [string] $Label)
+
+  $html = Get-Content -LiteralPath $Path -Raw
+  $pattern = '(?s)<a\b[^>]*\bhref="' + [regex]::Escape($Href) + '"[^>]*>\s*' +
+    [regex]::Escape($Label) + '\s*</a>'
+  if ($html -notmatch $pattern) {
+    throw "Expected navigation link '$Label' to '$Href' in $Path"
+  }
+}
+
 try {
   New-Item -ItemType Directory -Path $toolRoot, $appRoot -Force | Out-Null
   $env:PATH = (Join-Path $toolRoot "bin") + [IO.Path]::PathSeparator + $originalPath
   $env:CARGO_INSTALL_ROOT = $toolRoot
 
   Invoke-CargoStep "install published create-axonyx" {
-    cargo install create-axonyx --version 0.8.1 --locked --root $toolRoot
+    cargo install create-axonyx --version 0.8.2 --locked --root $toolRoot
   }
   Invoke-CargoStep "install published cargo-axonyx" {
     cargo install cargo-axonyx --version 0.8.3 --locked --root $toolRoot
@@ -39,7 +50,7 @@ try {
     Push-Location $appRoot
     try {
       Invoke-CargoStep "scaffold $template" {
-        create-axonyx $name --yes --template $template --runtime-source registry
+        create-axonyx $name --yes --template $template
       }
     } finally { Pop-Location }
 
@@ -61,11 +72,23 @@ try {
     if (!(Test-Path (Join-Path $project "dist/index.html"))) {
       throw "$template did not produce dist/index.html"
     }
+    $index = Join-Path $project "dist/index.html"
+    if ($template -eq "site") {
+      Assert-Link $index "/contact" "Start a conversation"
+      Assert-Link $index "/about" "Meet the team"
+    }
     if ($template -eq "blog" -and !(Test-Path (Join-Path $project "dist/blog/hello-axonyx/index.html"))) {
       throw "blog article was not prerendered"
     }
+    if ($template -eq "blog") {
+      Assert-Link (Join-Path $project "dist/blog/hello-axonyx/index.html") "/" "Back to all notes"
+    }
     if ($template -eq "docs" -and !(Test-Path (Join-Path $project "dist/getting-started/index.html"))) {
       throw "docs getting-started page was not generated"
+    }
+    if ($template -eq "docs") {
+      Assert-Link $index "/getting-started" "Get started"
+      Assert-Link $index "/components" "View components"
     }
   }
 
