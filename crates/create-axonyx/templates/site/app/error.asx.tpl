@@ -1,4 +1,4 @@
-import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
 
 page Error() {
@@ -17,7 +17,7 @@ page Error() {
         <Copy>
           Run cargo ax check to inspect parser, import, loader, and route diagnostics.
         </Copy>
-        <Button slot="actions" href="/" variant="primary">Back to home</Button>
+        <LinkButton slot="actions" href="/" variant="primary">Back to home</LinkButton>
       </PageHeader>
     </Container>
   }

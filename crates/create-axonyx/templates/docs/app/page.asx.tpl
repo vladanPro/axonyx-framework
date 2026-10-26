@@ -1,6 +1,6 @@
 import { Alert } from "@axonyx/ui/foundry/Alert.asx"
 import { Badge } from "@axonyx/ui/foundry/Badge.asx"
-import { Button } from "@axonyx/ui/foundry/Button.asx"
+import { LinkButton } from "@axonyx/ui/foundry/LinkButton.asx"
 import { Card } from "@axonyx/ui/foundry/Card.asx"
 import { ContentGrid } from "@axonyx/ui/foundry/ContentGrid.asx"
 import { PageHeader } from "@axonyx/ui/foundry/PageHeader.asx"
@@ -26,8 +26,8 @@ page DocsHome() {
           or any site that should not need a heavy client-side app just to explain
           itself.
         </Copy>
-        <Button slot="actions" href="/getting-started" variant="primary">Get started</Button>
-        <Button slot="actions" href="/components" variant="ghost">View components</Button>
+        <LinkButton slot="actions" href="/getting-started" variant="primary">Get started</LinkButton>
+        <LinkButton slot="actions" href="/components" variant="ghost">View components</LinkButton>
         <Badge slot="actions" tone="success">Low JS</Badge>
       </PageHeader>
 
@@ -55,14 +55,14 @@ page DocsHome() {
             Each section is a normal `app/**/page.asx` route, wrapped by the shared
             docs layout and sidebar.
           </Copy>
-          <Button href="/getting-started" variant="ghost" size="sm">Open guide</Button>
+          <LinkButton href="/getting-started" variant="ghost" size="sm">Open guide</LinkButton>
         </Card>
         <Card title="Foundry UI">
           <Copy>
             Buttons, cards, badges, alerts, lamps, and layout primitives are already
             wired through `use "@axonyx/ui"`.
           </Copy>
-          <Button href="/components" variant="primary" size="sm">Open showcase</Button>
+          <LinkButton href="/components" variant="primary" size="sm">Open showcase</LinkButton>
         </Card>
       </ContentGrid>
 
