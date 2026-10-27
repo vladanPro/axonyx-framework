@@ -14244,7 +14244,9 @@ fn handle_request_inner(
         }},
         Ok(None) => {{}},
         Err(error) => {{
-            let mut response = if error.public_response_status() == Some(404) {{
+            let mut response = if let axonyx_runtime::backend::AxRuntimeError::PageRedirect {{ location, status }} = &error {{
+            AxHttpResponse::redirect_with_status(*status, location.clone()).with_no_store()
+        }} else if error.public_response_status() == Some(404) {{
             compiled_boundary_response("not-found", path, 404)
         }} else if let Some(status) = error.access_denial_status() {{
             AxHttpResponse::text(status, "Access denied.").with_no_store()
@@ -21780,6 +21782,11 @@ fn render_error_response(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
+    if let Some(axonyx_runtime::PreviewError::PageRedirect { location, status }) =
+        error.downcast_ref::<axonyx_runtime::PreviewError>()
+    {
+        return Ok(AxHttpResponse::redirect_with_status(*status, location.clone()).with_no_store());
+    }
     if matches!(
         error.downcast_ref::<axonyx_runtime::PreviewError>(),
         Some(axonyx_runtime::PreviewError::NotFound)
@@ -31439,6 +31446,27 @@ action RefreshSession() {
         let body = String::from_utf8(response.body.into_bytes()).unwrap();
         assert!(body.contains("Missing resource"));
         assert!(!body.contains("Internal failure"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn page_query_redirect_skips_the_error_boundary() {
+        let root = make_temp_dir("page-query-redirect");
+        let state = test_dev_state(&root);
+        let response = render_error_response(
+            &state,
+            "/admin",
+            &anyhow::Error::new(axonyx_runtime::PreviewError::PageRedirect {
+                location: "/login".into(),
+                status: 302,
+            }),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(response.status, 302);
+        assert_eq!(response.header_value("Location"), Some("/login"));
+        assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
         fs::remove_dir_all(root).unwrap();
     }
 
