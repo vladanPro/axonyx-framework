@@ -13498,7 +13498,7 @@ fn compiled_page_renderers(
                     if matches!(query.source, axonyx_core::ax_backend_lowering_prelude::AxQuerySourcePlan::ContentCollection { .. })));
             }
             if uses_content {
-                if route_requires_session_render(root, &resolved)? {
+                if route_requires_runtime_render(root, &resolved)? {
                     bail!(
                         "session-bound content route '{}' cannot use static fallback",
                         route.route
@@ -14244,7 +14244,9 @@ fn handle_request_inner(
         }},
         Ok(None) => {{}},
         Err(error) => {{
-            let mut response = if error.public_response_status() == Some(404) {{
+            let mut response = if let axonyx_runtime::backend::AxRuntimeError::PageRedirect {{ location, status }} = &error {{
+            AxHttpResponse::redirect_with_status(*status, location.clone()).with_no_store()
+        }} else if error.public_response_status() == Some(404) {{
             compiled_boundary_response("not-found", path, 404)
         }} else if let Some(status) = error.access_denial_status() {{
             AxHttpResponse::text(status, "Access denied.").with_no_store()
@@ -14833,12 +14835,14 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
     }
 }
 
-fn route_requires_session_render(root: &Path, route: &ResolvedRoute) -> Result<bool> {
+fn route_requires_runtime_render(root: &Path, route: &ResolvedRoute) -> Result<bool> {
     for source in collect_layout_and_page_loader_sources(root, route)? {
         let document = parse_backend_ax(&source).map_err(anyhow::Error::msg)?;
         let plan = lower_backend_document(&document).map_err(anyhow::Error::msg)?;
-        if axonyx_core::ax_backend_lowering_prelude::ax_steps_use_auth_subject(
-            plan.globals.iter().chain(
+        let steps = plan
+            .globals
+            .iter()
+            .chain(
                 plan.handlers
                     .iter()
                     .filter(|handler| {
@@ -14848,8 +14852,19 @@ fn route_requires_session_render(root: &Path, route: &ResolvedRoute) -> Result<b
                         )
                     })
                     .flat_map(|handler| handler.steps.iter()),
-            ),
-        ) {
+            )
+            .collect::<Vec<_>>();
+        if axonyx_core::ax_backend_lowering_prelude::ax_steps_use_auth_subject(
+            steps.iter().copied(),
+        ) || steps.iter().any(|step| {
+            matches!(
+                step,
+                AxStepPlan::Require {
+                    fallback: Some(AxReturnPlan::Redirect { .. }),
+                    ..
+                }
+            )
+        }) {
             return Ok(true);
         }
     }
@@ -14910,7 +14925,7 @@ fn build_static_site_from_app_root(
     for route in &static_routes {
         let resolved = resolve_route(root, &route.route)?
             .ok_or_else(|| anyhow::anyhow!("failed to resolve route '{}'", route.route))?;
-        if route_requires_session_render(root, &resolved)? {
+        if route_requires_runtime_render(root, &resolved)? {
             let stale = static_route_output_path(&output_dir, &route.route)?;
             if stale.is_file() {
                 fs::remove_file(&stale).with_context(|| {
@@ -14921,7 +14936,7 @@ fn build_static_site_from_app_root(
                 })?;
             }
             eprintln!(
-                "Server-rendered session route: {} (no static HTML)",
+                "Server-rendered runtime route: {} (no static HTML)",
                 route.route
             );
             continue;
@@ -15018,7 +15033,7 @@ fn build_prerendered_routes(
             let resolved = resolve_route(root, &concrete_route)?.ok_or_else(|| {
                 anyhow::anyhow!("failed to resolve prerender route '{}'", concrete_route)
             })?;
-            if route_requires_session_render(root, &resolved)? {
+            if route_requires_runtime_render(root, &resolved)? {
                 bail!(
                     "cannot prerender session-bound route '{}'; use compiled server rendering",
                     concrete_route
@@ -21780,6 +21795,11 @@ fn render_error_response(
     inject_dev_client_script: bool,
     stream_response: bool,
 ) -> Result<AxHttpResponse> {
+    if let Some(axonyx_runtime::PreviewError::PageRedirect { location, status }) =
+        error.downcast_ref::<axonyx_runtime::PreviewError>()
+    {
+        return Ok(AxHttpResponse::redirect_with_status(*status, location.clone()).with_no_store());
+    }
     if matches!(
         error.downcast_ref::<axonyx_runtime::PreviewError>(),
         Some(axonyx_runtime::PreviewError::NotFound)
@@ -26337,7 +26357,7 @@ page Home
         )
         .unwrap();
         let child = resolve_route(&root, "/private/child").unwrap().unwrap();
-        assert!(route_requires_session_render(&root, &child).unwrap());
+        assert!(route_requires_runtime_render(&root, &child).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -31439,6 +31459,27 @@ action RefreshSession() {
         let body = String::from_utf8(response.body.into_bytes()).unwrap();
         assert!(body.contains("Missing resource"));
         assert!(!body.contains("Internal failure"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn page_query_redirect_skips_the_error_boundary() {
+        let root = make_temp_dir("page-query-redirect");
+        let state = test_dev_state(&root);
+        let response = render_error_response(
+            &state,
+            "/admin",
+            &anyhow::Error::new(axonyx_runtime::PreviewError::PageRedirect {
+                location: "/login".into(),
+                status: 302,
+            }),
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(response.status, 302);
+        assert_eq!(response.header_value("Location"), Some("/login"));
+        assert_eq!(response.header_value("Cache-Control"), Some("no-store"));
         fs::remove_dir_all(root).unwrap();
     }
 

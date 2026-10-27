@@ -248,6 +248,33 @@ page Login() {
   }
 }
 '@)
+  New-Item -ItemType Directory -Path (Join-Path $appRoot "app/admin/redirect") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/admin/redirect/page.asx"), @'
+page AdminRedirect() {
+  data subject = loadAdminSubject()
+  return ASX { <p>Private administrator page</p> }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/admin/redirect/loader.ax"), @'
+query loadAdminSubject() {
+  require Auth.subject else redirect("/login")
+  return Auth.subject
+}
+'@)
+  New-Item -ItemType Directory -Path (Join-Path $appRoot "app/setup/claimed") -Force | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/setup/claimed/page.asx"), @'
+page ClaimedSetup() {
+  data ready = loadSetupState()
+  return ASX { <p>Unclaimed setup</p> }
+}
+'@)
+  [System.IO.File]::WriteAllText((Join-Path $appRoot "app/setup/claimed/loader.ax"), @'
+query loadSetupState() {
+  data installation = db.users.first()
+  require installation == null else redirect("/admin")
+  return true
+}
+'@)
   $actionSource = [System.IO.File]::ReadAllText($actionsPath) + @'
 
 action SetTheme(theme: string) {
@@ -626,6 +653,8 @@ route GET "/api/forbidden-loader" {
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- build --clean --compiled
     if ($LASTEXITCODE -ne 0) { throw "compiled build failed" }
     if (Test-Path (Join-Path $appRoot "dist/forms/private/index.html")) { throw "Session-bound page was emitted as public static HTML" }
+    if (Test-Path (Join-Path $appRoot "dist/admin/redirect/index.html")) { throw "Guarded admin page was emitted as public static HTML" }
+    if (Test-Path (Join-Path $appRoot "dist/setup/claimed/index.html")) { throw "Database-guarded setup page was emitted as public static HTML" }
     if (!(Test-Path (Join-Path $appRoot "dist/forms/index.html"))) { throw "Unrelated public form was incorrectly excluded from static build" }
   } finally {
     Pop-Location
@@ -818,6 +847,10 @@ route GET "/api/forbidden-loader" {
   }
   $failedSessions = & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);exists=db.execute("select 1 from sqlite_master where type = ? and name = ?", ("table", "ax_sessions")).fetchone();print(db.execute("select count(*) from ax_sessions").fetchone()[0] if exists else 0);db.close()' $dbPath
   if ($LASTEXITCODE -ne 0 -or [int] $failedSessions -ne 0) { throw "Failed login persisted a session" }
+  $anonymousAdmin = Invoke-AxRequest -Url "$baseUrl/admin/redirect" -Method GET -ExpectedStatus 302
+  if ($anonymousAdmin.Headers["Location"] -ne "/login" -or $anonymousAdmin.Headers["Cache-Control"] -ne "no-store") { throw "Anonymous admin query guard did not redirect safely" }
+  $claimedSetupAnonymous = Invoke-AxRequest -Url "$baseUrl/setup/claimed" -Method GET -ExpectedStatus 302
+  if ($claimedSetupAnonymous.Headers["Location"] -ne "/admin" -or $claimedSetupAnonymous.Headers["Cache-Control"] -ne "no-store") { throw "Claimed SQLite setup query guard did not redirect an anonymous reader" }
   $login = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers $anonymousHeaders
   $sessionCookieHeader = [string] $login.Headers["Set-Cookie"]
   if ($sessionCookieHeader -notmatch "HttpOnly" -or $sessionCookieHeader -notmatch "session=") {
@@ -827,6 +860,10 @@ route GET "/api/forbidden-loader" {
     throw "Compiled login leaked session data into the action response"
   }
   $sessionCookie = $sessionCookieHeader.Split(';')[0]
+  $claimedSetup = Invoke-AxRequest -Url "$baseUrl/setup/claimed" -Method GET -Headers @{ Cookie = $sessionCookie } -ExpectedStatus 302
+  if ($claimedSetup.Headers["Location"] -ne "/admin" -or $claimedSetup.Headers["Cache-Control"] -ne "no-store") { throw "Claimed setup query guard did not redirect safely" }
+  $signedAdmin = Invoke-AxRequest -Url "$baseUrl/admin/redirect" -Method GET -Headers @{ Cookie = $sessionCookie }
+  if ($signedAdmin.Body -notmatch "Private administrator page") { throw "Signed admin query guard rejected a valid session" }
   $tokenResponse = Invoke-AxRequest -Url "$baseUrl/__axonyx/csrf" -Method "GET" -Headers @{ Cookie = $sessionCookie; Origin = $baseUrl }
   $csrfToken = ($tokenResponse.Body | ConvertFrom-Json).token
   $privateAnonymous = Invoke-AxRequest -Url "$baseUrl/forms/private" -Method GET -ExpectedStatus 401
