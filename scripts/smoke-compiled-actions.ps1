@@ -270,7 +270,8 @@ page ClaimedSetup() {
 '@)
   [System.IO.File]::WriteAllText((Join-Path $appRoot "app/setup/claimed/loader.ax"), @'
 query loadSetupState() {
-  require Auth.subject == "" else redirect("/admin")
+  data installation = db.users.first()
+  require installation == null else redirect("/admin")
   return true
 }
 '@)
@@ -653,6 +654,7 @@ route GET "/api/forbidden-loader" {
     if ($LASTEXITCODE -ne 0) { throw "compiled build failed" }
     if (Test-Path (Join-Path $appRoot "dist/forms/private/index.html")) { throw "Session-bound page was emitted as public static HTML" }
     if (Test-Path (Join-Path $appRoot "dist/admin/redirect/index.html")) { throw "Guarded admin page was emitted as public static HTML" }
+    if (Test-Path (Join-Path $appRoot "dist/setup/claimed/index.html")) { throw "Database-guarded setup page was emitted as public static HTML" }
     if (!(Test-Path (Join-Path $appRoot "dist/forms/index.html"))) { throw "Unrelated public form was incorrectly excluded from static build" }
   } finally {
     Pop-Location
@@ -847,8 +849,8 @@ route GET "/api/forbidden-loader" {
   if ($LASTEXITCODE -ne 0 -or [int] $failedSessions -ne 0) { throw "Failed login persisted a session" }
   $anonymousAdmin = Invoke-AxRequest -Url "$baseUrl/admin/redirect" -Method GET -ExpectedStatus 302
   if ($anonymousAdmin.Headers["Location"] -ne "/login" -or $anonymousAdmin.Headers["Cache-Control"] -ne "no-store") { throw "Anonymous admin query guard did not redirect safely" }
-  $unclaimedSetup = Invoke-AxRequest -Url "$baseUrl/setup/claimed" -Method GET
-  if ($unclaimedSetup.Body -notmatch "Unclaimed setup") { throw "Anonymous setup page should remain accessible" }
+  $claimedSetupAnonymous = Invoke-AxRequest -Url "$baseUrl/setup/claimed" -Method GET -ExpectedStatus 302
+  if ($claimedSetupAnonymous.Headers["Location"] -ne "/admin" -or $claimedSetupAnonymous.Headers["Cache-Control"] -ne "no-store") { throw "Claimed SQLite setup query guard did not redirect an anonymous reader" }
   $login = Invoke-AxRequest -Url $loginUrl -Body "email=foundry%40example.com&password=compiled-smoke-password" -Headers $anonymousHeaders
   $sessionCookieHeader = [string] $login.Headers["Set-Cookie"]
   if ($sessionCookieHeader -notmatch "HttpOnly" -or $sessionCookieHeader -notmatch "session=") {
