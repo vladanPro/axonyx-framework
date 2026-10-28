@@ -39,10 +39,10 @@ try {
   $env:CARGO_INSTALL_ROOT = $toolRoot
 
   Invoke-CargoStep "install published create-axonyx" {
-    cargo install create-axonyx --version 0.8.2 --locked --root $toolRoot
+    cargo install create-axonyx --version 0.8.3 --locked --root $toolRoot
   }
   Invoke-CargoStep "install published cargo-axonyx" {
-    cargo install cargo-axonyx --version 0.8.3 --locked --root $toolRoot
+    cargo install cargo-axonyx --version 0.8.4 --locked --root $toolRoot
   }
 
   foreach ($template in @("site", "blog", "docs")) {
@@ -55,8 +55,24 @@ try {
     } finally { Pop-Location }
 
     $project = Join-Path $appRoot $name
+    if ($template -eq "site") {
+      $guarded = Join-Path $project "app/guarded"
+      New-Item -ItemType Directory -Path $guarded -Force | Out-Null
+      [IO.File]::WriteAllText((Join-Path $guarded "page.asx"), @'
+page Guarded() {
+  data allowed = loadGuardedPage()
+  return ASX { <p>Guarded page</p> }
+}
+'@)
+      [IO.File]::WriteAllText((Join-Path $guarded "loader.ax"), @'
+query loadGuardedPage() {
+  require false else redirect("/about")
+  return true
+}
+'@)
+    }
     $manifest = Get-Content (Join-Path $project "Cargo.toml") -Raw
-    if ($manifest -notmatch 'axonyx-runtime\s*=\s*\{\s*version\s*=\s*"0\.8\.1"' -or
+    if ($manifest -notmatch 'axonyx-runtime\s*=\s*\{\s*version\s*=\s*"0\.8\.2"' -or
         $manifest -notmatch 'axonyx-ui\s*=\s*"0\.0\.86"' -or
         $manifest -match '(?m)^\s*(\[patch\.|.*\b(path|git)\s*=)') {
       throw "$template scaffold did not use published runtime and UI crates"
@@ -67,6 +83,9 @@ try {
       Invoke-CargoStep "$template check" { cargo ax check }
       Invoke-CargoStep "$template strict doctor" { cargo ax doctor --deny-warnings }
       Invoke-CargoStep "$template build" { cargo ax build --clean }
+      if ($template -eq "site") {
+        Invoke-CargoStep "$template compiled build" { cargo ax build --clean --compiled }
+      }
     } finally { Pop-Location }
 
     if (!(Test-Path (Join-Path $project "dist/index.html"))) {
@@ -105,7 +124,7 @@ try {
   $start.WorkingDirectory = $siteRoot
   $start.UseShellExecute = $false
   $start.CreateNoWindow = $true
-  foreach ($arg in @("run", "start", "--host", "127.0.0.1", "--port", "$Port")) {
+  foreach ($arg in @("run", "start", "--compiled", "--host", "127.0.0.1", "--port", "$Port")) {
     [void] $start.ArgumentList.Add($arg)
   }
   $server = [Diagnostics.Process]::Start($start)
@@ -125,16 +144,32 @@ try {
     @{ Path = "/about"; Status = 200; Text = "About" },
     @{ Path = "/contact"; Status = 200; Text = "Contact" },
     @{ Path = "/brand-mark.svg"; Status = 200; Text = "<svg" },
-    @{ Path = "/_ax/pkg/axonyx-ui/index.css"; Status = 200; Text = ".ax-" },
+    @{ Path = "/_ax/pkg/axonyx-ui/index.css"; Status = 200; Text = "@import"; ContentType = "text/css" },
+    @{ Path = "/_ax/pkg/axonyx-ui/button.css"; Status = 200; Text = ".ax-button"; ContentType = "text/css" },
     @{ Path = "/beta-unknown-route"; Status = 404; Text = "" }
   )) {
     $response = Invoke-WebRequest ($base + $check.Path) -TimeoutSec 10 -SkipHttpErrorCheck
     if ($response.StatusCode -ne $check.Status -or
-        ($check.Text -and !$response.Content.Contains($check.Text))) {
+        ($check.Text -and !$response.Content.Contains($check.Text)) -or
+        ($check.ContentType -and !$response.Headers["Content-Type"].StartsWith($check.ContentType))) {
       throw "$($check.Path): expected HTTP $($check.Status) with '$($check.Text)', got $($response.StatusCode)"
     }
   }
-  Write-Host "Registry-only Beta 1 smoke passed (site, blog, docs, HTTP, UI assets, 404)."
+  $handler = [Net.Http.HttpClientHandler]::new()
+  $handler.AllowAutoRedirect = $false
+  $client = [Net.Http.HttpClient]::new($handler)
+  try {
+    $redirect = $client.GetAsync("$base/guarded").GetAwaiter().GetResult()
+    if ($redirect.StatusCode -ne [Net.HttpStatusCode]::Found -or
+        $redirect.Headers.Location.OriginalString -ne "/about" -or
+        !$redirect.Headers.CacheControl.NoStore) {
+      throw "Guarded page did not return a no-store HTTP 302 to /about"
+    }
+  } finally {
+    $client.Dispose()
+    $handler.Dispose()
+  }
+  Write-Host "Registry-only Beta 1 smoke passed (site, blog, docs, compiled HTTP, redirect, UI assets, 404)."
 } finally {
   if ($server -and !$server.HasExited) {
     $server.Kill($true)

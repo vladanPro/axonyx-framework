@@ -41,7 +41,7 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.8.1"
+axonyx-runtime = "0.8.2"
 axonyx-ui = "0.0.86"
 ```
 
@@ -50,8 +50,8 @@ axonyx-ui = "0.0.86"
 Install the public CLI tools:
 
 ```bash
-cargo install create-axonyx --version 0.8.2 --locked
-cargo install cargo-axonyx --version 0.8.3 --locked
+cargo install create-axonyx --version 0.8.3 --locked
+cargo install cargo-axonyx --version 0.8.4 --locked
 ```
 
 Install the published language server with `cargo install axonyx-lsp`, or use
@@ -155,8 +155,9 @@ cargo ax build --clean
 The published-tool acceptance check is `scripts/smoke-registry-beta.ps1`.
 It installs those exact CLI releases outside this checkout, scaffolds `site`,
 `blog`, and `docs` against registry crates, then checks builds and the `site`
-HTTP server. A new scaffold pins `axonyx-ui 0.0.86`; the separate axonyx.dev
-site currently uses `axonyx-ui 0.0.89`.
+compiled HTTP server, guarded query redirects, UI assets, and 404 responses.
+A new scaffold pins `axonyx-ui 0.0.86`; the separate axonyx.dev site currently
+uses `axonyx-ui 0.0.89` and has its own runtime/toolchain pins.
 
 For full-stack apps, create and run ordered database migrations through the
 same configured runtime adapter used by loaders, actions, and API routes:
