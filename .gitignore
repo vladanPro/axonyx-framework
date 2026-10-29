@@ -3,7 +3,8 @@
 .DS_Store
 .idea
 .vscode
-Cargo.lock
+**/Cargo.lock
+!/Cargo.lock
 .env
 node_modules
 dist

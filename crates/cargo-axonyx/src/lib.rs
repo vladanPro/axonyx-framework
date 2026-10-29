@@ -14904,6 +14904,7 @@ fn build_static_site_from_app_root(
     let melt_graph_written = write_melt_graph_to_dist(root, &output_dir)?;
 
     if static_routes.is_empty() && prerender_routes.is_empty() {
+        mark_output_dir(&output_dir)?;
         return Ok(StaticBuildStatus::NoPages {
             skipped_dynamic_count: dynamic_routes.len(),
             content_collection_count,
@@ -14972,6 +14973,8 @@ fn build_static_site_from_app_root(
             .count(),
     );
 
+    mark_output_dir(&output_dir)?;
+
     Ok(StaticBuildStatus::Generated {
         route_count: rendered_static_count,
         prerendered_count,
@@ -14981,6 +14984,16 @@ fn build_static_site_from_app_root(
         melt_graph_written,
         output_dir,
     })
+}
+
+const AXONYX_BUILD_OUTPUT_MARKER: &str = ".axonyx-build-output";
+
+fn mark_output_dir(output_dir: &Path) -> Result<()> {
+    fs::write(
+        output_dir.join(AXONYX_BUILD_OUTPUT_MARKER),
+        "axonyx build output\n",
+    )
+    .with_context(|| format!("failed to mark build output '{}'", output_dir.display()))
 }
 
 fn clean_output_dir(root: &Path, output_dir: &Path) -> Result<()> {
@@ -15000,6 +15013,45 @@ fn clean_output_dir(root: &Path, output_dir: &Path) -> Result<()> {
             "--clean refuses to remove '{}' because it is not a child of app root '{}'",
             output_dir.display(),
             root.display()
+        );
+    }
+
+    for source in [
+        "app",
+        "src",
+        "routes",
+        "jobs",
+        "content",
+        "public",
+        "migrations",
+        "components",
+        "themes",
+        "tests",
+        "vendor",
+        ".git",
+        ".github",
+    ] {
+        let source_dir = root.join(source);
+        let source_dir = if source_dir.exists() {
+            source_dir.canonicalize().with_context(|| {
+                format!("failed to resolve source dir '{}'", source_dir.display())
+            })?
+        } else {
+            source_dir
+        };
+        if output_dir.starts_with(&source_dir) || source_dir.starts_with(&output_dir) {
+            bail!(
+                "--clean refuses to remove '{}' because it overlaps project source '{}'",
+                output_dir.display(),
+                source_dir.display()
+            );
+        }
+    }
+
+    if output_dir != root.join("dist") && !output_dir.join(AXONYX_BUILD_OUTPUT_MARKER).is_file() {
+        bail!(
+            "--clean refuses to remove unmarked output '{}'; build there once without --clean first",
+            output_dir.display()
         );
     }
 
@@ -26589,6 +26641,62 @@ page Home
             .expect_err("clean should refuse app root");
 
         assert!(error.to_string().contains("--clean refuses to remove"));
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_clean_preserves_source_directories() {
+        let root = make_temp_dir("static-build-clean-sources");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        for source in ["app", "src", "public"] {
+            let dir = root.join(source);
+            fs::create_dir_all(&dir).expect("source dir should exist");
+            fs::write(dir.join("important.txt"), "keep me").expect("sentinel should write");
+
+            let error = build_static_site_from_app_root(&root, Path::new(source), true)
+                .expect_err("clean should refuse source dir");
+            assert!(error.to_string().contains("overlaps project source"));
+            assert_eq!(
+                fs::read_to_string(dir.join("important.txt")).expect("sentinel should survive"),
+                "keep me"
+            );
+        }
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_clean_requires_marker_for_custom_output() {
+        let root = make_temp_dir("static-build-clean-custom");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("custom-output")).expect("output dir should exist");
+        fs::write(root.join("custom-output/important.txt"), "keep me")
+            .expect("sentinel should write");
+
+        let error = build_static_site_from_app_root(&root, Path::new("custom-output"), true)
+            .expect_err("clean should refuse unmarked output");
+        assert!(error.to_string().contains("unmarked output"));
+        assert!(root.join("custom-output/important.txt").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_clean_accepts_previously_generated_custom_output() {
+        let root = make_temp_dir("static-build-clean-marked");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+
+        build_static_site_from_app_root(&root, Path::new("custom-output"), false)
+            .expect("first build should mark custom output");
+        assert!(root.join("custom-output/.axonyx-build-output").exists());
+        fs::write(root.join("custom-output/stale.txt"), "old").expect("stale file should write");
+        build_static_site_from_app_root(&root, Path::new("custom-output"), true)
+            .expect("marked output should clean");
+        assert!(!root.join("custom-output/stale.txt").exists());
+        assert!(root.join("custom-output/.axonyx-build-output").exists());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }

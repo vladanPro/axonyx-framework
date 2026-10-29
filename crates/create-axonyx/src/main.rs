@@ -97,15 +97,6 @@ fn run() -> Result<()> {
         );
     }
 
-    if target_dir.exists() && cli.force {
-        fs::remove_dir_all(&target_dir).with_context(|| {
-            format!(
-                "failed to remove existing directory '{}'",
-                target_dir.display()
-            )
-        })?;
-    }
-
     if !cli.yes {
         println!(
             "This will create a new Axonyx app in '{}'.",
@@ -115,6 +106,15 @@ fn run() -> Result<()> {
             println!("Canceled.");
             return Ok(());
         }
+    }
+
+    if target_dir.exists() && cli.force {
+        fs::remove_dir_all(&target_dir).with_context(|| {
+            format!(
+                "failed to remove existing directory '{}'",
+                target_dir.display()
+            )
+        })?;
     }
 
     create_app(&target_dir, &project_name, &cli)?;
