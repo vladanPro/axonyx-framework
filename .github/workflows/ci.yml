@@ -34,7 +34,7 @@ jobs:
         uses: dtolnay/rust-toolchain@1.82.0
 
       - name: Check workspace on declared MSRV
-        run: cargo check --workspace --all-targets --all-features
+        run: cargo check --workspace --all-targets --all-features --locked
 
   framework:
     name: Framework Tests
