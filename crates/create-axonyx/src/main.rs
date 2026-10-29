@@ -90,7 +90,8 @@ fn run() -> Result<()> {
     let project_name = project_name_from_target(&target_dir)?;
     validate_project_name(&project_name)?;
 
-    if target_dir.exists() && !cli.force {
+    let target_exists = path_entry_exists(&target_dir)?;
+    if target_exists && !cli.force {
         bail!(
             "target directory '{}' already exists (use --force to overwrite)",
             target_dir.display()
@@ -98,30 +99,30 @@ fn run() -> Result<()> {
     }
 
     if !cli.yes {
-        println!(
-            "This will create a new Axonyx app in '{}'.",
-            target_dir.display()
-        );
+        if target_exists {
+            println!(
+                "This will replace the existing directory '{}' with a new Axonyx app.",
+                target_dir.display()
+            );
+        } else {
+            println!(
+                "This will create a new Axonyx app in '{}'.",
+                target_dir.display()
+            );
+        }
         if !confirm("Continue? [y/N]: ")? {
             println!("Canceled.");
             return Ok(());
         }
     }
 
-    if target_dir.exists() && cli.force {
-        fs::remove_dir_all(&target_dir).with_context(|| {
-            format!(
-                "failed to remove existing directory '{}'",
-                target_dir.display()
-            )
-        })?;
-    }
-
-    create_app(&target_dir, &project_name, &cli)?;
-
-    if cli.git {
-        init_git(&target_dir)?;
-    }
+    scaffold_app_with(&target_dir, cli.force, |staging_dir| {
+        create_app(staging_dir, &project_name, &cli)?;
+        if cli.git {
+            init_git(staging_dir)?;
+        }
+        Ok(())
+    })?;
 
     println!();
     println!("Success! Axonyx app created at {}", target_dir.display());
@@ -132,6 +133,125 @@ fn run() -> Result<()> {
     println!("  cargo ax doctor");
     println!("  cargo ax build --clean");
     println!("Template: {:?}", cli.template);
+    Ok(())
+}
+
+fn scaffold_app_with(
+    target_dir: &Path,
+    force: bool,
+    scaffold: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let parent = target_dir
+        .parent()
+        .context("project path must have a parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create parent directory '{}'", parent.display()))?;
+    let (staging_dir, backup_dir) = reserve_staging_dir(target_dir)?;
+
+    let result = scaffold(&staging_dir)
+        .and_then(|()| promote_staged_app(&staging_dir, target_dir, &backup_dir, force));
+    if let Err(error) = result {
+        if staging_dir.exists() {
+            if let Err(cleanup_error) = fs::remove_dir_all(&staging_dir) {
+                return Err(error.context(format!(
+                    "also failed to clean staging directory '{}': {cleanup_error}",
+                    staging_dir.display()
+                )));
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to inspect '{}'", path.display())),
+    }
+}
+
+fn reserve_staging_dir(target_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    let parent = target_dir
+        .parent()
+        .context("project path must have a parent directory")?;
+    let name = project_name_from_target(target_dir)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before UNIX epoch")?
+        .as_nanos();
+
+    for attempt in 0..100 {
+        let prefix = format!(".{name}.axonyx-{}-{nonce}-{attempt}", std::process::id());
+        let staging_dir = parent.join(format!("{prefix}.staging"));
+        let backup_dir = parent.join(format!("{prefix}.backup"));
+        if path_entry_exists(&backup_dir)? {
+            continue;
+        }
+        match fs::create_dir(&staging_dir) {
+            Ok(()) => return Ok((staging_dir, backup_dir)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to create staging directory '{}'",
+                        staging_dir.display()
+                    )
+                });
+            }
+        }
+    }
+    bail!(
+        "could not reserve a staging directory for '{}'",
+        target_dir.display()
+    )
+}
+
+fn promote_staged_app(
+    staging_dir: &Path,
+    target_dir: &Path,
+    backup_dir: &Path,
+    force: bool,
+) -> Result<()> {
+    if !path_entry_exists(target_dir)? {
+        fs::rename(staging_dir, target_dir)
+            .with_context(|| format!("failed to move new app into '{}'", target_dir.display()))?;
+        return Ok(());
+    }
+    if !force {
+        bail!("target directory '{}' already exists", target_dir.display());
+    }
+    if fs::symlink_metadata(target_dir)?.file_type().is_symlink() {
+        bail!("refusing to replace symlink '{}'", target_dir.display());
+    }
+    if !target_dir.is_dir() {
+        bail!("target '{}' is not a directory", target_dir.display());
+    }
+
+    fs::rename(target_dir, backup_dir).with_context(|| {
+        format!(
+            "failed to preserve existing directory '{}'",
+            target_dir.display()
+        )
+    })?;
+    if let Err(error) = fs::rename(staging_dir, target_dir) {
+        if let Err(restore_error) = fs::rename(backup_dir, target_dir) {
+            bail!(
+                "failed to install new app: {error}; also failed to restore old app: {restore_error}. Old files remain at '{}'",
+                backup_dir.display()
+            );
+        }
+        return Err(error)
+            .with_context(|| format!("failed to move new app into '{}'", target_dir.display()));
+    }
+
+    if let Err(error) = fs::remove_dir_all(backup_dir) {
+        eprintln!(
+            "Warning: new app is ready, but old files remain at '{}': {error}",
+            backup_dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -461,14 +581,18 @@ fn looks_like_backend_ax(source: &str) -> bool {
 }
 
 fn init_git(target_dir: &Path) -> Result<()> {
-    let status = std::process::Command::new("git")
+    let output = std::process::Command::new("git")
         .arg("init")
         .current_dir(target_dir)
-        .status()
+        .output()
         .context("failed to execute git init")?;
 
-    if !status.success() {
-        bail!("git init failed with status {status}");
+    if !output.status.success() {
+        bail!(
+            "git init failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
     Ok(())
@@ -692,6 +816,69 @@ mod tests {
         .expect("last path component should validate");
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn failed_scaffold_keeps_existing_project_and_removes_staging() {
+        let root = make_temp_dir("force-scaffold-failure");
+        let target = root.join("demo-site");
+        fs::create_dir_all(&target).expect("old app should exist");
+        fs::write(target.join("important.txt"), "old content").expect("old file should write");
+
+        let error = scaffold_app_with(&target, true, |staging| {
+            fs::write(staging.join("partial.txt"), "partial")?;
+            bail!("intentional scaffold failure")
+        })
+        .expect_err("scaffold should fail");
+
+        assert!(error.to_string().contains("intentional scaffold failure"));
+        assert_eq!(
+            fs::read_to_string(target.join("important.txt")).expect("old file should survive"),
+            "old content"
+        );
+        assert_eq!(fs::read_dir(&root).expect("root should list").count(), 1);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn successful_scaffold_replaces_existing_project_without_backup() {
+        let root = make_temp_dir("force-scaffold-success");
+        let target = root.join("demo-site");
+        fs::create_dir_all(&target).expect("old app should exist");
+        fs::write(target.join("important.txt"), "old content").expect("old file should write");
+
+        scaffold_app_with(&target, true, |staging| {
+            fs::write(staging.join("new.txt"), "new content")?;
+            Ok(())
+        })
+        .expect("scaffold should succeed");
+
+        assert!(!target.join("important.txt").exists());
+        assert_eq!(
+            fs::read_to_string(target.join("new.txt")).expect("new file should exist"),
+            "new content"
+        );
+        assert_eq!(fs::read_dir(&root).expect("root should list").count(), 1);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_scaffold_does_not_replace_dangling_symlink() {
+        let root = make_temp_dir("force-scaffold-symlink");
+        let target = root.join("demo-site");
+        std::os::unix::fs::symlink(root.join("missing"), &target)
+            .expect("dangling symlink should exist");
+
+        let error = scaffold_app_with(&target, false, |_| Ok(()))
+            .expect_err("existing path should not be replaced");
+
+        assert!(error.to_string().contains("already exists"));
+        assert!(fs::symlink_metadata(&target)
+            .expect("symlink should survive")
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
     #[test]
