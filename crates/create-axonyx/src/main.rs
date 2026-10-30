@@ -90,6 +90,12 @@ fn run() -> Result<()> {
     let project_name = project_name_from_target(&target_dir)?;
     validate_project_name(&project_name)?;
 
+    if recover_interrupted_scaffold(&target_dir)? {
+        println!(
+            "Recovered existing project at '{}' after an interrupted --force run.",
+            target_dir.display()
+        );
+    }
     let target_exists = path_entry_exists(&target_dir)?;
     if target_exists && !cli.force {
         bail!(
@@ -170,6 +176,86 @@ fn path_entry_exists(path: &Path) -> Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).with_context(|| format!("failed to inspect '{}'", path.display())),
     }
+}
+
+fn recover_interrupted_scaffold(target_dir: &Path) -> Result<bool> {
+    if path_entry_exists(target_dir)? {
+        return Ok(false);
+    }
+    let parent = target_dir
+        .parent()
+        .context("project path must have a parent directory")?;
+    if !path_entry_exists(parent)? {
+        return Ok(false);
+    }
+    let name = project_name_from_target(target_dir)?;
+    let prefix = format!(".{name}.axonyx-");
+    let mut backups = Vec::new();
+    for entry in fs::read_dir(parent)
+        .with_context(|| format!("failed to inspect parent directory '{}'", parent.display()))?
+    {
+        let entry = entry?;
+        let entry_name = entry.file_name();
+        let Some(entry_name) = entry_name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = entry_name
+            .strip_prefix(&prefix)
+            .and_then(|name| name.strip_suffix(".backup"))
+        else {
+            continue;
+        };
+        let mut parts = suffix.split('-');
+        if !matches!(
+            (parts.next(), parts.next(), parts.next(), parts.next()),
+            (Some(pid), Some(nonce), Some(attempt), None)
+                if [pid, nonce, attempt]
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        ) {
+            continue;
+        }
+        backups.push(entry.path());
+    }
+    if backups.is_empty() {
+        return Ok(false);
+    }
+    if backups.len() != 1 {
+        bail!(
+            "target '{}' is missing and {} Axonyx backups exist; restore the intended backup manually",
+            target_dir.display(),
+            backups.len()
+        );
+    }
+    let backup_dir = &backups[0];
+    if !fs::symlink_metadata(backup_dir)?.file_type().is_dir() {
+        bail!(
+            "refusing to restore '{}': backup is not a directory",
+            backup_dir.display()
+        );
+    }
+    let staging_dir = backup_dir.with_extension("staging");
+    if !path_entry_exists(&staging_dir)? {
+        bail!(
+            "target '{}' is missing but backup '{}' has no matching staging directory; restore the intended project manually",
+            target_dir.display(),
+            backup_dir.display()
+        );
+    }
+    if !fs::symlink_metadata(&staging_dir)?.file_type().is_dir() {
+        bail!(
+            "refusing to restore '{}': matching staging path is not a directory",
+            backup_dir.display()
+        );
+    }
+    fs::rename(backup_dir, target_dir).with_context(|| {
+        format!(
+            "failed to restore interrupted --force backup '{}' to '{}'",
+            backup_dir.display(),
+            target_dir.display()
+        )
+    })?;
+    Ok(true)
 }
 
 fn reserve_staging_dir(target_dir: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -859,6 +945,70 @@ mod tests {
             "new content"
         );
         assert_eq!(fs::read_dir(&root).expect("root should list").count(), 1);
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn interrupted_force_run_restores_old_project_before_new_scaffold() {
+        let root = make_temp_dir("force-recovery");
+        let target = root.join("demo-site");
+        fs::create_dir(&target).expect("old app should exist");
+        fs::write(target.join("important.txt"), "old content").expect("old file should write");
+        let (staging, backup) = reserve_staging_dir(&target).expect("staging should reserve");
+        fs::rename(&target, &backup).expect("old app should move to backup");
+
+        assert!(recover_interrupted_scaffold(&target).expect("recovery should work"));
+        assert_eq!(
+            fs::read_to_string(target.join("important.txt")).expect("old file should survive"),
+            "old content"
+        );
+        assert!(!backup.exists());
+        assert!(staging.exists());
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn interrupted_force_run_with_multiple_backups_requires_manual_choice() {
+        let root = make_temp_dir("force-ambiguous-recovery");
+        let target = root.join("demo-site");
+        let first = root.join(".demo-site.axonyx-1-2-3.backup");
+        let second = root.join(".demo-site.axonyx-4-5-6.backup");
+        fs::create_dir(&first).expect("first backup should exist");
+        fs::create_dir(&second).expect("second backup should exist");
+
+        let error = recover_interrupted_scaffold(&target).expect_err("recovery must be ambiguous");
+        assert!(error.to_string().contains("2 Axonyx backups"));
+        assert!(!target.exists());
+        assert!(first.exists());
+        assert!(second.exists());
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn completed_force_run_does_not_restore_leftover_backup() {
+        let root = make_temp_dir("force-completed-recovery");
+        let target = root.join("demo-site");
+        let backup = root.join(".demo-site.axonyx-1-2-3.backup");
+        fs::create_dir(&target).expect("new app should exist");
+        fs::create_dir(&backup).expect("old backup should exist");
+
+        assert!(!recover_interrupted_scaffold(&target).expect("recovery should be skipped"));
+        assert!(target.exists());
+        assert!(backup.exists());
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn orphaned_backup_without_staging_requires_manual_recovery() {
+        let root = make_temp_dir("force-orphaned-backup");
+        let target = root.join("demo-site");
+        let backup = root.join(".demo-site.axonyx-1-2-3.backup");
+        fs::create_dir(&backup).expect("backup should exist");
+
+        let error = recover_interrupted_scaffold(&target).expect_err("recovery must be uncertain");
+        assert!(error.to_string().contains("no matching staging directory"));
+        assert!(!target.exists());
+        assert!(backup.exists());
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
