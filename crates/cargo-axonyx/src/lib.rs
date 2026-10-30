@@ -14889,6 +14889,16 @@ fn build_static_site_from_app_root(
         .collect::<Vec<_>>();
     let prerender_routes = load_prerender_routes(root)?;
 
+    let public_dir = root.join("public");
+    match fs::symlink_metadata(&public_dir) {
+        Ok(_) => reject_linked_build_assets(&public_dir)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect '{}'", public_dir.display()));
+        }
+    }
+
     if clean {
         clean_output_dir(&canonical_root, &canonical_output_dir)?;
     }
@@ -18197,6 +18207,12 @@ fn copy_dir_all_filtered(
         return Ok(());
     }
 
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to inspect build asset '{}'", source.display()))?;
+    if is_linked_build_asset(&metadata) {
+        bail!("refusing to copy linked build asset '{}'", source.display());
+    }
+
     if source.is_dir() {
         fs::create_dir_all(destination)
             .with_context(|| format!("failed to create '{}'", destination.display()))?;
@@ -18227,6 +18243,39 @@ fn copy_dir_all_filtered(
     })?;
 
     Ok(())
+}
+
+fn reject_linked_build_assets(source: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to inspect build asset '{}'", source.display()))?;
+    if is_linked_build_asset(&metadata) {
+        bail!("refusing to copy linked build asset '{}'", source.display());
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(source)
+            .with_context(|| format!("failed to read '{}'", source.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to read entry in '{}'", source.display()))?;
+            reject_linked_build_assets(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn is_linked_build_asset(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn ensure_ui_layout_setup(root: &Path) -> Result<bool> {
@@ -26761,6 +26810,42 @@ page Home
         let error = build_static_site_from_app_root(&root, Path::new("generated"), false)
             .expect_err("build should reject symlink to source");
         assert!(error.to_string().contains("overlaps project source"));
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_static_site_rejects_public_file_symlink_before_cleaning() {
+        let root = make_temp_dir("static-build-public-file-symlink");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+        fs::create_dir_all(root.join("dist")).expect("old output should exist");
+        fs::write(root.join("private.txt"), "private content").expect("private file should write");
+        fs::write(root.join("dist/keep.txt"), "old output").expect("old output should write");
+        std::os::unix::fs::symlink(root.join("private.txt"), root.join("public/leak.txt"))
+            .expect("symlink should create");
+
+        let error = build_static_site_from_app_root(&root, Path::new("dist"), true)
+            .expect_err("public symlink should be rejected");
+        assert!(error.to_string().contains("linked build asset"));
+        assert!(root.join("dist/keep.txt").exists());
+        assert!(!root.join("dist/leak.txt").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_static_site_rejects_cyclic_public_directory_symlink() {
+        let root = make_temp_dir("static-build-public-dir-symlink");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+        std::os::unix::fs::symlink(root.join("public"), root.join("public/loop"))
+            .expect("symlink should create");
+
+        let error = build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect_err("public directory loop should be rejected");
+        assert!(error.to_string().contains("linked build asset"));
+        assert!(!root.join("dist").exists());
+
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
