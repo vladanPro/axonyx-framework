@@ -39,10 +39,10 @@ try {
   $env:CARGO_INSTALL_ROOT = $toolRoot
 
   Invoke-CargoStep "install published create-axonyx" {
-    cargo install create-axonyx --version 0.8.3 --locked --root $toolRoot
+    cargo install create-axonyx --version 0.8.4 --locked --root $toolRoot
   }
   Invoke-CargoStep "install published cargo-axonyx" {
-    cargo install cargo-axonyx --version 0.8.4 --locked --root $toolRoot
+    cargo install cargo-axonyx --version 0.8.5 --locked --root $toolRoot
   }
 
   foreach ($template in @("site", "blog", "docs")) {
@@ -85,6 +85,15 @@ query loadGuardedPage() {
       Invoke-CargoStep "$template build" { cargo ax build --clean }
       if ($template -eq "site") {
         Invoke-CargoStep "$template compiled build" { cargo ax build --clean --compiled }
+        $pagePath = Join-Path $project "app/page.asx"
+        $pageBefore = Get-Content -LiteralPath $pagePath -Raw
+        & cargo ax build --out-dir app 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+          throw "published CLI allowed build output inside app source"
+        }
+        if ((Get-Content -LiteralPath $pagePath -Raw) -ne $pageBefore) {
+          throw "rejected build modified app/page.asx"
+        }
       }
     } finally { Pop-Location }
 
