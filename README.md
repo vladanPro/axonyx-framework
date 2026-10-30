@@ -50,8 +50,8 @@ axonyx-ui = "0.0.86"
 Install the public CLI tools:
 
 ```bash
-cargo install create-axonyx --version 0.8.3 --locked
-cargo install cargo-axonyx --version 0.8.4 --locked
+cargo install create-axonyx --version 0.8.4 --locked
+cargo install cargo-axonyx --version 0.8.5 --locked
 ```
 
 Install the published language server with `cargo install axonyx-lsp`, or use
@@ -156,6 +156,7 @@ The published-tool acceptance check is `scripts/smoke-registry-beta.ps1`.
 It installs those exact CLI releases outside this checkout, scaffolds `site`,
 `blog`, and `docs` against registry crates, then checks builds and the `site`
 compiled HTTP server, guarded query redirects, UI assets, and 404 responses.
+It also rejects build output inside source folders without `--clean`.
 A new scaffold pins `axonyx-ui 0.0.86`; the separate axonyx.dev site currently
 uses `axonyx-ui 0.0.89` and has its own runtime/toolchain pins.
 
