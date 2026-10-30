@@ -2171,11 +2171,16 @@ fn filter_action_report(mut report: ActionReport, args: &ActionsArgs) -> ActionR
 
 fn build_command(args: BuildArgs) -> Result<()> {
     let root = app_root()?;
-    ensure_no_melt_diagnostics_for(&root, "build")?;
-    let status = compile_backend_from_app_root(&root)?;
-    let static_status = build_static_site_from_app_root(&root, &args.out_dir, args.clean)?;
+    build_from_app_root(&root, &args)
+}
+
+fn build_from_app_root(root: &Path, args: &BuildArgs) -> Result<()> {
+    ensure_no_melt_diagnostics_for(root, "build")?;
+    validate_output_dir(root, &args.out_dir)?;
+    let status = compile_backend_from_app_root(root)?;
+    let static_status = build_static_site_from_app_root(root, &args.out_dir, args.clean)?;
     if args.compiled {
-        build_compiled_production_binary(&root, &args.out_dir, &status)?;
+        build_compiled_production_binary(root, &args.out_dir, &status)?;
     }
     print_backend_build_status(&status);
     print_static_build_status(&static_status);
@@ -25839,6 +25844,39 @@ axonyx-ui = {{ path = "{ui_path}" }}
             BackendBuildStatus::NoSources { .. } => panic!("backend sources should be found"),
         }
 
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_command_rejects_invalid_output_before_rewriting_backend() {
+        let root = make_temp_dir("build-invalid-output-preflight");
+        fs::create_dir_all(root.join("app/posts")).expect("domain dir should exist");
+        fs::create_dir_all(root.join("src/generated")).expect("generated dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/domain.ax"),
+            "export fn normalizeStatus(status: String) -> String {\n  return status\n}\n",
+        )
+        .expect("domain should write");
+        let backend = root.join("src/generated/backend.rs");
+        fs::write(&backend, "previous backend").expect("previous backend should write");
+
+        let error = build_from_app_root(
+            &root,
+            &BuildArgs {
+                out_dir: PathBuf::from("src/generated"),
+                clean: true,
+                compiled: false,
+            },
+        )
+        .expect_err("build should reject output overlapping generated source");
+
+        assert!(error.to_string().contains("overlaps project source"));
+        assert_eq!(
+            fs::read_to_string(backend).expect("previous backend should survive"),
+            "previous backend"
+        );
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
