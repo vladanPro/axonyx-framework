@@ -50,8 +50,8 @@ axonyx-ui = "0.0.86"
 Install the public CLI tools:
 
 ```bash
-cargo install create-axonyx --version 0.8.4 --locked
-cargo install cargo-axonyx --version 0.8.5 --locked
+cargo install create-axonyx --version 0.8.5 --locked
+cargo install cargo-axonyx --version 0.8.6 --locked
 ```
 
 Install the published language server with `cargo install axonyx-lsp`, or use
