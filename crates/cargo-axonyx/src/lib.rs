@@ -14904,12 +14904,7 @@ fn build_static_site_from_app_root(
         }
     }
 
-    if clean {
-        clean_output_dir(&canonical_root, &canonical_output_dir)?;
-    }
-
-    fs::create_dir_all(&output_dir)
-        .with_context(|| format!("failed to create '{}'", output_dir.display()))?;
+    prepare_output_dir(&canonical_root, &canonical_output_dir, clean)?;
 
     copy_public_assets_to_dist(root, &output_dir)?;
     copy_package_assets_to_dist(root, &output_dir)?;
@@ -14920,7 +14915,6 @@ fn build_static_site_from_app_root(
     let melt_graph_written = write_melt_graph_to_dist(root, &output_dir)?;
 
     if static_routes.is_empty() && prerender_routes.is_empty() {
-        mark_output_dir(&output_dir)?;
         return Ok(StaticBuildStatus::NoPages {
             skipped_dynamic_count: dynamic_routes.len(),
             content_collection_count,
@@ -14989,8 +14983,6 @@ fn build_static_site_from_app_root(
             .count(),
     );
 
-    mark_output_dir(&output_dir)?;
-
     Ok(StaticBuildStatus::Generated {
         route_count: rendered_static_count,
         prerendered_count,
@@ -15003,6 +14995,33 @@ fn build_static_site_from_app_root(
 }
 
 const AXONYX_BUILD_OUTPUT_MARKER: &str = ".axonyx-build-output";
+
+fn prepare_output_dir(root: &Path, output_dir: &Path, clean: bool) -> Result<()> {
+    if clean {
+        clean_output_dir(root, output_dir)?;
+    } else if output_dir != root.join("dist")
+        && output_dir.exists()
+        && !output_dir.join(AXONYX_BUILD_OUTPUT_MARKER).is_file()
+        && !output_dir_is_empty(output_dir)?
+    {
+        bail!(
+            "refusing to build into unmarked non-empty output '{}'; choose an empty directory or an existing Axonyx build output",
+            output_dir.display()
+        );
+    }
+
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create '{}'", output_dir.display()))?;
+    mark_output_dir(output_dir)
+}
+
+fn output_dir_is_empty(output_dir: &Path) -> Result<bool> {
+    Ok(fs::read_dir(output_dir)
+        .with_context(|| format!("failed to inspect output '{}'", output_dir.display()))?
+        .next()
+        .transpose()?
+        .is_none())
+}
 
 fn mark_output_dir(output_dir: &Path) -> Result<()> {
     fs::write(
@@ -15109,9 +15128,12 @@ fn clean_output_dir(root: &Path, output_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if output_dir != root.join("dist") && !output_dir.join(AXONYX_BUILD_OUTPUT_MARKER).is_file() {
+    if output_dir != root.join("dist")
+        && !output_dir.join(AXONYX_BUILD_OUTPUT_MARKER).is_file()
+        && !output_dir_is_empty(output_dir)?
+    {
         bail!(
-            "--clean refuses to remove unmarked output '{}'; build there once without --clean first",
+            "--clean refuses to remove unmarked output '{}'; choose an empty directory or an existing Axonyx build output",
             output_dir.display()
         );
     }
@@ -26900,6 +26922,66 @@ page Home
             .expect_err("clean should refuse unmarked output");
         assert!(error.to_string().contains("unmarked output"));
         assert!(root.join("custom-output/important.txt").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_clean_accepts_empty_unmarked_custom_output() {
+        let root = make_temp_dir("static-build-clean-empty-custom");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("custom-output")).expect("empty output dir should exist");
+
+        build_static_site_from_app_root(&root, Path::new("custom-output"), true)
+            .expect("clean should accept empty custom output");
+        assert!(root.join("custom-output/.axonyx-build-output").is_file());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_without_clean_refuses_nonempty_unmarked_custom_output() {
+        let root = make_temp_dir("static-build-unmarked-custom");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("custom-output")).expect("output dir should exist");
+        fs::write(root.join("custom-output/important.txt"), "keep me")
+            .expect("sentinel should write");
+
+        let error = build_static_site_from_app_root(&root, Path::new("custom-output"), false)
+            .expect_err("build should refuse unmarked non-empty output");
+        assert!(error.to_string().contains("unmarked non-empty output"));
+        assert_eq!(
+            fs::read_to_string(root.join("custom-output/important.txt"))
+                .expect("sentinel should survive"),
+            "keep me"
+        );
+        assert!(!root.join("custom-output/.axonyx-build-output").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn failed_first_custom_build_can_be_cleaned_and_retried() {
+        let root = make_temp_dir("static-build-partial-custom");
+        fs::create_dir_all(root.join("app/docs")).expect("page dir should exist");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(root.join("app/docs/page.ax"), "page Docs\n<h1>Docs</h1>\n")
+            .expect("page should write");
+        fs::write(root.join("public/docs"), "conflicting asset").expect("asset should write");
+
+        build_static_site_from_app_root(&root, Path::new("custom-output"), false)
+            .expect_err("asset should conflict with the page route");
+        assert!(root.join("custom-output/.axonyx-build-output").is_file());
+        assert!(root.join("custom-output/docs").is_file());
+
+        fs::remove_file(root.join("public/docs")).expect("conflicting asset should be removed");
+        build_static_site_from_app_root(&root, Path::new("custom-output"), true)
+            .expect("clean build should recover partial output");
+        assert!(root.join("custom-output/docs/index.html").is_file());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
