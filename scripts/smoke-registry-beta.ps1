@@ -39,10 +39,10 @@ try {
   $env:CARGO_INSTALL_ROOT = $toolRoot
 
   Invoke-CargoStep "install published create-axonyx" {
-    cargo install create-axonyx --version 0.8.4 --locked --root $toolRoot
+    cargo install create-axonyx --version 0.8.5 --locked --root $toolRoot
   }
   Invoke-CargoStep "install published cargo-axonyx" {
-    cargo install cargo-axonyx --version 0.8.5 --locked --root $toolRoot
+    cargo install cargo-axonyx --version 0.8.6 --locked --root $toolRoot
   }
 
   foreach ($template in @("site", "blog", "docs")) {
