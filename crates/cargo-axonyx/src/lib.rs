@@ -2171,11 +2171,16 @@ fn filter_action_report(mut report: ActionReport, args: &ActionsArgs) -> ActionR
 
 fn build_command(args: BuildArgs) -> Result<()> {
     let root = app_root()?;
-    ensure_no_melt_diagnostics_for(&root, "build")?;
-    let status = compile_backend_from_app_root(&root)?;
-    let static_status = build_static_site_from_app_root(&root, &args.out_dir, args.clean)?;
+    build_from_app_root(&root, &args)
+}
+
+fn build_from_app_root(root: &Path, args: &BuildArgs) -> Result<()> {
+    ensure_no_melt_diagnostics_for(root, "build")?;
+    validate_output_dir(root, &args.out_dir)?;
+    let status = compile_backend_from_app_root(root)?;
+    let static_status = build_static_site_from_app_root(root, &args.out_dir, args.clean)?;
     if args.compiled {
-        build_compiled_production_binary(&root, &args.out_dir, &status)?;
+        build_compiled_production_binary(root, &args.out_dir, &status)?;
     }
     print_backend_build_status(&status);
     print_static_build_status(&static_status);
@@ -14889,12 +14894,17 @@ fn build_static_site_from_app_root(
         .collect::<Vec<_>>();
     let prerender_routes = load_prerender_routes(root)?;
 
-    if clean {
-        clean_output_dir(&canonical_root, &canonical_output_dir)?;
+    let public_dir = root.join("public");
+    match fs::symlink_metadata(&public_dir) {
+        Ok(_) => reject_linked_build_assets(&public_dir)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect '{}'", public_dir.display()));
+        }
     }
 
-    fs::create_dir_all(&output_dir)
-        .with_context(|| format!("failed to create '{}'", output_dir.display()))?;
+    prepare_output_dir(&canonical_root, &canonical_output_dir, clean)?;
 
     copy_public_assets_to_dist(root, &output_dir)?;
     copy_package_assets_to_dist(root, &output_dir)?;
@@ -14905,7 +14915,6 @@ fn build_static_site_from_app_root(
     let melt_graph_written = write_melt_graph_to_dist(root, &output_dir)?;
 
     if static_routes.is_empty() && prerender_routes.is_empty() {
-        mark_output_dir(&output_dir)?;
         return Ok(StaticBuildStatus::NoPages {
             skipped_dynamic_count: dynamic_routes.len(),
             content_collection_count,
@@ -14974,8 +14983,6 @@ fn build_static_site_from_app_root(
             .count(),
     );
 
-    mark_output_dir(&output_dir)?;
-
     Ok(StaticBuildStatus::Generated {
         route_count: rendered_static_count,
         prerendered_count,
@@ -14988,6 +14995,33 @@ fn build_static_site_from_app_root(
 }
 
 const AXONYX_BUILD_OUTPUT_MARKER: &str = ".axonyx-build-output";
+
+fn prepare_output_dir(root: &Path, output_dir: &Path, clean: bool) -> Result<()> {
+    if clean {
+        clean_output_dir(root, output_dir)?;
+    } else if output_dir != root.join("dist")
+        && output_dir.exists()
+        && !output_dir.join(AXONYX_BUILD_OUTPUT_MARKER).is_file()
+        && !output_dir_is_empty(output_dir)?
+    {
+        bail!(
+            "refusing to build into unmarked non-empty output '{}'; choose an empty directory or an existing Axonyx build output",
+            output_dir.display()
+        );
+    }
+
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create '{}'", output_dir.display()))?;
+    mark_output_dir(output_dir)
+}
+
+fn output_dir_is_empty(output_dir: &Path) -> Result<bool> {
+    Ok(fs::read_dir(output_dir)
+        .with_context(|| format!("failed to inspect output '{}'", output_dir.display()))?
+        .next()
+        .transpose()?
+        .is_none())
+}
 
 fn mark_output_dir(output_dir: &Path) -> Result<()> {
     fs::write(
@@ -15094,9 +15128,12 @@ fn clean_output_dir(root: &Path, output_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if output_dir != root.join("dist") && !output_dir.join(AXONYX_BUILD_OUTPUT_MARKER).is_file() {
+    if output_dir != root.join("dist")
+        && !output_dir.join(AXONYX_BUILD_OUTPUT_MARKER).is_file()
+        && !output_dir_is_empty(output_dir)?
+    {
         bail!(
-            "--clean refuses to remove unmarked output '{}'; build there once without --clean first",
+            "--clean refuses to remove unmarked output '{}'; choose an empty directory or an existing Axonyx build output",
             output_dir.display()
         );
     }
@@ -18197,6 +18234,12 @@ fn copy_dir_all_filtered(
         return Ok(());
     }
 
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to inspect build asset '{}'", source.display()))?;
+    if is_linked_build_asset(&metadata) {
+        bail!("refusing to copy linked build asset '{}'", source.display());
+    }
+
     if source.is_dir() {
         fs::create_dir_all(destination)
             .with_context(|| format!("failed to create '{}'", destination.display()))?;
@@ -18227,6 +18270,39 @@ fn copy_dir_all_filtered(
     })?;
 
     Ok(())
+}
+
+fn reject_linked_build_assets(source: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)
+        .with_context(|| format!("failed to inspect build asset '{}'", source.display()))?;
+    if is_linked_build_asset(&metadata) {
+        bail!("refusing to copy linked build asset '{}'", source.display());
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(source)
+            .with_context(|| format!("failed to read '{}'", source.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed to read entry in '{}'", source.display()))?;
+            reject_linked_build_assets(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn is_linked_build_asset(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn ensure_ui_layout_setup(root: &Path) -> Result<bool> {
@@ -25794,6 +25870,39 @@ axonyx-ui = {{ path = "{ui_path}" }}
     }
 
     #[test]
+    fn build_command_rejects_invalid_output_before_rewriting_backend() {
+        let root = make_temp_dir("build-invalid-output-preflight");
+        fs::create_dir_all(root.join("app/posts")).expect("domain dir should exist");
+        fs::create_dir_all(root.join("src/generated")).expect("generated dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(
+            root.join("app/posts/domain.ax"),
+            "export fn normalizeStatus(status: String) -> String {\n  return status\n}\n",
+        )
+        .expect("domain should write");
+        let backend = root.join("src/generated/backend.rs");
+        fs::write(&backend, "previous backend").expect("previous backend should write");
+
+        let error = build_from_app_root(
+            &root,
+            &BuildArgs {
+                out_dir: PathBuf::from("src/generated"),
+                clean: true,
+                compiled: false,
+            },
+        )
+        .expect_err("build should reject output overlapping generated source");
+
+        assert!(error.to_string().contains("overlaps project source"));
+        assert_eq!(
+            fs::read_to_string(backend).expect("previous backend should survive"),
+            "previous backend"
+        );
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
     fn build_command_includes_app_domain_backend_sources() {
         let root = make_temp_dir("build-domain");
         fs::create_dir_all(root.join("app").join("posts")).expect("posts dir should exist");
@@ -26764,6 +26873,42 @@ page Home
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn build_static_site_rejects_public_file_symlink_before_cleaning() {
+        let root = make_temp_dir("static-build-public-file-symlink");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+        fs::create_dir_all(root.join("dist")).expect("old output should exist");
+        fs::write(root.join("private.txt"), "private content").expect("private file should write");
+        fs::write(root.join("dist/keep.txt"), "old output").expect("old output should write");
+        std::os::unix::fs::symlink(root.join("private.txt"), root.join("public/leak.txt"))
+            .expect("symlink should create");
+
+        let error = build_static_site_from_app_root(&root, Path::new("dist"), true)
+            .expect_err("public symlink should be rejected");
+        assert!(error.to_string().contains("linked build asset"));
+        assert!(root.join("dist/keep.txt").exists());
+        assert!(!root.join("dist/leak.txt").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_static_site_rejects_cyclic_public_directory_symlink() {
+        let root = make_temp_dir("static-build-public-dir-symlink");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+        std::os::unix::fs::symlink(root.join("public"), root.join("public/loop"))
+            .expect("symlink should create");
+
+        let error = build_static_site_from_app_root(&root, Path::new("dist"), false)
+            .expect_err("public directory loop should be rejected");
+        assert!(error.to_string().contains("linked build asset"));
+        assert!(!root.join("dist").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
     #[test]
     fn build_static_site_clean_requires_marker_for_custom_output() {
         let root = make_temp_dir("static-build-clean-custom");
@@ -26777,6 +26922,66 @@ page Home
             .expect_err("clean should refuse unmarked output");
         assert!(error.to_string().contains("unmarked output"));
         assert!(root.join("custom-output/important.txt").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_clean_accepts_empty_unmarked_custom_output() {
+        let root = make_temp_dir("static-build-clean-empty-custom");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("custom-output")).expect("empty output dir should exist");
+
+        build_static_site_from_app_root(&root, Path::new("custom-output"), true)
+            .expect("clean should accept empty custom output");
+        assert!(root.join("custom-output/.axonyx-build-output").is_file());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn build_static_site_without_clean_refuses_nonempty_unmarked_custom_output() {
+        let root = make_temp_dir("static-build-unmarked-custom");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::create_dir_all(root.join("custom-output")).expect("output dir should exist");
+        fs::write(root.join("custom-output/important.txt"), "keep me")
+            .expect("sentinel should write");
+
+        let error = build_static_site_from_app_root(&root, Path::new("custom-output"), false)
+            .expect_err("build should refuse unmarked non-empty output");
+        assert!(error.to_string().contains("unmarked non-empty output"));
+        assert_eq!(
+            fs::read_to_string(root.join("custom-output/important.txt"))
+                .expect("sentinel should survive"),
+            "keep me"
+        );
+        assert!(!root.join("custom-output/.axonyx-build-output").exists());
+
+        fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn failed_first_custom_build_can_be_cleaned_and_retried() {
+        let root = make_temp_dir("static-build-partial-custom");
+        fs::create_dir_all(root.join("app/docs")).expect("page dir should exist");
+        fs::create_dir_all(root.join("public")).expect("public dir should exist");
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n")
+            .expect("config should write");
+        fs::write(root.join("app/docs/page.ax"), "page Docs\n<h1>Docs</h1>\n")
+            .expect("page should write");
+        fs::write(root.join("public/docs"), "conflicting asset").expect("asset should write");
+
+        build_static_site_from_app_root(&root, Path::new("custom-output"), false)
+            .expect_err("asset should conflict with the page route");
+        assert!(root.join("custom-output/.axonyx-build-output").is_file());
+        assert!(root.join("custom-output/docs").is_file());
+
+        fs::remove_file(root.join("public/docs")).expect("conflicting asset should be removed");
+        build_static_site_from_app_root(&root, Path::new("custom-output"), true)
+            .expect("clean build should recover partial output");
+        assert!(root.join("custom-output/docs/index.html").is_file());
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
     }
