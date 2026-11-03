@@ -116,7 +116,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "axonyx-core"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "axonyx-macros",
  "proc-macro2",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "axonyx-lsp"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "axonyx-core",
  "serde_json",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "axonyx-runtime"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "argon2",
  "axonyx-core",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-axonyx"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "axonyx-core",
@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "create-axonyx"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "anyhow",
  "axonyx-core",
