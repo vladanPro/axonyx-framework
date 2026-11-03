@@ -39,10 +39,10 @@ try {
   $env:CARGO_INSTALL_ROOT = $toolRoot
 
   Invoke-CargoStep "install published create-axonyx" {
-    cargo install create-axonyx --version 0.8.5 --locked --root $toolRoot
+    cargo install create-axonyx --version 0.8.6 --locked --root $toolRoot
   }
   Invoke-CargoStep "install published cargo-axonyx" {
-    cargo install cargo-axonyx --version 0.8.6 --locked --root $toolRoot
+    cargo install cargo-axonyx --version 0.8.7 --locked --root $toolRoot
   }
 
   foreach ($template in @("site", "blog", "docs")) {
@@ -72,7 +72,7 @@ query loadGuardedPage() {
 '@)
     }
     $manifest = Get-Content (Join-Path $project "Cargo.toml") -Raw
-    if ($manifest -notmatch 'axonyx-runtime\s*=\s*\{\s*version\s*=\s*"0\.8\.2"' -or
+    if ($manifest -notmatch 'axonyx-runtime\s*=\s*\{\s*version\s*=\s*"0\.8\.3"' -or
         $manifest -notmatch 'axonyx-ui\s*=\s*"0\.0\.86"' -or
         $manifest -match '(?m)^\s*(\[patch\.|.*\b(path|git)\s*=)') {
       throw "$template scaffold did not use published runtime and UI crates"
