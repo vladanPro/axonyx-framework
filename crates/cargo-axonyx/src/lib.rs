@@ -14841,6 +14841,26 @@ fn print_backend_build_status(status: &BackendBuildStatus) {
 }
 
 fn route_requires_runtime_render(root: &Path, route: &ResolvedRoute) -> Result<bool> {
+    let mut bound_loaders = std::collections::BTreeSet::new();
+    for path in route
+        .layout_paths
+        .iter()
+        .chain(std::iter::once(&route.page_path))
+    {
+        let source = fs::read_to_string(path)
+            .with_context(|| format!("failed to read page source '{}'", path.display()))?;
+        let document = parse_ax_auto(&source).map_err(anyhow::Error::msg)?;
+        for statement in &document.page.body {
+            if let AxStatement::Data(binding) = statement {
+                if let Some((path, _)) = query_call_from_binding_expr(&binding.value) {
+                    if let Some(name) = path.last() {
+                        bound_loaders.insert(name.as_str().to_owned());
+                    }
+                }
+            }
+        }
+    }
+
     for source in collect_layout_and_page_loader_sources(root, route)? {
         let document = parse_backend_ax(&source).map_err(anyhow::Error::msg)?;
         let plan = lower_backend_document(&document).map_err(anyhow::Error::msg)?;
@@ -14869,6 +14889,11 @@ fn route_requires_runtime_render(root: &Path, route: &ResolvedRoute) -> Result<b
                     ..
                 }
             )
+        }) {
+            return Ok(true);
+        }
+        if plan.handlers.iter().any(|handler| {
+            bound_loaders.contains(&handler.name) && handler.steps.iter().any(step_uses_database)
         }) {
             return Ok(true);
         }
@@ -15170,7 +15195,7 @@ fn build_prerendered_routes(
             })?;
             if route_requires_runtime_render(root, &resolved)? {
                 bail!(
-                    "cannot prerender session-bound route '{}'; use compiled server rendering",
+                    "cannot prerender runtime-bound route '{}'; use compiled server rendering",
                     concrete_route
                 );
             }
@@ -26565,6 +26590,61 @@ page Home
         .unwrap();
         let child = resolve_route(&root, "/private/child").unwrap().unwrap();
         assert!(route_requires_runtime_render(&root, &child).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn static_build_skips_only_routes_bound_to_database_loaders() {
+        let root = make_temp_dir("static-db-bound-page");
+        fs::create_dir_all(root.join("app/domain")).unwrap();
+        fs::create_dir_all(root.join("app/posts")).unwrap();
+        fs::create_dir_all(root.join("app/notes")).unwrap();
+        fs::create_dir_all(root.join("dist/posts")).unwrap();
+        fs::create_dir_all(root.join("dist/notes")).unwrap();
+        fs::write(root.join("Axonyx.toml"), "[app]\nname = \"demo\"\n").unwrap();
+        fs::write(
+            root.join("app/backend.ax"),
+            "env DATABASE_URL: Secret<String>\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/domain/posts.ax"),
+            "export query loadPosts() {\n  data posts = db.posts.all()\n  return posts\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/page.asx"),
+            "page Home() { return ASX { <p>Public</p> } }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/posts/page.asx"),
+            "page Posts() {\n  data posts = loadPosts()\n  return ASX { <p>Posts</p> }\n}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/notes/layout.asx"),
+            "page NotesLayout() {\n  data posts = loadPosts()\n  return ASX { <Slot /> }\n}",
+        )
+        .unwrap();
+        fs::write(
+            root.join("app/notes/page.asx"),
+            "page Notes() { return ASX { <p>Notes</p> } }",
+        )
+        .unwrap();
+        fs::write(root.join("dist/posts/index.html"), "stale posts").unwrap();
+        fs::write(root.join("dist/notes/index.html"), "stale notes").unwrap();
+
+        let home = resolve_route(&root, "/").unwrap().unwrap();
+        let posts = resolve_route(&root, "/posts").unwrap().unwrap();
+        let notes = resolve_route(&root, "/notes").unwrap().unwrap();
+        assert!(!route_requires_runtime_render(&root, &home).unwrap());
+        assert!(route_requires_runtime_render(&root, &posts).unwrap());
+        assert!(route_requires_runtime_render(&root, &notes).unwrap());
+        build_static_site_from_app_root(&root, Path::new("dist"), false).unwrap();
+        assert!(root.join("dist/index.html").is_file());
+        assert!(!root.join("dist/posts/index.html").exists());
+        assert!(!root.join("dist/notes/index.html").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
