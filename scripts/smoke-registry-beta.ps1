@@ -42,7 +42,7 @@ try {
     cargo install create-axonyx --version 0.8.6 --locked --root $toolRoot
   }
   Invoke-CargoStep "install published cargo-axonyx" {
-    cargo install cargo-axonyx --version 0.8.7 --locked --root $toolRoot
+    cargo install cargo-axonyx --version 0.8.8 --locked --root $toolRoot
   }
 
   foreach ($template in @("site", "blog", "docs")) {
