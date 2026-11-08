@@ -72,6 +72,7 @@ mod action_routes_tests;
 mod action_selector;
 #[cfg(test)]
 mod action_selector_tests;
+mod i18n;
 #[cfg(test)]
 mod private_binary_tests;
 #[cfg(test)]
@@ -1495,6 +1496,8 @@ struct MeltReport {
     components: ComponentReport,
     component_usage: ComponentUsageReport,
     content: ContentManifest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    i18n: Option<i18n::CatalogReport>,
     diagnostics: Vec<CheckDiagnostic>,
     summary: MeltSummary,
 }
@@ -5410,7 +5413,11 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let components = collect_component_report(root)?;
     let component_usage = collect_component_usage_report(root, &routes)?;
     let content = collect_content_manifest(root)?;
-    let diagnostics = check_app_sources(root)?;
+    let (i18n, catalog_diagnostic) = match i18n::inspect(root) {
+        Ok(report) => (report, None),
+        Err(diagnostic) => (None, Some(diagnostic)),
+    };
+    let diagnostics = check_app_sources_with_catalog(root, catalog_diagnostic)?;
     let summary = melt_summary(
         &routes,
         &api,
@@ -5441,6 +5448,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         components,
         component_usage,
         content,
+        i18n,
         diagnostics,
         summary,
     })
@@ -8273,6 +8281,13 @@ fn content_slug(collection_root: &Path, path: &Path) -> String {
 }
 
 fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    check_app_sources_with_catalog(root, i18n::inspect(root).err())
+}
+
+fn check_app_sources_with_catalog(
+    root: &Path,
+    catalog_diagnostic: Option<CheckDiagnostic>,
+) -> Result<Vec<CheckDiagnostic>> {
     let mut files = Vec::new();
     collect_ax_files(&root.join("app"), &mut files)?;
     collect_ax_files(&root.join("routes"), &mut files)?;
@@ -8288,6 +8303,7 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
         )?);
     }
     diagnostics.extend(check_axonyx_config(root)?);
+    diagnostics.extend(catalog_diagnostic);
     diagnostics.extend(check_route_manifest(root)?);
     diagnostics.extend(check_action_patch_contracts(root)?);
     diagnostics.extend(check_storage_action_contracts(root)?);
@@ -16218,6 +16234,13 @@ fn display_relative_path(root: &Path, path: &Path) -> String {
 fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
+    if let Some(i18n) = &report.i18n {
+        println!(
+            "  i18n fallback={} catalogs={}",
+            i18n.fallback,
+            i18n.sources.len()
+        );
+    }
     println!(
         "  pages={} api={} action_routes={} actions={} state_signals={} state_patches={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
