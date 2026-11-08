@@ -8,6 +8,22 @@ use std::path::{Path, PathBuf};
 mod usage;
 pub(super) use usage::check_document;
 
+pub(super) fn is_render_binding(
+    document: &axonyx_core::ax_ast::AxDocument,
+    value: &axonyx_core::ax_ast::AxExpr,
+) -> bool {
+    use axonyx_core::ax_ast::{AxExpr, AxStatement};
+    use axonyx_runtime::translation::bound_translator_initializer;
+    let AxExpr::Call { path, .. } = value else {
+        return false;
+    };
+    path == &["t"]
+        || bound_translator_initializer(value)
+        || matches!(path.as_slice(), [name] if document.page.body.iter().any(|statement| {
+            matches!(statement, AxStatement::Data(binding) if &binding.name == name && bound_translator_initializer(&binding.value))
+        }))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -334,8 +350,9 @@ mod tests {
             "app/page.asx",
             r#"
 page Home() {
-  const save = t("pages.save")
-  return ASX { <p>{save} {t("pages.back")}</p> }
+  const translate = I18n.withLocale("sr-Latn")
+  const save = translate("pages.save")
+  return ASX { <p>{save} {translate("pages.back")}</p> }
 }
 "#,
         );
@@ -357,6 +374,45 @@ page Home() {
         let diagnostic = inspect(&app.0).unwrap_err();
         assert!(diagnostic.file.ends_with("Axonyx.toml"));
         assert!(diagnostic.message.contains("has no catalog"));
+    }
+
+    #[test]
+    fn checks_bound_translator_keys_and_scope_before_build() {
+        let app = Fixture::new("i18n-bound-translator");
+        app.write("Axonyx.toml", "[i18n]\nfallback = \"en\"\n");
+        app.write("locales/en/messages.json", r#"{"pages.save":"Save"}"#);
+        for (body, expected) in [
+            (
+                r#"const translate = I18n.withLocale("en")
+return ASX { <p>{translate("pages.svae")}</p> }"#,
+                "unknown translation key",
+            ),
+            (
+                r#"const translate = I18n.withLocale("en")
+return ASX { <p>{translate("pages.save", "en")}</p> }"#,
+                "expects one literal string key",
+            ),
+            (
+                r#"const message = translate("pages.save")
+const translate = I18n.withLocale("en")
+return ASX { <p>{message}</p> }"#,
+                "after its declaration",
+            ),
+            (
+                r#"const translate = I18n.withLocale("en")
+return ASX { <p>{translate}</p> }"#,
+                "cannot be used as a value",
+            ),
+        ] {
+            app.write("app/page.asx", &format!("page Home() {{\n{body}\n}}"));
+            let diagnostics = check_app_sources(&app.0).unwrap();
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|item| item.code == "axonyx-i18n" && item.message.contains(expected)),
+                "{diagnostics:?}"
+            );
+        }
     }
 
     #[test]

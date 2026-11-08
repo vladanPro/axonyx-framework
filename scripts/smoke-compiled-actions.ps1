@@ -447,12 +447,14 @@ action ValidateDetail(email: String) {
 page PostDetail() {
 data posts = loadPost(params.slug)
 const label = t("posts.label")
+const translate = I18n.withLocale(posts.slug)
+const regionLabel = translate("posts.label")
 return ASX {
   <Container max="xl">
     <Card title={posts.title}>
       <Copy>{posts.excerpt}</Copy>
       <p>{label} {t("posts.fallback")}</p>
-      <p lang="en">{t("posts.label", "en")}</p>
+      <p lang="en">{regionLabel}</p>
     </Card>
     <ActionForm name="ValidateDetail">
       <input name="email" />
@@ -1089,11 +1091,11 @@ route GET "/api/forbidden-loader" {
   if (!$detailPayload.ok -or $detailPayload.value.title -ne "Fresh parameterized title") { throw "Parameterized loader response is invalid: $($detailData.Body)" }
   if ($detailPayload.html -notmatch 'data-ax-root="page"' -or $detailPayload.html -notmatch "Fresh parameterized title") { throw "Parameterized page HTML was not regenerated: $($detailData.Body)" }
   if ($detailPayload.html -notmatch "Procitaj objavu" -or $detailPayload.html -notmatch "English fallback") { throw "Compiled data fragment lost the configured translation or fallback" }
-  if ($detailPayload.html -notmatch '<p lang="en">Read post</p>') { throw "Compiled data fragment lost the explicit locale override" }
+  if ($detailPayload.html -notmatch '<p lang="en">Read post</p>') { throw "Compiled data fragment lost the bound translator and locale fallback" }
   $detailPage = Invoke-AxRequest -Url "$baseUrl/posts/fresh-compiled-post" -Method GET
   if ($detailPage.Body -notmatch "Fresh parameterized title" -or $detailPage.Headers["Cache-Control"] -ne "no-store") { throw "Compiled GET lost dynamic route parameters or served stale HTML" }
   if ($detailPage.Body -notmatch '<html lang="sr-Latn"' -or $detailPage.Body -notmatch "Procitaj objavu" -or $detailPage.Body -notmatch "English fallback") { throw "Compiled GET did not render the configured locale and fallback" }
-  if ($detailPage.Body -notmatch '<p lang="en">Read post</p>') { throw "Compiled GET lost the explicit locale override" }
+  if ($detailPage.Body -notmatch '<p lang="en">Read post</p>') { throw "Compiled GET lost the bound translator and locale fallback" }
   $detailHead = Invoke-AxRequest -Url "$baseUrl/posts/fresh-compiled-post" -Method HEAD
   if ($detailHead.Body -ne "" -or $detailHead.Headers["Content-Type"] -notmatch "text/html") { throw "Compiled HEAD returned a body or lost its document content type" }
   foreach ($body in @("email=invalid&slug=attacker-selected-post", "slug=attacker-selected-post")) {

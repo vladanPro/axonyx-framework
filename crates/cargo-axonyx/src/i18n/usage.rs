@@ -15,6 +15,11 @@ pub(crate) fn check_document(
         let line = crate::line_for_source_pattern(source, pattern);
         diagnostics.push(diagnostic(path, line, 1, message));
     };
+    let mut document = document.clone();
+    if let Err(error) = axonyx_runtime::translation::lower_bound_translators(&mut document, 0) {
+        report(&error.pattern, error.to_string());
+        return diagnostics;
+    }
     if document
         .functions
         .iter()
