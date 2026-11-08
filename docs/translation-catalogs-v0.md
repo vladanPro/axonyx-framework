@@ -26,8 +26,8 @@ list the fallback and catalog source paths without publishing message values.
 Projects without `[i18n]` do not load these catalogs.
 
 With `[i18n]` enabled, the ASX checker reserves the callable name `t` and
-accepts exactly one literal key from the fallback catalog, such as
-`t("pages.save")`. A local `fn t(...)` is rejected, but variables and member
+requires a literal key from the fallback catalog, such as `t("pages.save")`.
+A local `fn t(...)` is rejected, but variables and member
 names such as `item.t` are not reserved. Without `[i18n]`, existing calls and
 functions are unaffected. Calls inside `Head` are not supported.
 
@@ -37,4 +37,18 @@ output read the configured locale; compiled servers embed validated catalogs
 and use the same locale for SSR and refreshed fragments. Compiled i18n requires
 a runtime that supports the localized render APIs (not the published 0.8.3
 runtime). Projects without `[i18n]` keep the existing compiled render APIs.
-Per-user and per-request locale selection are not yet wired into the CLI.
+
+Pass a locale string as the optional second argument to override the language
+for one message. For example, use a preference returned by an admin loader:
+
+```asx
+<section lang={preferences.admin_language}>
+  <button>{t("pages.save", preferences.admin_language)}</button>
+</section>
+```
+
+An unsupported override uses the fallback catalog; missing messages in a
+supported locale also fall back per key. An override never changes other
+calls or the document's `<html lang>`. Set `lang` on a region when its language
+differs. Automatic request-wide or per-user locale negotiation is not wired
+into the CLI.

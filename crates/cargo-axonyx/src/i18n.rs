@@ -436,7 +436,8 @@ page Home() {
             r#"
 page Home() {
   const key = "pages.save"
-  return ASX { <p>{t(key)} {t("pages.save", "extra")}</p> }
+  const locale = "en"
+  return ASX { <p>{t(key, locale)} {t("pages.save", locale)} {t("pages.save", locale, locale)} {t("pages.save", 42)}</p> }
 }
 "#,
         );
@@ -444,19 +445,22 @@ page Home() {
             "app/components/SaveButton.asx",
             r#"
 component SaveButton() {
-  return ASX { <button title={t("pages.svae")}>{t("pages.save")}</button> }
+  return ASX { <button title={t("pages.svae", "en")}>{t("pages.save")}</button> }
 }
 "#,
         );
         let diagnostics = check_app_sources(&app.0).unwrap();
-        assert_eq!(diagnostics.len(), 3, "{diagnostics:?}");
+        assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
         assert_eq!(
             diagnostics
                 .iter()
-                .filter(|d| d.message.contains("one literal string key"))
+                .filter(|d| d.message.contains("expects a literal string key"))
                 .count(),
             2
         );
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.message.contains("must be a string")));
         let unknown = diagnostics
             .iter()
             .find(|d| d.message.contains("pages.svae"))

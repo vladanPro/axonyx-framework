@@ -27,12 +27,22 @@ pub(crate) fn check_document(
     }
 
     let mut check_call = |args: &[AxExpr]| match args {
-        [AxExpr::String(key)] if catalog.contains_key(key) => {}
-        [AxExpr::String(key)] => report(
+        [AxExpr::String(_), AxExpr::Bool(_)
+        | AxExpr::Number(_)
+        | AxExpr::Float(_)
+        | AxExpr::List(_)
+        | AxExpr::Object(_)] => {
+            report("t(", "the optional `t()` locale must be a string".into());
+        }
+        [AxExpr::String(key)] | [AxExpr::String(key), _] if catalog.contains_key(key) => {}
+        [AxExpr::String(key)] | [AxExpr::String(key), _] => report(
             &format!("{key:?}"),
             format!("unknown translation key {key:?}; define it in the fallback catalog"),
         ),
-        _ => report("t(", "`t()` expects one literal string key".into()),
+        _ => report(
+            "t(",
+            "`t()` expects a literal string key and an optional locale".into(),
+        ),
     };
     let mut expressions = |expr: &AxExpr| visit_translation_calls(expr, &mut check_call);
     visit_defaults(&document.page.params, &mut expressions);
