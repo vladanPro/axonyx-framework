@@ -363,6 +363,29 @@ page Home() {
         assert!(html.contains("Snimi"));
         assert!(html.contains("Go back"));
         assert!(!app.0.join("dist/locales").exists());
+        let renderers = crate::compiled_page_renderers(&app.0, &[], true).unwrap();
+        assert_eq!(renderers.len(), 1);
+        let catalogs = load_for_render(&app.0).unwrap().unwrap();
+        let params = std::collections::BTreeMap::new();
+        let loader_values = std::collections::BTreeMap::new();
+        let render = |document_json| axonyx_runtime::AxCompiledPageRender {
+            document_json,
+            import_sources: &[],
+            request_target: "/",
+            route_params: &params,
+            loader_values: &loader_values,
+            form_result: None,
+        };
+        let document = render(&renderers[0].full_document_json)
+            .render_document(Some(catalogs.translator()))
+            .unwrap();
+        let fragment = render(&renderers[0].document_json)
+            .render_fragment(Some(catalogs.translator()))
+            .unwrap();
+        for output in [document, fragment] {
+            assert!(output.contains("Snimi"));
+            assert!(output.contains("Go back"));
+        }
         let error =
             crate::build_static_site_from_app_root(&app.0, Path::new("locales"), true).unwrap_err();
         assert!(error.to_string().contains("overlaps project source"));

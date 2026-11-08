@@ -13665,9 +13665,13 @@ fn compiled_page_renderers(
         let mut seen = std::collections::BTreeSet::new();
         collect_compiled_import_sources(root, &document, &mut seen, &mut import_sources)?;
         collect_compiled_import_sources(root, &full_document, &mut seen, &mut import_sources)?;
+        let mut fragment_document = document;
+        if i18n_enabled {
+            axonyx_runtime::translation::lower_bound_translators(&mut fragment_document, 0)?;
+        }
         renderers.push(CompiledPageRenderer {
             route_pattern: route.route,
-            document_json: serde_json::to_string(&document)
+            document_json: serde_json::to_string(&fragment_document)
                 .context("failed to serialize compiled page AST")?,
             full_document_json: serde_json::to_string(&full_document)
                 .context("failed to serialize complete compiled document AST")?,
