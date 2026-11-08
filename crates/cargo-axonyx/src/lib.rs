@@ -58,9 +58,7 @@ use axonyx_runtime::{
     execute_preview_action_request_sources_with_runtime_and_storage,
     execute_preview_action_request_sources_with_storage,
     execute_preview_route_request_sources_validated,
-    execute_preview_route_request_sources_with_runtime_validated,
-    preview_ax_route_with_request_context_and_imports,
-    preview_ax_route_with_request_context_and_runtime_and_imports, AxApiResponseValidationMode,
+    execute_preview_route_request_sources_with_runtime_validated, AxApiResponseValidationMode,
     AxPreviewActionResult, AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
     AX_STATE_WASM_PATH,
 };
@@ -13323,7 +13321,8 @@ fn build_compiled_production_binary(
     let action_routes = compiled_action_routes(root)?;
     let action_body_limits = configured_action_body_limits(root).map_err(anyhow::Error::msg)?;
     let data_bindings = compiled_data_bindings(root)?;
-    let page_renderers = compiled_page_renderers(root, &data_bindings)?;
+    let catalogs = i18n::load_for_render(root)?;
+    let page_renderers = compiled_page_renderers(root, &data_bindings, catalogs.is_some())?;
     let boundary_renderers = compiled_boundary_renderers(root)?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let database_required = project_uses_database_runtime(root)?;
@@ -13352,6 +13351,7 @@ fn build_compiled_production_binary(
             storage_configs: &storage_configs,
             action_routes: &action_routes,
             action_body_limits: &action_body_limits,
+            catalogs: catalogs.as_ref(),
         },
     );
     fs::write(&source_path, source).with_context(|| {
@@ -13526,6 +13526,7 @@ fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
 fn compiled_page_renderers(
     root: &Path,
     data_bindings: &[CompiledDataBinding],
+    i18n_enabled: bool,
 ) -> Result<Vec<CompiledPageRenderer>> {
     let mut renderers = Vec::new();
     for route in collect_page_route_manifest(root)? {
@@ -13573,20 +13574,15 @@ fn compiled_page_renderers(
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let mut expected_bindings = document
-            .page
-            .body
-            .iter()
-            .filter(|statement| matches!(statement, AxStatement::Data(binding) if query_call_from_binding_expr(&binding.value).is_some()))
-            .count();
+        let needs_loader = |statement: &&AxStatement| {
+            matches!(statement, AxStatement::Data(binding)
+                if query_call_from_binding_expr(&binding.value)
+                    .is_some_and(|(path, _)| !i18n_enabled || path != ["t"]))
+        };
+        let mut expected_bindings = document.page.body.iter().filter(needs_loader).count();
         for layout_source in &layout_sources {
             let layout = parse_ax_auto(layout_source).map_err(anyhow::Error::msg)?;
-            expected_bindings += layout
-                .page
-                .body
-                .iter()
-                .filter(|statement| matches!(statement, AxStatement::Data(binding) if query_call_from_binding_expr(&binding.value).is_some()))
-                .count();
+            expected_bindings += layout.page.body.iter().filter(needs_loader).count();
         }
         if expected_bindings != route_bindings {
             continue;
@@ -13946,6 +13942,7 @@ struct CompiledProductionOptions<'a> {
     storage_configs: &'a [AxStorageCapabilityConfig],
     action_routes: &'a [(String, Vec<String>)],
     action_body_limits: &'a [(String, String, usize)],
+    catalogs: Option<&'a i18n::CatalogInputs>,
 }
 
 fn compiled_production_source(
@@ -13968,7 +13965,20 @@ fn compiled_production_source(
         storage_configs,
         action_routes,
         action_body_limits,
+        catalogs,
     } = options;
+    let (translation_helpers, document_renderer, fragment_renderer) = match catalogs {
+        Some(catalogs) => (
+            catalogs.compiled_helpers(),
+            "render_localized_document",
+            "render_localized_fragment",
+        ),
+        None => (
+            String::new(),
+            "axonyx_runtime::render_compiled_page_document",
+            "axonyx_runtime::render_compiled_page_fragment",
+        ),
+    };
     let native_module = if native_registration {
         "#[path = \"../native.rs\"]\nmod native;\n"
     } else {
@@ -14155,7 +14165,7 @@ use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
 use axonyx_runtime::server_prelude::{{{legacy_server_import}AxBody, AxCompiledHandler, AxCookie, AxHttpRequest, AxHttpResponse}};
-{storage_import}use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
+{storage_import}use axonyx_runtime::compiled_loader_call_key;
 use serde_json::{{json, Value}};
 
 #[path = "../generated/backend.rs"]
@@ -14164,6 +14174,7 @@ mod backend;
 {action_route_module}
 {native_module}
 {native_storage_module}
+{translation_helpers}
 
 #[derive(Clone, Copy)]
 struct CompiledBinding {{
@@ -14316,7 +14327,7 @@ fn handle_request_inner(
 fn compiled_boundary_response(name: &str, path: &str, status: u16) -> AxHttpResponse {{
     let fallback = || AxHttpResponse::text(status, if status == 404 {{ "Not Found" }} else {{ "Page could not be rendered." }}).with_no_store();
     let Some((document, imports)) = compiled_boundary_document(name, path) else {{ return fallback(); }};
-    match axonyx_runtime::render_compiled_page_document(
+    match {document_renderer}(
         document,
         imports,
         "/",
@@ -14515,7 +14526,7 @@ fn render_compiled_route_document(
             .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page loader missing"))?;
         values.insert(compiled_loader_call_key(binding.loader, &args), value);
     }}
-    axonyx_runtime::render_compiled_page_document(document, imports, &read_request.target, &params, &values, form)
+    {document_renderer}(document, imports, &read_request.target, &params, &values, form)
         .map(Some).map_err(|_| axonyx_runtime::backend::AxRuntimeError::message("compiled document render failed"))
 }}
 
@@ -14615,7 +14626,7 @@ fn handle_compiled_data(
         let html = if let Some((pattern, document, imports)) = compiled_page_renderer(&path) {{
             let params = route_params(pattern, &path)
                 .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page route did not match"))?;
-            Some(render_compiled_page_fragment(document, imports, &target, &params, &loader_values)
+            Some({fragment_renderer}(document, imports, &target, &params, &loader_values)
                 .map_err(|error| axonyx_runtime::backend::AxRuntimeError::message(error.to_string()))?)
         }} else {{
             None
@@ -15130,6 +15141,7 @@ fn validate_output_dir(root: &Path, out_dir: &Path) -> Result<(PathBuf, PathBuf)
         "routes",
         "jobs",
         "content",
+        "locales",
         "public",
         "migrations",
         "components",
@@ -21618,79 +21630,42 @@ fn render_route_html_with_form_result(
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
         .clone();
     let import_resolver = |source: &str| load_preview_import_source(&state.root, source);
+    let catalogs = i18n::load_for_render(&state.root)?;
+    let translator = catalogs.as_ref().map(i18n::CatalogInputs::translator);
 
     let uses_sessions = backend_source_refs_use_sessions(&loader_refs)?;
-    let html = if (use_database_runtime && backend_source_refs_use_database(&loader_refs)?)
+    let runtime = if (use_database_runtime && backend_source_refs_use_database(&loader_refs)?)
         || (request.is_some() && uses_sessions)
     {
         let env = db_env_for_root(&state.root, None)?;
-        let runtime = ax_backend_runtime::runtime_from_env(env)
-            .with_context(|| "failed to initialize page database runtime from environment")?;
-        if let Some(request) = request {
-            if let Some(form) = form {
-                axonyx_runtime::preview_ax_route_with_form_result_and_imports(
-                    &layout_refs,
-                    &loader_refs,
-                    &action_refs,
-                    &page_source,
-                    request,
-                    &route.params,
-                    Some(&runtime),
-                    form,
-                    &store,
-                    &import_resolver,
-                )
-            } else {
-                axonyx_runtime::preview_ax_route_with_http_request_and_runtime_and_imports(
-                    &layout_refs,
-                    &loader_refs,
-                    &action_refs,
-                    &page_source,
-                    request,
-                    &route.params,
-                    &runtime,
-                    &store,
-                    &import_resolver,
-                )
-            }
-        } else {
-            preview_ax_route_with_request_context_and_runtime_and_imports(
-                &layout_refs,
-                &loader_refs,
-                &action_refs,
-                &page_source,
-                &route.request_target,
-                &route.params,
-                &runtime,
-                &store,
-                &import_resolver,
-            )
-        }
-    } else if let (Some(request), Some(form)) = (request, form) {
-        axonyx_runtime::preview_ax_route_with_form_result_and_imports(
-            &layout_refs,
-            &loader_refs,
-            &action_refs,
-            &page_source,
-            request,
-            &route.params,
-            None,
-            form,
-            &store,
-            &import_resolver,
+        Some(
+            ax_backend_runtime::runtime_from_env(env)
+                .with_context(|| "failed to initialize page database runtime from environment")?,
         )
     } else {
-        preview_ax_route_with_request_context_and_imports(
-            &layout_refs,
-            &loader_refs,
-            &action_refs,
-            &page_source,
-            &route.request_target,
-            &route.params,
-            &store,
-            &import_resolver,
-        )
-    }
+        None
+    };
+    let request = request.filter(|_| runtime.is_some() || form.is_some());
+    let html = axonyx_runtime::render_preview_route(
+        axonyx_runtime::AxPreviewRouteRender {
+            layout_sources: &layout_refs,
+            loader_sources: &loader_refs,
+            action_sources: &action_refs,
+            page_source: &page_source,
+            request_target: request.map_or(route.request_target.as_str(), |request| {
+                request.target.as_str()
+            }),
+            route_params: &route.params,
+            runtime: runtime
+                .as_ref()
+                .map(|runtime| runtime as &dyn ax_backend_runtime::AxBackendRuntime),
+            request,
+            form,
+        },
+        &store,
+        &import_resolver,
+        translator,
+    )
     .with_context(|| {
         format!(
             "failed to render route '{}' from '{}'",
@@ -26521,11 +26496,11 @@ page Home
         )
         .unwrap();
         let bindings = compiled_data_bindings(&root).unwrap();
-        assert!(compiled_page_renderers(&root, &bindings)
+        assert!(compiled_page_renderers(&root, &bindings, false)
             .unwrap()
             .is_empty());
         fs::write(root.join("app/loader.ax"), "query loadDocs() {\n  require Auth.subject else forbidden()\n  data docs = Content.Collection(\"docs\")\n  return docs\n}").unwrap();
-        assert!(compiled_page_renderers(&root, &bindings)
+        assert!(compiled_page_renderers(&root, &bindings, false)
             .unwrap_err()
             .to_string()
             .contains("cannot use static fallback"));
@@ -26587,7 +26562,12 @@ page Home
                 .collect::<Vec<_>>(),
             ["heading", "content"]
         );
-        assert_eq!(compiled_page_renderers(&root, &bindings).unwrap().len(), 1);
+        assert_eq!(
+            compiled_page_renderers(&root, &bindings, false)
+                .unwrap()
+                .len(),
+            1
+        );
         fs::write(root.join("app/page.asx"), "page Home() {\n data heading: String = loadContent()\n return ASX { <p>{heading}</p> }\n}").unwrap();
         assert!(compiled_data_bindings(&root)
             .unwrap_err()
@@ -28326,6 +28306,7 @@ action ValidPost
                 storage_configs: &[],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
         assert!(source.contains("#[path = \"../native.rs\"]\nmod native;"));
@@ -28527,6 +28508,7 @@ action ValidPost
                 storage_configs: &[],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
         assert!(source.contains("#[path = \"../native_storage.rs\"]\nmod native_storage;"));
@@ -28583,6 +28565,7 @@ action ValidPost
                 storage_configs: &[],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
 
@@ -28655,6 +28638,7 @@ action ValidPost
                 storage_configs: &[],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
 
@@ -28688,6 +28672,7 @@ action ValidPost
                 }],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
 
@@ -28719,7 +28704,7 @@ action ValidPost
         )
         .unwrap();
         fs::write(root.join("app/register/page.asx"), "page Register\n<form method=\"post\" action=\"/__axonyx/action?name=Register&path=%2Fregister\"><input name=\"email\" /><span data-ax-field-error=\"email\"></span></form>").unwrap();
-        let renderers = compiled_page_renderers(&root, &[]).unwrap();
+        let renderers = compiled_page_renderers(&root, &[], false).unwrap();
         let renderer = renderers
             .iter()
             .find(|item| item.route_pattern == "/register")

@@ -4,6 +4,7 @@ Opt in from `Axonyx.toml`:
 
 ```toml
 [i18n]
+locale = "sr-Latn"
 fallback = "en"
 ```
 
@@ -30,5 +31,10 @@ accepts exactly one literal key from the fallback catalog, such as
 names such as `item.t` are not reserved. Without `[i18n]`, existing calls and
 functions are unaffected. Calls inside `Head` are not supported.
 
-This step validates build inputs and ASX usage only. The CLI does not yet
-attach a translator to page rendering or select a locale from a request.
+`locale` selects the catalog used to render pages. If omitted, it defaults to
+the fallback. A configured locale must have a catalog. Preview and static
+output read the configured locale; compiled servers embed validated catalogs
+and use the same locale for SSR and refreshed fragments. Compiled i18n requires
+a runtime that supports the localized render APIs (not the published 0.8.3
+runtime). Projects without `[i18n]` keep the existing compiled render APIs.
+Per-user and per-request locale selection are not yet wired into the CLI.

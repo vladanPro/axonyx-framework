@@ -12,11 +12,13 @@ pub(super) use usage::check_document;
 #[serde(deny_unknown_fields)]
 struct Config {
     fallback: String,
+    locale: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CatalogReport {
     pub(super) fallback: String,
+    pub(super) locale: String,
     pub(super) sources: Vec<CatalogSource>,
 }
 
@@ -30,6 +32,53 @@ pub(super) struct CatalogSource {
 pub(super) struct CatalogInputs {
     pub(super) report: CatalogReport,
     pub(super) catalog: AxTranslationCatalog,
+    sources: Vec<(String, String)>,
+}
+
+impl CatalogInputs {
+    pub(super) fn translator(&self) -> axonyx_runtime::translation::AxTranslator<'_> {
+        self.catalog.translator(&self.report.locale)
+    }
+
+    pub(super) fn compiled_helpers(&self) -> String {
+        let entries = self
+            .sources
+            .iter()
+            .map(|(locale, json)| format!("({locale:?}, {json:?}),\n"))
+            .collect::<String>();
+        let fallback = &self.report.fallback;
+        let locale = &self.report.locale;
+        format!(
+            r#"
+fn compiled_translator() -> axonyx_runtime::translation::AxTranslator<'static> {{
+    use axonyx_runtime::translation::AxTranslationCatalog;
+    static CATALOG: std::sync::OnceLock<AxTranslationCatalog> = std::sync::OnceLock::new();
+    CATALOG.get_or_init(|| AxTranslationCatalog::from_json({fallback:?}, [
+        {entries}
+    ]).expect("Melt validated the embedded translation catalogs")).translator({locale:?})
+}}
+
+fn render_localized_document(
+    document_json: &str, import_sources: &[(&str, &str)], request_target: &str,
+    route_params: &BTreeMap<String, String>, loader_values: &BTreeMap<String, Value>,
+    form_result: Option<&axonyx_runtime::form_result::AxFormResult>,
+) -> Result<String, axonyx_runtime::PreviewError> {{
+    axonyx_runtime::AxCompiledPageRender {{
+        document_json, import_sources, request_target, route_params, loader_values, form_result,
+    }}.render_document(Some(compiled_translator()))
+}}
+
+fn render_localized_fragment(
+    document_json: &str, import_sources: &[(&str, &str)], request_target: &str,
+    route_params: &BTreeMap<String, String>, loader_values: &BTreeMap<String, Value>,
+) -> Result<String, axonyx_runtime::PreviewError> {{
+    axonyx_runtime::AxCompiledPageRender {{
+        document_json, import_sources, request_target, route_params, loader_values, form_result: None,
+    }}.render_fragment(Some(compiled_translator()))
+}}
+"#
+        )
+    }
 }
 
 pub(super) fn inspect(root: &Path) -> Result<Option<CatalogInputs>, CheckDiagnostic> {
@@ -110,17 +159,41 @@ pub(super) fn inspect(root: &Path) -> Result<Option<CatalogInputs>, CheckDiagnos
     )
     .map_err(|error| catalog_diagnostic(error, &catalogs, &config_path, config_line))?;
 
+    let fallback = catalog.translator(&config.fallback).locale();
+    let requested = config.locale.as_deref().unwrap_or(fallback);
+    let locale = catalog.translator(requested).locale();
+    if !requested.eq_ignore_ascii_case(locale) {
+        return Err(diagnostic(
+            &config_path,
+            config_line,
+            1,
+            format!("[i18n] locale {requested:?} has no catalog"),
+        ));
+    }
     let report = CatalogReport {
-        fallback: catalog.translator(&config.fallback).locale().into(),
+        fallback: fallback.into(),
+        locale: locale.into(),
         sources: catalogs
-            .into_iter()
+            .iter()
             .map(|(locale, _, _)| CatalogSource {
                 file: format!("locales/{locale}/messages.json"),
-                locale,
+                locale: locale.clone(),
             })
             .collect(),
     };
-    Ok(Some(CatalogInputs { report, catalog }))
+    let sources = catalogs
+        .into_iter()
+        .map(|(locale, _, json)| (locale, json))
+        .collect();
+    Ok(Some(CatalogInputs {
+        report,
+        catalog,
+        sources,
+    }))
+}
+
+pub(super) fn load_for_render(root: &Path) -> anyhow::Result<Option<CatalogInputs>> {
+    inspect(root).map_err(|error| anyhow::anyhow!(super::format_check_diagnostic(&error)))
 }
 
 fn read_catalog(path: &Path) -> Result<String, CheckDiagnostic> {
@@ -236,12 +309,54 @@ mod tests {
         assert!(check_app_sources(&app.0).unwrap().is_empty());
         let report = serde_json::to_value(collect_melt_report(&app.0).unwrap()).unwrap();
         assert_eq!(report["i18n"]["fallback"], "en");
+        assert_eq!(report["i18n"]["locale"], "en");
         assert_eq!(report["i18n"]["sources"][1]["locale"], "sr-Latn");
         assert_eq!(
             report["i18n"]["sources"][1]["file"],
             "locales/sr-Latn/messages.json"
         );
         assert!(!report.to_string().contains("Catalog text only"));
+    }
+
+    #[test]
+    fn static_build_renders_the_configured_language_and_protects_catalog_sources() {
+        let app = Fixture::new("i18n-static");
+        app.write(
+            "Axonyx.toml",
+            "[i18n]\nlocale = \"sr-Latn\"\nfallback = \"en\"\n",
+        );
+        app.write(
+            "locales/en/messages.json",
+            r#"{"pages.save":"Save","pages.back":"Go back"}"#,
+        );
+        app.write("locales/sr-Latn/messages.json", r#"{"pages.save":"Snimi"}"#);
+        app.write(
+            "app/page.asx",
+            r#"
+page Home() {
+  const save = t("pages.save")
+  return ASX { <p>{save} {t("pages.back")}</p> }
+}
+"#,
+        );
+        assert!(check_app_sources(&app.0).unwrap().is_empty());
+        crate::build_static_site_from_app_root(&app.0, Path::new("dist"), false).unwrap();
+        let html = fs::read_to_string(app.0.join("dist/index.html")).unwrap();
+        assert!(html.contains(r#"<html lang="sr-Latn""#));
+        assert!(html.contains("Snimi"));
+        assert!(html.contains("Go back"));
+        assert!(!app.0.join("dist/locales").exists());
+        let error =
+            crate::build_static_site_from_app_root(&app.0, Path::new("locales"), true).unwrap_err();
+        assert!(error.to_string().contains("overlaps project source"));
+
+        app.write(
+            "Axonyx.toml",
+            "[i18n]\nlocale = \"de\"\nfallback = \"en\"\n",
+        );
+        let diagnostic = inspect(&app.0).unwrap_err();
+        assert!(diagnostic.file.ends_with("Axonyx.toml"));
+        assert!(diagnostic.message.contains("has no catalog"));
     }
 
     #[test]
