@@ -5413,11 +5413,9 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let components = collect_component_report(root)?;
     let component_usage = collect_component_usage_report(root, &routes)?;
     let content = collect_content_manifest(root)?;
-    let (i18n, catalog_diagnostic) = match i18n::inspect(root) {
-        Ok(report) => (report, None),
-        Err(diagnostic) => (None, Some(diagnostic)),
-    };
-    let diagnostics = check_app_sources_with_catalog(root, catalog_diagnostic)?;
+    let catalogs = i18n::inspect(root);
+    let diagnostics = check_app_sources_with_catalog(root, &catalogs)?;
+    let i18n = catalogs.ok().flatten().map(|inputs| inputs.report);
     let summary = melt_summary(
         &routes,
         &api,
@@ -8281,12 +8279,12 @@ fn content_slug(collection_root: &Path, path: &Path) -> String {
 }
 
 fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
-    check_app_sources_with_catalog(root, i18n::inspect(root).err())
+    check_app_sources_with_catalog(root, &i18n::inspect(root))
 }
 
 fn check_app_sources_with_catalog(
     root: &Path,
-    catalog_diagnostic: Option<CheckDiagnostic>,
+    catalogs: &Result<Option<i18n::CatalogInputs>, CheckDiagnostic>,
 ) -> Result<Vec<CheckDiagnostic>> {
     let mut files = Vec::new();
     collect_ax_files(&root.join("app"), &mut files)?;
@@ -8295,15 +8293,17 @@ fn check_app_sources_with_catalog(
 
     let shared_returns = shared_query_return_types(root)?;
     let mut diagnostics = Vec::new();
+    let catalog = catalogs.as_ref().ok().and_then(Option::as_ref);
     for file in files {
         diagnostics.extend(check_ax_file_with_context(
             &file,
             Some(root),
             Some(&shared_returns),
+            catalog,
         )?);
     }
     diagnostics.extend(check_axonyx_config(root)?);
-    diagnostics.extend(catalog_diagnostic);
+    diagnostics.extend(catalogs.as_ref().err().cloned());
     diagnostics.extend(check_route_manifest(root)?);
     diagnostics.extend(check_action_patch_contracts(root)?);
     diagnostics.extend(check_storage_action_contracts(root)?);
@@ -9120,13 +9120,18 @@ fn check_ax_file_with_root(path: &Path, root: Option<&Path>) -> Result<Vec<Check
         .map(shared_query_return_types)
         .transpose()?
         .unwrap_or_default();
-    check_ax_file_with_context(path, root, Some(&shared_returns))
+    let catalogs = root.map_or(Ok(None), i18n::inspect);
+    let catalog = catalogs.as_ref().ok().and_then(Option::as_ref);
+    let mut diagnostics = check_ax_file_with_context(path, root, Some(&shared_returns), catalog)?;
+    diagnostics.extend(catalogs.err());
+    Ok(diagnostics)
 }
 
 fn check_ax_file_with_context(
     path: &Path,
     root: Option<&Path>,
     shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
+    catalog: Option<&i18n::CatalogInputs>,
 ) -> Result<Vec<CheckDiagnostic>> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
@@ -9135,6 +9140,7 @@ fn check_ax_file_with_context(
         &source,
         root,
         shared_returns,
+        catalog,
     ))
 }
 
@@ -9147,7 +9153,7 @@ fn check_ax_source_with_root(
     let shared_returns = root
         .and_then(|root| shared_query_return_types(root).ok())
         .unwrap_or_default();
-    check_ax_source_with_context(path, source, root, Some(&shared_returns))
+    check_ax_source_with_context(path, source, root, Some(&shared_returns), None)
 }
 
 fn check_ax_source_with_context(
@@ -9155,6 +9161,7 @@ fn check_ax_source_with_context(
     source: &str,
     root: Option<&Path>,
     shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
+    catalog: Option<&i18n::CatalogInputs>,
 ) -> Vec<CheckDiagnostic> {
     if !is_asx_source_file(path) && looks_like_backend_ax(source) {
         return match parse_backend_ax(source) {
@@ -9169,20 +9176,32 @@ fn check_ax_source_with_context(
         };
     }
 
+    let catalog = catalog.filter(|_| is_asx_source_file(path));
     let is_component_only = !source
         .lines()
         .any(|line| line.trim_start().starts_with("page "));
     if let Some(component_file) = parse_component_report_source(source)
         .filter(|file| is_component_only && !file.components.is_empty())
     {
-        if let Err(error) = convert_ax_v2_file(&component_file) {
-            return vec![diagnostic_from_parse_error(
+        let document = match convert_ax_v2_file(&component_file) {
+            Ok(document) => document,
+            Err(error) => {
+                return vec![diagnostic_from_parse_error(
+                    path,
+                    source,
+                    CheckParseError::Page(AxAutoParseError::Convert(error)),
+                )]
+            }
+        };
+        let mut diagnostics = Vec::new();
+        if let Some(catalog) = catalog {
+            diagnostics.extend(i18n::check_document(
                 path,
                 source,
-                CheckParseError::Page(AxAutoParseError::Convert(error)),
-            )];
+                &document,
+                &catalog.catalog,
+            ));
         }
-        let mut diagnostics = Vec::new();
         if let Some(root) = root {
             let imports = component_file
                 .imports
@@ -9213,6 +9232,14 @@ fn check_ax_source_with_context(
     };
 
     let mut diagnostics = Vec::new();
+    if let Some(catalog) = catalog {
+        diagnostics.extend(i18n::check_document(
+            path,
+            source,
+            &document,
+            &catalog.catalog,
+        ));
+    }
     diagnostics.extend(check_type_annotations(
         path,
         source,

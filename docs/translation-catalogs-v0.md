@@ -24,6 +24,11 @@ ASCII case distinctions; catalog directories and files must not be symlinks.
 list the fallback and catalog source paths without publishing message values.
 Projects without `[i18n]` do not load these catalogs.
 
-This step validates build inputs only. It does not yet add `t()` to ASX,
-select a locale from a request, or translate pages, validation errors, or
-user-authored content.
+With `[i18n]` enabled, the ASX checker reserves the callable name `t` and
+accepts exactly one literal key from the fallback catalog, such as
+`t("pages.save")`. A local `fn t(...)` is rejected, but variables and member
+names such as `item.t` are not reserved. Without `[i18n]`, existing calls and
+functions are unaffected. Calls inside `Head` are not supported.
+
+This step validates build inputs and ASX usage only. The CLI does not yet
+attach a translator to page rendering or select a locale from a request.

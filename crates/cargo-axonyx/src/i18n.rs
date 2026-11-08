@@ -5,6 +5,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+mod usage;
+pub(super) use usage::check_document;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -23,7 +26,13 @@ pub(super) struct CatalogSource {
     pub(super) file: String,
 }
 
-pub(super) fn inspect(root: &Path) -> Result<Option<CatalogReport>, CheckDiagnostic> {
+#[derive(Debug)]
+pub(super) struct CatalogInputs {
+    pub(super) report: CatalogReport,
+    pub(super) catalog: AxTranslationCatalog,
+}
+
+pub(super) fn inspect(root: &Path) -> Result<Option<CatalogInputs>, CheckDiagnostic> {
     let config_path = root.join("Axonyx.toml");
     let source = match fs::read_to_string(&config_path) {
         Ok(source) => source,
@@ -101,7 +110,7 @@ pub(super) fn inspect(root: &Path) -> Result<Option<CatalogReport>, CheckDiagnos
     )
     .map_err(|error| catalog_diagnostic(error, &catalogs, &config_path, config_line))?;
 
-    Ok(Some(CatalogReport {
+    let report = CatalogReport {
         fallback: catalog.translator(&config.fallback).locale().into(),
         sources: catalogs
             .into_iter()
@@ -110,7 +119,8 @@ pub(super) fn inspect(root: &Path) -> Result<Option<CatalogReport>, CheckDiagnos
                 locale,
             })
             .collect(),
-    }))
+    };
+    Ok(Some(CatalogInputs { report, catalog }))
 }
 
 fn read_catalog(path: &Path) -> Result<String, CheckDiagnostic> {
@@ -269,5 +279,75 @@ mod tests {
         let missing = inspect(&app.0).unwrap_err();
         assert!(missing.file.ends_with("locales/en/messages.json"));
         assert!(missing.message.contains("could not open message catalog"));
+    }
+
+    #[test]
+    fn reserves_only_the_callable_name_in_opted_in_asx_files() {
+        let app = Fixture::new("i18n-call-name");
+        let source = r#"
+page Home() {
+  fn t(value: String) = value
+  return ASX { <p>{t("pages.save")}</p> }
+}
+"#;
+        app.write("app/page.asx", source);
+        assert!(check_app_sources(&app.0).unwrap().is_empty());
+        app.write("Axonyx.toml", "[i18n]\nfallback = \"en\"\n");
+        app.write("locales/en/messages.json", r#"{"pages.save":"Save"}"#);
+        let diagnostics = check_app_sources(&app.0).unwrap();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].message.contains("reserved"));
+
+        app.write(
+            "app/page.asx",
+            r#"
+page Home() {
+  const t = "ordinary variable"
+  const item = { t: "ordinary member" }
+  return ASX { <p title={t("pages.save")}>{t} {item.t} t("not-a-call")</p> }
+}
+"#,
+        );
+        assert!(check_app_sources(&app.0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn checks_calls_in_components_and_requires_literal_known_keys() {
+        let app = Fixture::new("i18n-call-key");
+        app.write("Axonyx.toml", "[i18n]\nfallback = \"en\"\n");
+        app.write("locales/en/messages.json", r#"{"pages.save":"Save"}"#);
+        app.write(
+            "app/page.asx",
+            r#"
+page Home() {
+  const key = "pages.save"
+  return ASX { <p>{t(key)} {t("pages.save", "extra")}</p> }
+}
+"#,
+        );
+        app.write(
+            "app/components/SaveButton.asx",
+            r#"
+component SaveButton() {
+  return ASX { <button title={t("pages.svae")}>{t("pages.save")}</button> }
+}
+"#,
+        );
+        let diagnostics = check_app_sources(&app.0).unwrap();
+        assert_eq!(diagnostics.len(), 3, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.message.contains("one literal string key"))
+                .count(),
+            2
+        );
+        let unknown = diagnostics
+            .iter()
+            .find(|d| d.message.contains("pages.svae"))
+            .unwrap();
+        assert!(unknown.file.ends_with("app/components/SaveButton.asx"));
+        assert_eq!(unknown.code, "axonyx-i18n");
+        assert!(ensure_no_melt_diagnostics_for(&app.0, "build").is_err());
     }
 }
