@@ -13320,10 +13320,10 @@ fn build_compiled_production_binary(
     let signal_aliases = compiled_action_signal_aliases(root)?;
     let action_routes = compiled_action_routes(root)?;
     let action_body_limits = configured_action_body_limits(root).map_err(anyhow::Error::msg)?;
-    let data_bindings = compiled_data_bindings(root)?;
     let catalogs = i18n::load_for_render(root)?;
+    let data_bindings = compiled_data_bindings_for(root, catalogs.is_some())?;
     let page_renderers = compiled_page_renderers(root, &data_bindings, catalogs.is_some())?;
-    let boundary_renderers = compiled_boundary_renderers(root)?;
+    let boundary_renderers = compiled_boundary_renderers_for(root, catalogs.is_some())?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let database_required = project_uses_database_runtime(root)?;
     let runtime_config = AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?;
@@ -13471,7 +13471,12 @@ fn compiled_action_routes(root: &Path) -> Result<Vec<(String, Vec<String>)>> {
         .collect()
 }
 
+#[cfg(test)]
 fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
+    compiled_data_bindings_for(root, false)
+}
+
+fn compiled_data_bindings_for(root: &Path, i18n_enabled: bool) -> Result<Vec<CompiledDataBinding>> {
     let mut bindings = Vec::new();
     for route in collect_page_route_manifest(root)? {
         let mut names = std::collections::BTreeSet::new();
@@ -13487,6 +13492,9 @@ fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
                 let AxStatement::Data(binding) = statement else {
                     continue;
                 };
+                if i18n_enabled && i18n::is_render_binding(&document, &binding.value) {
+                    continue;
+                }
                 let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
                     continue;
                 };
@@ -13574,21 +13582,28 @@ fn compiled_page_renderers(
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let needs_loader = |statement: &&AxStatement| {
-            matches!(statement, AxStatement::Data(binding)
-                if query_call_from_binding_expr(&binding.value)
-                    .is_some_and(|(path, _)| !i18n_enabled || path != ["t"]))
+        let count_loaders = |document: &axonyx_core::ax_ast::AxDocument| {
+            document
+                .page
+                .body
+                .iter()
+                .filter(|statement| {
+                    matches!(statement, AxStatement::Data(binding)
+                if query_call_from_binding_expr(&binding.value).is_some()
+                    && !(i18n_enabled && i18n::is_render_binding(document, &binding.value)))
+                })
+                .count()
         };
-        let mut expected_bindings = document.page.body.iter().filter(needs_loader).count();
+        let mut expected_bindings = count_loaders(&document);
         for layout_source in &layout_sources {
             let layout = parse_ax_auto(layout_source).map_err(anyhow::Error::msg)?;
-            expected_bindings += layout.page.body.iter().filter(needs_loader).count();
+            expected_bindings += count_loaders(&layout);
         }
         if expected_bindings != route_bindings {
             continue;
         }
         let mut full_document =
-            axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+            compose_compiled_render_document(&layout_refs, &source, i18n_enabled)?;
         let uses_ui = layout_refs
             .iter()
             .any(|source| source_uses_package(source, "@axonyx/ui"))
@@ -13650,9 +13665,13 @@ fn compiled_page_renderers(
         let mut seen = std::collections::BTreeSet::new();
         collect_compiled_import_sources(root, &document, &mut seen, &mut import_sources)?;
         collect_compiled_import_sources(root, &full_document, &mut seen, &mut import_sources)?;
+        let mut fragment_document = document;
+        if i18n_enabled {
+            axonyx_runtime::translation::lower_bound_translators(&mut fragment_document, 0)?;
+        }
         renderers.push(CompiledPageRenderer {
             route_pattern: route.route,
-            document_json: serde_json::to_string(&document)
+            document_json: serde_json::to_string(&fragment_document)
                 .context("failed to serialize compiled page AST")?,
             full_document_json: serde_json::to_string(&full_document)
                 .context("failed to serialize complete compiled document AST")?,
@@ -13662,7 +13681,27 @@ fn compiled_page_renderers(
     Ok(renderers)
 }
 
+fn compose_compiled_render_document(
+    layouts: &[&str],
+    source: &str,
+    i18n_enabled: bool,
+) -> Result<axonyx_core::ax_ast::AxDocument> {
+    Ok(if i18n_enabled {
+        axonyx_runtime::compose_localized_page_document(layouts, source)?
+    } else {
+        axonyx_runtime::compose_compiled_page_document(layouts, source)?
+    })
+}
+
+#[cfg(test)]
 fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRenderer>> {
+    compiled_boundary_renderers_for(root, false)
+}
+
+fn compiled_boundary_renderers_for(
+    root: &Path,
+    i18n_enabled: bool,
+) -> Result<Vec<CompiledBoundaryRenderer>> {
     let app_root = root.join("app");
     if !app_root.is_dir() {
         return Ok(Vec::new());
@@ -13683,7 +13722,7 @@ fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRender
                 .page
                 .body
                 .iter()
-                .any(|statement| matches!(statement, AxStatement::Data(_)))
+                .any(|statement| matches!(statement, AxStatement::Data(binding) if !(i18n_enabled && i18n::is_render_binding(&document, &binding.value))))
             {
                 bail!("compiled {name} boundary cannot load route data");
             }
@@ -13703,7 +13742,7 @@ fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRender
                     .page
                     .body
                     .iter()
-                    .any(|statement| matches!(statement, AxStatement::Data(_)))
+                    .any(|statement| matches!(statement, AxStatement::Data(binding) if !(i18n_enabled && i18n::is_render_binding(&parsed, &binding.value))))
                 {
                     bail!("compiled {name} boundary layout cannot load route data");
                 }
@@ -13713,7 +13752,7 @@ fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRender
                 .map(String::as_str)
                 .collect::<Vec<_>>();
             let mut full_document =
-                axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+                compose_compiled_render_document(&layout_refs, &source, i18n_enabled)?;
             let uses_ui = layout_refs
                 .iter()
                 .any(|layout| source_uses_package(layout, "@axonyx/ui"))

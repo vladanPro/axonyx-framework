@@ -52,3 +52,25 @@ supported locale also fall back per key. An override never changes other
 calls or the document's `<html lang>`. Set `lang` on a region when its language
 differs. Automatic request-wide or per-user locale negotiation is not wired
 into the CLI.
+
+### Bind a language for one screen
+
+Bind the locale once in a page or layout body and call the local translator
+with literal keys:
+
+```asx
+const translate = I18n.withLocale(preferences.admin_language)
+
+return ASX {
+  <section lang={preferences.admin_language}>
+    <button>{translate("pages.save")}</button>
+  </section>
+}
+```
+
+Declare the binding after its locale data is available. The page and layout
+may each declare their own `translate`; neither affects the other or the
+document language. Melt checks the keys just as it does for `t()`. This local
+translator is not a general function value: it cannot be exported, passed as
+a prop, or used from `Head`, another source file, or a local function body.
+For a one-off override, use `t(key, locale)`.
