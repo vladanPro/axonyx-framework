@@ -30,6 +30,20 @@ Why this order:
 - `axonyx-ui` is released independently and is not republished with every framework release.
 - the CLIs should be published only after the packages they scaffold are available.
 
+## Translation Catalogs V0 Patch
+
+- Promote the runtime and framework release commits from `dev` through
+  separate `main` PRs and wait for their `main` checks before publishing.
+- Publish `axonyx-runtime` 0.8.4 first. It uses the existing `axonyx-core`
+  0.8.3 package. After Cargo can resolve the runtime from crates.io, rehearse
+  packaging and publish `cargo-axonyx` 0.8.9. No core, LSP, scaffold, or UI
+  publication is required for this patch.
+- Keep the existing registry CI pins until both packages are visible, then
+  update the smoke pins in a separate change. In a clean Legura worktree,
+  update its manifest, lockfile and tooling pin, use a fresh SQLite database,
+  and run the language smoke against the compiled server. No local path patch
+  or source-built CLI is allowed in this acceptance run.
+
 ## Current CI Gate
 
 Before publishing, `main` should be green in GitHub Actions.
