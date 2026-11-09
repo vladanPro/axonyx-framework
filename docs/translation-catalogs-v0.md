@@ -35,8 +35,8 @@ functions are unaffected. Calls inside `Head` are not supported.
 the fallback. A configured locale must have a catalog. Preview and static
 output read the configured locale; compiled servers embed validated catalogs
 and use the same locale for SSR and refreshed fragments. Compiled i18n requires
-a runtime that supports the localized render APIs (not the published 0.8.3
-runtime). Projects without `[i18n]` keep the existing compiled render APIs.
+`cargo-axonyx` 0.8.9 and `axonyx-runtime` 0.8.4 or newer. Projects without
+`[i18n]` keep the existing compiled render APIs.
 
 Pass a locale string as the optional second argument to override the language
 for one message. For example, use a preference returned by an admin loader:
