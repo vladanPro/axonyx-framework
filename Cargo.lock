@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "axonyx-runtime"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "argon2",
  "axonyx-core",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-axonyx"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "anyhow",
  "axonyx-core",

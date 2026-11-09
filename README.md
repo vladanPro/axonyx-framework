@@ -10,6 +10,9 @@ Current builds emit framework inspection artifacts under `dist/_ax`, including
 the Melt graph, content manifests, and state manifests when Axonyx sources declare
 state signals.
 
+Opt-in [translation catalog validation](docs/translation-catalogs-v0.md)
+checks JSON catalogs during build preflight and lists their sources in Melt.
+
 ## What Works Today
 
 - JSX-like `.asx` authoring in `app/**/page.asx` and `app/**/layout.asx`

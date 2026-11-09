@@ -217,6 +217,7 @@ fn compiled_host_embeds_policy_only_for_explicit_scoped_limits() {
             storage_configs: &[],
             action_routes: &routes,
             action_body_limits: &limits,
+            catalogs: None,
         },
     );
     assert!(source.contains(include_str!("action_routes.rs")));

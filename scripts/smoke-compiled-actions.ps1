@@ -400,9 +400,18 @@ action RefreshSession() {
 root = "storage/media"
 access = "read-write"
 max_file_bytes = "64kb"
+
+[i18n]
+locale = "sr-Latn"
+fallback = "en"
 '@,
     (New-Object System.Text.UTF8Encoding($false))
   )
+  foreach ($locale in @("en", "sr-Latn")) {
+    New-Item -ItemType Directory -Path (Join-Path $appRoot "locales/$locale") -Force | Out-Null
+  }
+  [IO.File]::WriteAllText((Join-Path $appRoot "locales/en/messages.json"), '{"posts.label":"Read post","posts.fallback":"English fallback"}')
+  [IO.File]::WriteAllText((Join-Path $appRoot "locales/sr-Latn/messages.json"), '{"posts.label":"Procitaj objavu"}')
 
   $detailRoot = Join-Path $appRoot "app/posts/[slug]"
   New-Item -ItemType Directory -Path $detailRoot -Force | Out-Null
@@ -433,14 +442,19 @@ action ValidateDetail(email: String) {
     (New-Object System.Text.UTF8Encoding($false))
   )
   [System.IO.File]::WriteAllText(
-    (Join-Path $detailRoot "page.ax"),
+    (Join-Path $detailRoot "page.asx"),
     @'
 page PostDetail() {
 data posts = loadPost(params.slug)
+const label = t("posts.label")
+const translate = I18n.withLocale(posts.slug)
+const regionLabel = translate("posts.label")
 return ASX {
   <Container max="xl">
     <Card title={posts.title}>
       <Copy>{posts.excerpt}</Copy>
+      <p>{label} {t("posts.fallback")}</p>
+      <p lang="en">{regionLabel}</p>
     </Card>
     <ActionForm name="ValidateDetail">
       <input name="email" />
@@ -1076,8 +1090,12 @@ route GET "/api/forbidden-loader" {
   $detailPayload = $detailData.Body | ConvertFrom-Json
   if (!$detailPayload.ok -or $detailPayload.value.title -ne "Fresh parameterized title") { throw "Parameterized loader response is invalid: $($detailData.Body)" }
   if ($detailPayload.html -notmatch 'data-ax-root="page"' -or $detailPayload.html -notmatch "Fresh parameterized title") { throw "Parameterized page HTML was not regenerated: $($detailData.Body)" }
+  if ($detailPayload.html -notmatch "Procitaj objavu" -or $detailPayload.html -notmatch "English fallback") { throw "Compiled data fragment lost the configured translation or fallback" }
+  if ($detailPayload.html -notmatch '<p lang="en">Read post</p>') { throw "Compiled data fragment lost the bound translator and locale fallback" }
   $detailPage = Invoke-AxRequest -Url "$baseUrl/posts/fresh-compiled-post" -Method GET
   if ($detailPage.Body -notmatch "Fresh parameterized title" -or $detailPage.Headers["Cache-Control"] -ne "no-store") { throw "Compiled GET lost dynamic route parameters or served stale HTML" }
+  if ($detailPage.Body -notmatch '<html lang="sr-Latn"' -or $detailPage.Body -notmatch "Procitaj objavu" -or $detailPage.Body -notmatch "English fallback") { throw "Compiled GET did not render the configured locale and fallback" }
+  if ($detailPage.Body -notmatch '<p lang="en">Read post</p>') { throw "Compiled GET lost the bound translator and locale fallback" }
   $detailHead = Invoke-AxRequest -Url "$baseUrl/posts/fresh-compiled-post" -Method HEAD
   if ($detailHead.Body -ne "" -or $detailHead.Headers["Content-Type"] -notmatch "text/html") { throw "Compiled HEAD returned a body or lost its document content type" }
   foreach ($body in @("email=invalid&slug=attacker-selected-post", "slug=attacker-selected-post")) {

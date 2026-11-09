@@ -58,9 +58,7 @@ use axonyx_runtime::{
     execute_preview_action_request_sources_with_runtime_and_storage,
     execute_preview_action_request_sources_with_storage,
     execute_preview_route_request_sources_validated,
-    execute_preview_route_request_sources_with_runtime_validated,
-    preview_ax_route_with_request_context_and_imports,
-    preview_ax_route_with_request_context_and_runtime_and_imports, AxApiResponseValidationMode,
+    execute_preview_route_request_sources_with_runtime_validated, AxApiResponseValidationMode,
     AxPreviewActionResult, AxPreviewHttpResponse, AxPreviewStatePatch, AxPreviewStore,
     AX_STATE_WASM_PATH,
 };
@@ -72,6 +70,7 @@ mod action_routes_tests;
 mod action_selector;
 #[cfg(test)]
 mod action_selector_tests;
+mod i18n;
 #[cfg(test)]
 mod private_binary_tests;
 #[cfg(test)]
@@ -100,7 +99,7 @@ const DOCS_GETTING_STARTED_AX: &str =
 const DOCS_REFERENCE_AX: &str = include_str!("../templates/docs/app/docs/reference/page.asx.tpl");
 const DOCS_EXAMPLES_AX: &str = include_str!("../templates/docs/app/docs/examples/page.asx.tpl");
 const AXONYX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
-const AXONYX_RUNTIME_VERSION: &str = "0.8.3";
+const AXONYX_RUNTIME_VERSION: &str = "0.8.4";
 const AXONYX_UI_VERSION: &str = "0.0.86";
 const AXONYX_UI_USE_DIRECTIVE: &str = "use \"@axonyx/ui\"";
 const AXONYX_UI_STYLESHEET_HREF: &str = "/_ax/pkg/axonyx-ui/index.css";
@@ -1495,6 +1494,8 @@ struct MeltReport {
     components: ComponentReport,
     component_usage: ComponentUsageReport,
     content: ContentManifest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    i18n: Option<i18n::CatalogReport>,
     diagnostics: Vec<CheckDiagnostic>,
     summary: MeltSummary,
 }
@@ -5410,7 +5411,9 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
     let components = collect_component_report(root)?;
     let component_usage = collect_component_usage_report(root, &routes)?;
     let content = collect_content_manifest(root)?;
-    let diagnostics = check_app_sources(root)?;
+    let catalogs = i18n::inspect(root);
+    let diagnostics = check_app_sources_with_catalog(root, &catalogs)?;
+    let i18n = catalogs.ok().flatten().map(|inputs| inputs.report);
     let summary = melt_summary(
         &routes,
         &api,
@@ -5441,6 +5444,7 @@ fn collect_melt_report(root: &Path) -> Result<MeltReport> {
         components,
         component_usage,
         content,
+        i18n,
         diagnostics,
         summary,
     })
@@ -8273,6 +8277,13 @@ fn content_slug(collection_root: &Path, path: &Path) -> String {
 }
 
 fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
+    check_app_sources_with_catalog(root, &i18n::inspect(root))
+}
+
+fn check_app_sources_with_catalog(
+    root: &Path,
+    catalogs: &Result<Option<i18n::CatalogInputs>, CheckDiagnostic>,
+) -> Result<Vec<CheckDiagnostic>> {
     let mut files = Vec::new();
     collect_ax_files(&root.join("app"), &mut files)?;
     collect_ax_files(&root.join("routes"), &mut files)?;
@@ -8280,14 +8291,17 @@ fn check_app_sources(root: &Path) -> Result<Vec<CheckDiagnostic>> {
 
     let shared_returns = shared_query_return_types(root)?;
     let mut diagnostics = Vec::new();
+    let catalog = catalogs.as_ref().ok().and_then(Option::as_ref);
     for file in files {
         diagnostics.extend(check_ax_file_with_context(
             &file,
             Some(root),
             Some(&shared_returns),
+            catalog,
         )?);
     }
     diagnostics.extend(check_axonyx_config(root)?);
+    diagnostics.extend(catalogs.as_ref().err().cloned());
     diagnostics.extend(check_route_manifest(root)?);
     diagnostics.extend(check_action_patch_contracts(root)?);
     diagnostics.extend(check_storage_action_contracts(root)?);
@@ -9104,13 +9118,18 @@ fn check_ax_file_with_root(path: &Path, root: Option<&Path>) -> Result<Vec<Check
         .map(shared_query_return_types)
         .transpose()?
         .unwrap_or_default();
-    check_ax_file_with_context(path, root, Some(&shared_returns))
+    let catalogs = root.map_or(Ok(None), i18n::inspect);
+    let catalog = catalogs.as_ref().ok().and_then(Option::as_ref);
+    let mut diagnostics = check_ax_file_with_context(path, root, Some(&shared_returns), catalog)?;
+    diagnostics.extend(catalogs.err());
+    Ok(diagnostics)
 }
 
 fn check_ax_file_with_context(
     path: &Path,
     root: Option<&Path>,
     shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
+    catalog: Option<&i18n::CatalogInputs>,
 ) -> Result<Vec<CheckDiagnostic>> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read .ax file '{}'", path.display()))?;
@@ -9119,6 +9138,7 @@ fn check_ax_file_with_context(
         &source,
         root,
         shared_returns,
+        catalog,
     ))
 }
 
@@ -9131,7 +9151,7 @@ fn check_ax_source_with_root(
     let shared_returns = root
         .and_then(|root| shared_query_return_types(root).ok())
         .unwrap_or_default();
-    check_ax_source_with_context(path, source, root, Some(&shared_returns))
+    check_ax_source_with_context(path, source, root, Some(&shared_returns), None)
 }
 
 fn check_ax_source_with_context(
@@ -9139,6 +9159,7 @@ fn check_ax_source_with_context(
     source: &str,
     root: Option<&Path>,
     shared_returns: Option<&std::collections::BTreeMap<String, Vec<SharedQueryReturn>>>,
+    catalog: Option<&i18n::CatalogInputs>,
 ) -> Vec<CheckDiagnostic> {
     if !is_asx_source_file(path) && looks_like_backend_ax(source) {
         return match parse_backend_ax(source) {
@@ -9153,20 +9174,32 @@ fn check_ax_source_with_context(
         };
     }
 
+    let catalog = catalog.filter(|_| is_asx_source_file(path));
     let is_component_only = !source
         .lines()
         .any(|line| line.trim_start().starts_with("page "));
     if let Some(component_file) = parse_component_report_source(source)
         .filter(|file| is_component_only && !file.components.is_empty())
     {
-        if let Err(error) = convert_ax_v2_file(&component_file) {
-            return vec![diagnostic_from_parse_error(
+        let document = match convert_ax_v2_file(&component_file) {
+            Ok(document) => document,
+            Err(error) => {
+                return vec![diagnostic_from_parse_error(
+                    path,
+                    source,
+                    CheckParseError::Page(AxAutoParseError::Convert(error)),
+                )]
+            }
+        };
+        let mut diagnostics = Vec::new();
+        if let Some(catalog) = catalog {
+            diagnostics.extend(i18n::check_document(
                 path,
                 source,
-                CheckParseError::Page(AxAutoParseError::Convert(error)),
-            )];
+                &document,
+                &catalog.catalog,
+            ));
         }
-        let mut diagnostics = Vec::new();
         if let Some(root) = root {
             let imports = component_file
                 .imports
@@ -9197,6 +9230,14 @@ fn check_ax_source_with_context(
     };
 
     let mut diagnostics = Vec::new();
+    if let Some(catalog) = catalog {
+        diagnostics.extend(i18n::check_document(
+            path,
+            source,
+            &document,
+            &catalog.catalog,
+        ));
+    }
     diagnostics.extend(check_type_annotations(
         path,
         source,
@@ -13279,9 +13320,10 @@ fn build_compiled_production_binary(
     let signal_aliases = compiled_action_signal_aliases(root)?;
     let action_routes = compiled_action_routes(root)?;
     let action_body_limits = configured_action_body_limits(root).map_err(anyhow::Error::msg)?;
-    let data_bindings = compiled_data_bindings(root)?;
-    let page_renderers = compiled_page_renderers(root, &data_bindings)?;
-    let boundary_renderers = compiled_boundary_renderers(root)?;
+    let catalogs = i18n::load_for_render(root)?;
+    let data_bindings = compiled_data_bindings_for(root, catalogs.is_some())?;
+    let page_renderers = compiled_page_renderers(root, &data_bindings, catalogs.is_some())?;
+    let boundary_renderers = compiled_boundary_renderers_for(root, catalogs.is_some())?;
     let database_runtime_defaults = compiled_database_runtime_defaults(root)?;
     let database_required = project_uses_database_runtime(root)?;
     let runtime_config = AxServerRuntimeConfig::from_root(root).map_err(anyhow::Error::msg)?;
@@ -13309,6 +13351,7 @@ fn build_compiled_production_binary(
             storage_configs: &storage_configs,
             action_routes: &action_routes,
             action_body_limits: &action_body_limits,
+            catalogs: catalogs.as_ref(),
         },
     );
     fs::write(&source_path, source).with_context(|| {
@@ -13428,7 +13471,12 @@ fn compiled_action_routes(root: &Path) -> Result<Vec<(String, Vec<String>)>> {
         .collect()
 }
 
+#[cfg(test)]
 fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
+    compiled_data_bindings_for(root, false)
+}
+
+fn compiled_data_bindings_for(root: &Path, i18n_enabled: bool) -> Result<Vec<CompiledDataBinding>> {
     let mut bindings = Vec::new();
     for route in collect_page_route_manifest(root)? {
         let mut names = std::collections::BTreeSet::new();
@@ -13444,6 +13492,9 @@ fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
                 let AxStatement::Data(binding) = statement else {
                     continue;
                 };
+                if i18n_enabled && i18n::is_render_binding(&document, &binding.value) {
+                    continue;
+                }
                 let Some((path, args)) = query_call_from_binding_expr(&binding.value) else {
                     continue;
                 };
@@ -13483,6 +13534,7 @@ fn compiled_data_bindings(root: &Path) -> Result<Vec<CompiledDataBinding>> {
 fn compiled_page_renderers(
     root: &Path,
     data_bindings: &[CompiledDataBinding],
+    i18n_enabled: bool,
 ) -> Result<Vec<CompiledPageRenderer>> {
     let mut renderers = Vec::new();
     for route in collect_page_route_manifest(root)? {
@@ -13530,26 +13582,28 @@ fn compiled_page_renderers(
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let mut expected_bindings = document
-            .page
-            .body
-            .iter()
-            .filter(|statement| matches!(statement, AxStatement::Data(binding) if query_call_from_binding_expr(&binding.value).is_some()))
-            .count();
-        for layout_source in &layout_sources {
-            let layout = parse_ax_auto(layout_source).map_err(anyhow::Error::msg)?;
-            expected_bindings += layout
+        let count_loaders = |document: &axonyx_core::ax_ast::AxDocument| {
+            document
                 .page
                 .body
                 .iter()
-                .filter(|statement| matches!(statement, AxStatement::Data(binding) if query_call_from_binding_expr(&binding.value).is_some()))
-                .count();
+                .filter(|statement| {
+                    matches!(statement, AxStatement::Data(binding)
+                if query_call_from_binding_expr(&binding.value).is_some()
+                    && !(i18n_enabled && i18n::is_render_binding(document, &binding.value)))
+                })
+                .count()
+        };
+        let mut expected_bindings = count_loaders(&document);
+        for layout_source in &layout_sources {
+            let layout = parse_ax_auto(layout_source).map_err(anyhow::Error::msg)?;
+            expected_bindings += count_loaders(&layout);
         }
         if expected_bindings != route_bindings {
             continue;
         }
         let mut full_document =
-            axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+            compose_compiled_render_document(&layout_refs, &source, i18n_enabled)?;
         let uses_ui = layout_refs
             .iter()
             .any(|source| source_uses_package(source, "@axonyx/ui"))
@@ -13611,9 +13665,13 @@ fn compiled_page_renderers(
         let mut seen = std::collections::BTreeSet::new();
         collect_compiled_import_sources(root, &document, &mut seen, &mut import_sources)?;
         collect_compiled_import_sources(root, &full_document, &mut seen, &mut import_sources)?;
+        let mut fragment_document = document;
+        if i18n_enabled {
+            axonyx_runtime::translation::lower_bound_translators(&mut fragment_document, 0)?;
+        }
         renderers.push(CompiledPageRenderer {
             route_pattern: route.route,
-            document_json: serde_json::to_string(&document)
+            document_json: serde_json::to_string(&fragment_document)
                 .context("failed to serialize compiled page AST")?,
             full_document_json: serde_json::to_string(&full_document)
                 .context("failed to serialize complete compiled document AST")?,
@@ -13623,7 +13681,27 @@ fn compiled_page_renderers(
     Ok(renderers)
 }
 
+fn compose_compiled_render_document(
+    layouts: &[&str],
+    source: &str,
+    i18n_enabled: bool,
+) -> Result<axonyx_core::ax_ast::AxDocument> {
+    Ok(if i18n_enabled {
+        axonyx_runtime::compose_localized_page_document(layouts, source)?
+    } else {
+        axonyx_runtime::compose_compiled_page_document(layouts, source)?
+    })
+}
+
+#[cfg(test)]
 fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRenderer>> {
+    compiled_boundary_renderers_for(root, false)
+}
+
+fn compiled_boundary_renderers_for(
+    root: &Path,
+    i18n_enabled: bool,
+) -> Result<Vec<CompiledBoundaryRenderer>> {
     let app_root = root.join("app");
     if !app_root.is_dir() {
         return Ok(Vec::new());
@@ -13644,7 +13722,7 @@ fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRender
                 .page
                 .body
                 .iter()
-                .any(|statement| matches!(statement, AxStatement::Data(_)))
+                .any(|statement| matches!(statement, AxStatement::Data(binding) if !(i18n_enabled && i18n::is_render_binding(&document, &binding.value))))
             {
                 bail!("compiled {name} boundary cannot load route data");
             }
@@ -13664,7 +13742,7 @@ fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRender
                     .page
                     .body
                     .iter()
-                    .any(|statement| matches!(statement, AxStatement::Data(_)))
+                    .any(|statement| matches!(statement, AxStatement::Data(binding) if !(i18n_enabled && i18n::is_render_binding(&parsed, &binding.value))))
                 {
                     bail!("compiled {name} boundary layout cannot load route data");
                 }
@@ -13674,7 +13752,7 @@ fn compiled_boundary_renderers(root: &Path) -> Result<Vec<CompiledBoundaryRender
                 .map(String::as_str)
                 .collect::<Vec<_>>();
             let mut full_document =
-                axonyx_runtime::compose_compiled_page_document(&layout_refs, &source)?;
+                compose_compiled_render_document(&layout_refs, &source, i18n_enabled)?;
             let uses_ui = layout_refs
                 .iter()
                 .any(|layout| source_uses_package(layout, "@axonyx/ui"))
@@ -13903,6 +13981,7 @@ struct CompiledProductionOptions<'a> {
     storage_configs: &'a [AxStorageCapabilityConfig],
     action_routes: &'a [(String, Vec<String>)],
     action_body_limits: &'a [(String, String, usize)],
+    catalogs: Option<&'a i18n::CatalogInputs>,
 }
 
 fn compiled_production_source(
@@ -13925,7 +14004,20 @@ fn compiled_production_source(
         storage_configs,
         action_routes,
         action_body_limits,
+        catalogs,
     } = options;
+    let (translation_helpers, document_renderer, fragment_renderer) = match catalogs {
+        Some(catalogs) => (
+            catalogs.compiled_helpers(),
+            "render_localized_document",
+            "render_localized_fragment",
+        ),
+        None => (
+            String::new(),
+            "axonyx_runtime::render_compiled_page_document",
+            "axonyx_runtime::render_compiled_page_fragment",
+        ),
+    };
     let native_module = if native_registration {
         "#[path = \"../native.rs\"]\nmod native;\n"
     } else {
@@ -14112,7 +14204,7 @@ use std::sync::Arc;
 
 use axonyx_runtime::backend_prelude::{{lazy_runtime_from_env, AxBackendRuntime, AxEnv, AxQueryExecutor}};
 use axonyx_runtime::server_prelude::{{{legacy_server_import}AxBody, AxCompiledHandler, AxCookie, AxHttpRequest, AxHttpResponse}};
-{storage_import}use axonyx_runtime::{{compiled_loader_call_key, render_compiled_page_fragment}};
+{storage_import}use axonyx_runtime::compiled_loader_call_key;
 use serde_json::{{json, Value}};
 
 #[path = "../generated/backend.rs"]
@@ -14121,6 +14213,7 @@ mod backend;
 {action_route_module}
 {native_module}
 {native_storage_module}
+{translation_helpers}
 
 #[derive(Clone, Copy)]
 struct CompiledBinding {{
@@ -14273,7 +14366,7 @@ fn handle_request_inner(
 fn compiled_boundary_response(name: &str, path: &str, status: u16) -> AxHttpResponse {{
     let fallback = || AxHttpResponse::text(status, if status == 404 {{ "Not Found" }} else {{ "Page could not be rendered." }}).with_no_store();
     let Some((document, imports)) = compiled_boundary_document(name, path) else {{ return fallback(); }};
-    match axonyx_runtime::render_compiled_page_document(
+    match {document_renderer}(
         document,
         imports,
         "/",
@@ -14472,7 +14565,7 @@ fn render_compiled_route_document(
             .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page loader missing"))?;
         values.insert(compiled_loader_call_key(binding.loader, &args), value);
     }}
-    axonyx_runtime::render_compiled_page_document(document, imports, &read_request.target, &params, &values, form)
+    {document_renderer}(document, imports, &read_request.target, &params, &values, form)
         .map(Some).map_err(|_| axonyx_runtime::backend::AxRuntimeError::message("compiled document render failed"))
 }}
 
@@ -14572,7 +14665,7 @@ fn handle_compiled_data(
         let html = if let Some((pattern, document, imports)) = compiled_page_renderer(&path) {{
             let params = route_params(pattern, &path)
                 .ok_or_else(|| axonyx_runtime::backend::AxRuntimeError::message("compiled page route did not match"))?;
-            Some(render_compiled_page_fragment(document, imports, &target, &params, &loader_values)
+            Some({fragment_renderer}(document, imports, &target, &params, &loader_values)
                 .map_err(|error| axonyx_runtime::backend::AxRuntimeError::message(error.to_string()))?)
         }} else {{
             None
@@ -15087,6 +15180,7 @@ fn validate_output_dir(root: &Path, out_dir: &Path) -> Result<(PathBuf, PathBuf)
         "routes",
         "jobs",
         "content",
+        "locales",
         "public",
         "migrations",
         "components",
@@ -16218,6 +16312,13 @@ fn display_relative_path(root: &Path, path: &Path) -> String {
 fn print_melt_text(report: &MeltReport) {
     println!("Axonyx Melt");
     println!("  app={} root={}", report.app.name, report.app.root);
+    if let Some(i18n) = &report.i18n {
+        println!(
+            "  i18n fallback={} catalogs={}",
+            i18n.fallback,
+            i18n.sources.len()
+        );
+    }
     println!(
         "  pages={} api={} action_routes={} actions={} state_signals={} state_patches={} scopes={} scope_states={} components={} component_clients={} component_client_routes={} component_client_scripts={} data_bindings={} query_keys={} query_invalidations={} content_collections={} content_entries={} diagnostics={}",
         report.summary.page_routes,
@@ -21568,79 +21669,42 @@ fn render_route_html_with_form_result(
         .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
         .clone();
     let import_resolver = |source: &str| load_preview_import_source(&state.root, source);
+    let catalogs = i18n::load_for_render(&state.root)?;
+    let translator = catalogs.as_ref().map(i18n::CatalogInputs::translator);
 
     let uses_sessions = backend_source_refs_use_sessions(&loader_refs)?;
-    let html = if (use_database_runtime && backend_source_refs_use_database(&loader_refs)?)
+    let runtime = if (use_database_runtime && backend_source_refs_use_database(&loader_refs)?)
         || (request.is_some() && uses_sessions)
     {
         let env = db_env_for_root(&state.root, None)?;
-        let runtime = ax_backend_runtime::runtime_from_env(env)
-            .with_context(|| "failed to initialize page database runtime from environment")?;
-        if let Some(request) = request {
-            if let Some(form) = form {
-                axonyx_runtime::preview_ax_route_with_form_result_and_imports(
-                    &layout_refs,
-                    &loader_refs,
-                    &action_refs,
-                    &page_source,
-                    request,
-                    &route.params,
-                    Some(&runtime),
-                    form,
-                    &store,
-                    &import_resolver,
-                )
-            } else {
-                axonyx_runtime::preview_ax_route_with_http_request_and_runtime_and_imports(
-                    &layout_refs,
-                    &loader_refs,
-                    &action_refs,
-                    &page_source,
-                    request,
-                    &route.params,
-                    &runtime,
-                    &store,
-                    &import_resolver,
-                )
-            }
-        } else {
-            preview_ax_route_with_request_context_and_runtime_and_imports(
-                &layout_refs,
-                &loader_refs,
-                &action_refs,
-                &page_source,
-                &route.request_target,
-                &route.params,
-                &runtime,
-                &store,
-                &import_resolver,
-            )
-        }
-    } else if let (Some(request), Some(form)) = (request, form) {
-        axonyx_runtime::preview_ax_route_with_form_result_and_imports(
-            &layout_refs,
-            &loader_refs,
-            &action_refs,
-            &page_source,
-            request,
-            &route.params,
-            None,
-            form,
-            &store,
-            &import_resolver,
+        Some(
+            ax_backend_runtime::runtime_from_env(env)
+                .with_context(|| "failed to initialize page database runtime from environment")?,
         )
     } else {
-        preview_ax_route_with_request_context_and_imports(
-            &layout_refs,
-            &loader_refs,
-            &action_refs,
-            &page_source,
-            &route.request_target,
-            &route.params,
-            &store,
-            &import_resolver,
-        )
-    }
+        None
+    };
+    let request = request.filter(|_| runtime.is_some() || form.is_some());
+    let html = axonyx_runtime::render_preview_route(
+        axonyx_runtime::AxPreviewRouteRender {
+            layout_sources: &layout_refs,
+            loader_sources: &loader_refs,
+            action_sources: &action_refs,
+            page_source: &page_source,
+            request_target: request.map_or(route.request_target.as_str(), |request| {
+                request.target.as_str()
+            }),
+            route_params: &route.params,
+            runtime: runtime
+                .as_ref()
+                .map(|runtime| runtime as &dyn ax_backend_runtime::AxBackendRuntime),
+            request,
+            form,
+        },
+        &store,
+        &import_resolver,
+        translator,
+    )
     .with_context(|| {
         format!(
             "failed to render route '{}' from '{}'",
@@ -26471,11 +26535,11 @@ page Home
         )
         .unwrap();
         let bindings = compiled_data_bindings(&root).unwrap();
-        assert!(compiled_page_renderers(&root, &bindings)
+        assert!(compiled_page_renderers(&root, &bindings, false)
             .unwrap()
             .is_empty());
         fs::write(root.join("app/loader.ax"), "query loadDocs() {\n  require Auth.subject else forbidden()\n  data docs = Content.Collection(\"docs\")\n  return docs\n}").unwrap();
-        assert!(compiled_page_renderers(&root, &bindings)
+        assert!(compiled_page_renderers(&root, &bindings, false)
             .unwrap_err()
             .to_string()
             .contains("cannot use static fallback"));
@@ -26537,7 +26601,12 @@ page Home
                 .collect::<Vec<_>>(),
             ["heading", "content"]
         );
-        assert_eq!(compiled_page_renderers(&root, &bindings).unwrap().len(), 1);
+        assert_eq!(
+            compiled_page_renderers(&root, &bindings, false)
+                .unwrap()
+                .len(),
+            1
+        );
         fs::write(root.join("app/page.asx"), "page Home() {\n data heading: String = loadContent()\n return ASX { <p>{heading}</p> }\n}").unwrap();
         assert!(compiled_data_bindings(&root)
             .unwrap_err()
@@ -28276,6 +28345,7 @@ action ValidPost
                 storage_configs: &[],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
         assert!(source.contains("#[path = \"../native.rs\"]\nmod native;"));
@@ -28477,6 +28547,7 @@ action ValidPost
                 storage_configs: &[],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
         assert!(source.contains("#[path = \"../native_storage.rs\"]\nmod native_storage;"));
@@ -28533,6 +28604,7 @@ action ValidPost
                 storage_configs: &[],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
 
@@ -28605,6 +28677,7 @@ action ValidPost
                 storage_configs: &[],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
 
@@ -28638,6 +28711,7 @@ action ValidPost
                 }],
                 action_routes: &[],
                 action_body_limits: &[],
+                catalogs: None,
             },
         );
 
@@ -28669,7 +28743,7 @@ action ValidPost
         )
         .unwrap();
         fs::write(root.join("app/register/page.asx"), "page Register\n<form method=\"post\" action=\"/__axonyx/action?name=Register&path=%2Fregister\"><input name=\"email\" /><span data-ax-field-error=\"email\"></span></form>").unwrap();
-        let renderers = compiled_page_renderers(&root, &[]).unwrap();
+        let renderers = compiled_page_renderers(&root, &[], false).unwrap();
         let renderer = renderers
             .iter()
             .find(|item| item.route_pattern == "/register")
