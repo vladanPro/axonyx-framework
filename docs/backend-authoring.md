@@ -10,6 +10,23 @@ Axonyx backend authoring is moving toward a framework-native shape instead of a 
 - `action`
 - `job`
 
+## Comments and Editor Documentation
+
+Backend `.ax` files accept `//` on its own line or after a statement. `//`
+inside a quoted string is part of the string, not a comment. Put `///` lines
+immediately above a declaration to show Markdown documentation in editor hover.
+
+```ax
+/// Returns the default post visibility used by the editor.
+export fn defaultStatus() -> String {
+  return "draft" // Publishing is a separate action.
+}
+```
+
+The formatter preserves comments. A blank line separates a doc comment from
+the declaration below it. Block comments (`/* ... */`) are not supported in
+backend `.ax` files.
+
 ## Example
 
 ```ax

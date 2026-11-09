@@ -4122,11 +4122,13 @@ scope Admin <RenderLayout> {
         let route = root.join("app/posts/loader.ax");
         let domain = root.join("app/posts/domain.ax");
         fs::create_dir_all(root.join("app/posts")).expect("route should be created");
-        fs::write(
-            &domain,
-            "/// Returns whether a post is visible.\nexport fn visible() -> Bool {\n  return true\n}",
+        let documented = "/// Returns whether a post is visible.\nexport fn visible() -> Bool {\n  return true // Shown to readers.\n}";
+        fs::write(&domain, documented).expect("domain should be written");
+        assert!(axonyx_core::ax_language_service::diagnose_ax_source(
+            "app/posts/domain.ax",
+            documented
         )
-            .expect("domain should be written");
+        .is_empty());
         let root_uri = file_uri(&root);
         let route_uri = file_uri(&route);
         let messages = run(vec![
