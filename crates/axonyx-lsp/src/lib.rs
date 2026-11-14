@@ -569,6 +569,20 @@ fn symbol_completions(state: &ServerState, message: &Value) -> Vec<Value> {
             }
         }
         CompletionContext::Namespace { namespace, prefix } => {
+            if kind == AxSourceKind::Backend
+                && namespace == "db"
+                && normalized_line(&document.text, line)
+                    .is_some_and(|source| is_backend_db_completion(source, start_character))
+            {
+                return database_completions(
+                    state,
+                    &importing_path,
+                    prefix,
+                    line,
+                    start_character,
+                    character,
+                );
+            }
             for import in ax_source_imports(&importing_path.to_string_lossy(), &document.text) {
                 let is_namespace = import
                     .bindings
@@ -873,6 +887,104 @@ fn completion_context(
     }
 
     Some((CompletionContext::General { prefix }, start_character))
+}
+
+fn is_backend_db_completion(source: &str, prefix_start: usize) -> bool {
+    let Some(before_db) = utf16_character_to_byte(source, prefix_start)
+        .and_then(|end| source[..end].strip_suffix("db."))
+    else {
+        return false;
+    };
+    if before_db.trim_end().ends_with('.') {
+        return false;
+    }
+
+    let mut quote = None;
+    let mut chars = before_db.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(_) if ch == '\\' => {
+                chars.next();
+            }
+            Some(delimiter) if ch == delimiter => quote = None,
+            None if ch == '"' || ch == '\'' => quote = Some(ch),
+            None if ch == '/' && chars.peek() == Some(&'/') => return false,
+            _ => {}
+        }
+    }
+    quote.is_none()
+}
+
+fn database_completions(
+    state: &ServerState,
+    path: &Path,
+    prefix: &str,
+    line: usize,
+    start: usize,
+    end: usize,
+) -> Vec<Value> {
+    let Some(workspace) = state.workspace_root.as_deref() else {
+        return Vec::new();
+    };
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| path_starts_with(parent, workspace))
+    else {
+        return Vec::new();
+    };
+    let root = parent
+        .ancestors()
+        .take_while(|ancestor| path_starts_with(ancestor, workspace))
+        .find(|ancestor| {
+            ancestor.join("Axonyx.toml").is_file() || ancestor.join("Cargo.toml").is_file()
+        })
+        .unwrap_or(workspace);
+    // Read on demand so a schema pull takes effect without restarting the editor.
+    let Some(schema) = fs::read_to_string(root.join(".axonyx/db/schema.json"))
+        .ok()
+        .and_then(|source| serde_json::from_str::<Value>(&source).ok())
+    else {
+        return Vec::new();
+    };
+    let Some(resources) = schema.get("tables").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut items = BTreeMap::new();
+    for resource in resources {
+        let Some(name) = resource.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let mut bytes = name.bytes();
+        if !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            || !completion_matches(name, prefix)
+        {
+            continue;
+        }
+        let detail = match resource.get("kind").and_then(Value::as_str) {
+            Some("view") => "Database view",
+            Some("table") | None => "Database table",
+            _ => continue,
+        };
+        items.entry(name).or_insert_with(|| {
+            json!({
+                "label": name,
+                "kind": 5,
+                "detail": detail,
+                "textEdit": {
+                    "range": {
+                        "start": { "line": line, "character": start },
+                        "end": { "line": line, "character": end }
+                    },
+                    "newText": name
+                }
+            })
+        });
+    }
+    items.into_values().collect()
 }
 
 fn source_line_start(source: &str, target_line: usize) -> Option<usize> {
@@ -2964,6 +3076,75 @@ mod tests {
             })
         );
         fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn completes_backend_db_resources_from_the_current_project_snapshot() {
+        let workspace = temp_workspace("db-completion");
+        let outer_schema = workspace.join(".axonyx/db");
+        let project = workspace.join("nested");
+        let schema_dir = project.join(".axonyx/db");
+        fs::create_dir_all(&schema_dir).unwrap();
+        fs::create_dir_all(&outer_schema).unwrap();
+        fs::write(
+            outer_schema.join("schema.json"),
+            r#"{"tables":[{"name":"outer"}]}"#,
+        )
+        .unwrap();
+        fs::write(project.join("Axonyx.toml"), "").unwrap();
+        let schema = schema_dir.join("schema.json");
+        let uri = file_uri(&project.join("loader.ax"));
+        let mut state = ServerState {
+            workspace_root: Some(workspace.clone()),
+            ..ServerState::default()
+        };
+        let mut complete = |line: &str| {
+            state.documents.insert(
+                uri.clone(),
+                OpenDocument {
+                    text: format!("export query loadPosts() -> String {{\n{line}\n}}"),
+                    version: Some(1),
+                },
+            );
+            symbol_completions(
+                &state,
+                &json!({
+                    "params": {
+                        "textDocument": { "uri": uri },
+                        "position": { "line": 1, "character": line.encode_utf16().count() }
+                    }
+                }),
+            )
+        };
+
+        assert!(complete("  data posts = db.").is_empty());
+        fs::write(&schema, r#"{"tables":[{"name":"posts"},{"name":"post_feed","kind":"view"},{"name":"users"},{"name":"not-valid"}]}"#).unwrap();
+        let items = complete("  data posts = db.");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["label"], "post_feed");
+        assert_eq!(items[0]["detail"], "Database view");
+        assert_eq!(items[1]["label"], "posts");
+        let line = "  data posts = db.po";
+        let items = complete(line);
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[1]["textEdit"]["range"]["start"]["character"],
+            line.len() - 2
+        );
+        assert_eq!(items[1]["textEdit"]["newText"], "posts");
+        for line in [
+            "  // data unused = db.",
+            "  data text = \"db.",
+            "  data nested = other.db.",
+        ] {
+            assert!(complete(line).is_empty(), "{line}");
+        }
+
+        fs::write(&schema, r#"{"tables":[{"name":"pages"}]}"#).unwrap();
+        assert_eq!(complete("  data pages = db.")[0]["label"], "pages");
+        fs::write(schema, "invalid json").unwrap();
+        assert!(complete("  data pages = db.").is_empty());
+        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
