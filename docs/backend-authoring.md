@@ -455,6 +455,10 @@ In backend `.ax` files, the Axonyx language server suggests tables and views
 when you type `db.`. It reads this local snapshot, never the live database.
 Run `cargo ax db pull` after a schema change; the next completion uses the
 updated snapshot without restarting the editor.
+After `db.posts.`, completion suggests Axonyx query operations. Inside
+`db.posts.where({ ... })`, it suggests columns from that resource, excluding
+keys already present. For tables, write suggestions require an appropriate
+chain: `insert` directly on the table, or `update` and `delete` after a filter.
 
 Current behavior:
 
