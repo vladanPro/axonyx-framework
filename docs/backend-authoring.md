@@ -451,6 +451,11 @@ Use `cargo ax db pull` to write the current database schema snapshot to:
 .axonyx/db/schema.json
 ```
 
+In backend `.ax` files, the Axonyx language server suggests tables and views
+when you type `db.`. It reads this local snapshot, never the live database.
+Run `cargo ax db pull` after a schema change; the next completion uses the
+updated snapshot without restarting the editor.
+
 Current behavior:
 
 - SQLite and Postgres/Supabase table, view, and column introspection is supported.
