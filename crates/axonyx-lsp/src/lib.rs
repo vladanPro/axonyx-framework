@@ -16,6 +16,8 @@ use axonyx_core::ax_language_service_prelude::{
 };
 use serde_json::{json, Value};
 
+mod database_completion;
+
 const JSON_RPC_VERSION: &str = "2.0";
 
 #[derive(Default)]
@@ -159,7 +161,7 @@ fn handle_message<W: Write>(
                             "hoverProvider": true,
                             "completionProvider": {
                                 "resolveProvider": false,
-                                "triggerCharacters": ["<", ".", " ", "=", "\""]
+                                "triggerCharacters": ["<", ".", " ", "=", "\"", "{", ","]
                             }
                         },
                         "serverInfo": {
@@ -516,6 +518,21 @@ fn symbol_completions(state: &ServerState, message: &Value) -> Vec<Value> {
         return Vec::new();
     };
     let kind = classify_ax_source(&importing_path.to_string_lossy(), &document.text);
+    if kind == AxSourceKind::Backend {
+        if let Some(items) =
+            database_completion::complete(state, &importing_path, &document.text, line, character)
+        {
+            return items;
+        }
+    }
+    if matches!(
+        message
+            .pointer("/params/context/triggerCharacter")
+            .and_then(Value::as_str),
+        Some("{" | ",")
+    ) {
+        return Vec::new();
+    }
     let mut items = BTreeMap::<String, Value>::new();
 
     match &context {
@@ -569,20 +586,6 @@ fn symbol_completions(state: &ServerState, message: &Value) -> Vec<Value> {
             }
         }
         CompletionContext::Namespace { namespace, prefix } => {
-            if kind == AxSourceKind::Backend
-                && namespace == "db"
-                && normalized_line(&document.text, line)
-                    .is_some_and(|source| is_backend_db_completion(source, start_character))
-            {
-                return database_completions(
-                    state,
-                    &importing_path,
-                    prefix,
-                    line,
-                    start_character,
-                    character,
-                );
-            }
             for import in ax_source_imports(&importing_path.to_string_lossy(), &document.text) {
                 let is_namespace = import
                     .bindings
@@ -887,104 +890,6 @@ fn completion_context(
     }
 
     Some((CompletionContext::General { prefix }, start_character))
-}
-
-fn is_backend_db_completion(source: &str, prefix_start: usize) -> bool {
-    let Some(before_db) = utf16_character_to_byte(source, prefix_start)
-        .and_then(|end| source[..end].strip_suffix("db."))
-    else {
-        return false;
-    };
-    if before_db.trim_end().ends_with('.') {
-        return false;
-    }
-
-    let mut quote = None;
-    let mut chars = before_db.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match quote {
-            Some(_) if ch == '\\' => {
-                chars.next();
-            }
-            Some(delimiter) if ch == delimiter => quote = None,
-            None if ch == '"' || ch == '\'' => quote = Some(ch),
-            None if ch == '/' && chars.peek() == Some(&'/') => return false,
-            _ => {}
-        }
-    }
-    quote.is_none()
-}
-
-fn database_completions(
-    state: &ServerState,
-    path: &Path,
-    prefix: &str,
-    line: usize,
-    start: usize,
-    end: usize,
-) -> Vec<Value> {
-    let Some(workspace) = state.workspace_root.as_deref() else {
-        return Vec::new();
-    };
-    let Some(parent) = path
-        .parent()
-        .filter(|parent| path_starts_with(parent, workspace))
-    else {
-        return Vec::new();
-    };
-    let root = parent
-        .ancestors()
-        .take_while(|ancestor| path_starts_with(ancestor, workspace))
-        .find(|ancestor| {
-            ancestor.join("Axonyx.toml").is_file() || ancestor.join("Cargo.toml").is_file()
-        })
-        .unwrap_or(workspace);
-    // Read on demand so a schema pull takes effect without restarting the editor.
-    let Some(schema) = fs::read_to_string(root.join(".axonyx/db/schema.json"))
-        .ok()
-        .and_then(|source| serde_json::from_str::<Value>(&source).ok())
-    else {
-        return Vec::new();
-    };
-    let Some(resources) = schema.get("tables").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-
-    let mut items = BTreeMap::new();
-    for resource in resources {
-        let Some(name) = resource.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        let mut bytes = name.bytes();
-        if !bytes
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-            || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            || !completion_matches(name, prefix)
-        {
-            continue;
-        }
-        let detail = match resource.get("kind").and_then(Value::as_str) {
-            Some("view") => "Database view",
-            Some("table") | None => "Database table",
-            _ => continue,
-        };
-        items.entry(name).or_insert_with(|| {
-            json!({
-                "label": name,
-                "kind": 5,
-                "detail": detail,
-                "textEdit": {
-                    "range": {
-                        "start": { "line": line, "character": start },
-                        "end": { "line": line, "character": end }
-                    },
-                    "newText": name
-                }
-            })
-        });
-    }
-    items.into_values().collect()
 }
 
 fn source_line_start(source: &str, target_line: usize) -> Option<usize> {
@@ -2748,7 +2653,7 @@ mod tests {
             messages[0]["result"]["capabilities"]["completionProvider"],
             json!({
                 "resolveProvider": false,
-                "triggerCharacters": ["<", ".", " ", "=", "\""]
+                "triggerCharacters": ["<", ".", " ", "=", "\"", "{", ","]
             })
         );
         assert_eq!(
@@ -3099,6 +3004,8 @@ mod tests {
             ..ServerState::default()
         };
         let mut complete = |line: &str| {
+            let cursor_line = line.bytes().filter(|&byte| byte == b'\n').count() + 1;
+            let cursor_column = line.rsplit('\n').next().unwrap().encode_utf16().count();
             state.documents.insert(
                 uri.clone(),
                 OpenDocument {
@@ -3111,14 +3018,14 @@ mod tests {
                 &json!({
                     "params": {
                         "textDocument": { "uri": uri },
-                        "position": { "line": 1, "character": line.encode_utf16().count() }
+                    "position": { "line": cursor_line, "character": cursor_column }
                     }
                 }),
             )
         };
 
         assert!(complete("  data posts = db.").is_empty());
-        fs::write(&schema, r#"{"tables":[{"name":"posts"},{"name":"post_feed","kind":"view"},{"name":"users"},{"name":"not-valid"}]}"#).unwrap();
+        fs::write(&schema, r#"{"tables":[{"name":"posts","columns":[{"name":"id","ax_type":"Int"},{"name":"slug","ax_type":"String"},{"name":"status"}]},{"name":"post_feed","kind":"view"},{"name":"users"},{"name":"not-valid"}]}"#).unwrap();
         let items = complete("  data posts = db.");
         assert_eq!(items.len(), 3);
         assert_eq!(items[0]["label"], "post_feed");
@@ -3132,6 +3039,36 @@ mod tests {
             line.len() - 2
         );
         assert_eq!(items[1]["textEdit"]["newText"], "posts");
+        let labels = |items: Vec<Value>| {
+            items
+                .into_iter()
+                .map(|item| item["label"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let methods = labels(complete("  db.posts."));
+        for name in ["where", "all", "first", "insert", "order", "join"] {
+            assert!(methods.iter().any(|label| label == name), "{name}");
+        }
+        assert!(!methods.iter().any(|label| label == "delete"));
+        assert!(complete("  db.missing.").is_empty());
+        assert!(!labels(complete("  db.post_feed."))
+            .iter()
+            .any(|label| label == "insert"));
+        let filtered = labels(complete("  db.posts.where({ id: input.id })."));
+        assert!(filtered.iter().any(|label| label == "update"));
+        assert!(filtered.iter().any(|label| label == "delete"));
+        assert!(!filtered.iter().any(|label| label == "insert"));
+        assert!(!labels(complete("  db.posts.all().")).contains(&"where".to_owned()));
+        assert_eq!(labels(complete("  db.posts.where({ s")), ["slug", "status"]);
+        assert_eq!(
+            labels(complete("  db.posts.where({ id: input.id, ")),
+            ["slug", "status"]
+        );
+        assert_eq!(
+            labels(complete("  db.posts.where({\n    id: call(1, 2),\n    st")),
+            ["status"]
+        );
+        assert!(!labels(complete("  db.posts.where({ id: ")).contains(&"slug".to_owned()));
         for line in [
             "  // data unused = db.",
             "  data text = \"db.",
