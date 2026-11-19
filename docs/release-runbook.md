@@ -46,6 +46,10 @@ Why this order:
 
 ## Current CI Gate
 
+For the approved core 0.8.4 / CLI 0.8.10 redirect patch, follow the separate
+[native redirect release gate](releases/native-redirect-0.8.10.md). Runtime
+remains 0.8.4; only publish core and CLI, in that order, after green main CI.
+
 Before publishing, `main` should be green in GitHub Actions.
 
 The framework CI currently checks:

@@ -319,6 +319,11 @@ action RedirectProbe(destination: String) {
   return redirect(input.destination)
 }
 
+action JsonRedirectProbe(destination: String) {
+  data rows = db.query("SELECT ? AS destination", input.destination)
+  return redirect(rows[0]["destination"])
+}
+
 action ExpressionProbe(name: String) {
   data missing = db.users.where({ id: "missing-expression-probe" }).first()
   require missing == null else forbidden()
@@ -1134,6 +1139,10 @@ route GET "/api/forbidden-loader" {
   Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=NotFoundProbe" -ExpectedStatus 404 | Out-Null
   Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=NotFoundProbe" -Body '__ax_patch=true' -Headers @{ Accept = 'application/ax-patch+json' } -ExpectedStatus 404 | Out-Null
   if ($explicitRedirect.Headers["Location"] -ne "/explicit-target") { throw "Explicit action redirect was replaced by the current route" }
+  $jsonRedirect = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=JsonRedirectProbe" -Body "destination=%2Fposts%3Fpage%3D2%26q%3Dnews" -ExpectedStatus 303
+  if ($jsonRedirect.Headers["Location"] -ne "/posts?page=2&q=news") { throw "JSON scalar redirect acquired serialization quotes or lost its query" }
+  $jsonPatchRedirect = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=JsonRedirectProbe" -Body "destination=%2Fposts%3Fpage%3D2%26q%3Dnews&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
+  if (($jsonPatchRedirect.Body | ConvertFrom-Json).redirect -ne "/posts?page=2&q=news") { throw "JSON patch redirect acquired serialization quotes" }
   $redirectPatch = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2Fposts&name=RedirectProbe" -Body "destination=%2Fexplicit-target&__ax_patch=true" -Headers @{ Accept = "application/ax-patch+json" }
   if (($redirectPatch.Body | ConvertFrom-Json).redirect -ne "/explicit-target") { throw "Action patch lost the explicit redirect" }
   $unsafeSelector = Invoke-AxRequest -Url "$baseUrl/__axonyx/action?path=%2F%2Fevil.example&name=Noop" -Body "noop=1" -ExpectedStatus 400
