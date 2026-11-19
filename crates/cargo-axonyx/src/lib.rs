@@ -12387,7 +12387,10 @@ fn looks_like_backend_ax(source: &str) -> bool {
     lines.into_iter().any(|line| {
         let line = line.strip_prefix("export ").unwrap_or(line);
         line.starts_with("route ")
-            || line == "backend"
+            || line.strip_prefix("backend").is_some_and(|tail| {
+                let tail = tail.trim_start();
+                tail.is_empty() || tail.starts_with("//")
+            })
             || line.starts_with("loader ")
             || line.starts_with("query ")
             || line.starts_with("action ")
@@ -26001,8 +26004,9 @@ axonyx-ui = {{ path = "{ui_path}" }}
         fs::write(
             root.join("app").join("posts").join("domain.ax"),
             r#"
+/// Normalizes a status before the route uses it.
 export fn normalizeStatus(status: String) -> String {
-  return status
+  return status // Preserve the original value.
 }
 "#,
         )
@@ -26019,6 +26023,7 @@ loader PostsList
         )
         .expect("loader should write");
 
+        assert!(check_app_sources(&root).unwrap().is_empty());
         let status = compile_backend_from_app_root(&root).expect("build should succeed");
 
         match status {
