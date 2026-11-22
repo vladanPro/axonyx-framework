@@ -56,8 +56,8 @@ Core and Runtime 0.8.5 are already published. The framework source adopts
 them for preview and sets 0.8.5 as the runtime baseline for scaffold and
 upgrade. The native form retry smoke also verifies per-request head metadata
 in preview and in a compiled app built with published Runtime 0.8.5.
-The published CLI and scaffold should be versioned and verified separately
-before changing registry-only onboarding instructions.
+See the [0.8.11 tooling release gate](releases/metadata-tooling-0.8.11.md)
+for the package order and independent-user verification.
 
 Before publishing, `main` should be green in GitHub Actions.
 

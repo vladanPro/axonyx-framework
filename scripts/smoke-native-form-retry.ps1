@@ -1,5 +1,6 @@
 param([int] $Port = 3929)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'assert-page-metadata.ps1')
 $root = Split-Path $PSScriptRoot -Parent
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('axonyx-form-retry-' + [guid]::NewGuid().ToString('N'))
 $process = $null
@@ -28,25 +29,6 @@ function Assert-Replay {
     $json = Invoke-WebRequest $url -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json'; Origin = $Base } -SkipHttpErrorCheck -TimeoutSec 10
     if ($json.StatusCode -ne 422 -or $json.Content.Contains('draft-marker')) { throw 'Private disabled document leaked into JSON response' }
     if (($json.Headers['Cache-Control'] -join ',') -notmatch '\bno-store\b') { throw 'JSON validation response must not be cached' }
-}
-
-function Assert-PageMetadata {
-    param([string] $Base)
-    foreach ($title in @('Fish & Chips', 'Another title')) {
-        $escapedTitle = [Net.WebUtility]::HtmlEncode($title)
-        $query = [uri]::EscapeDataString($title)
-        $response = Invoke-WebRequest "$Base/?title=$query" -TimeoutSec 10
-        $parts = $response.Content -split '</head>', 2
-        if ($parts.Count -ne 2 -or
-            [regex]::Matches($parts[0], '<title>').Count -ne 1 -or
-            !$parts[0].Contains("<title>$escapedTitle | Axonyx</title>") -or
-            $parts[0] -notmatch '<meta(?=[^>]*name="description")(?=[^>]*content="A quoted &quot;value&quot; &amp; plain text")' -or
-            $parts[0] -notmatch '<link(?=[^>]*rel="canonical")(?=[^>]*href="https://example\.test/retry")' -or
-            [regex]::Matches($response.Content, 'rel="canonical"').Count -ne 1 -or
-            $response.Content.Contains('rel="alternate"')) {
-            throw "Incorrect server-rendered metadata for title '$title'"
-        }
-    }
 }
 
 try {
@@ -89,7 +71,7 @@ try {
                 Start-Sleep -Milliseconds 100
             }
             if (!$ready) { throw "$mode server did not become ready" }
-            Assert-PageMetadata -Base $base
+            Assert-PageMetadata -Url "$base/"
             Assert-Replay -Base $base
             Write-Host "Preview/production smoke passed ($mode): per-request page metadata, native form retry and JSON privacy."
             $process.Kill($true)
