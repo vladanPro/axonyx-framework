@@ -1,9 +1,15 @@
 param(
   [string] $WorkDir = "",
-  [int] $Port = 0
+  [int] $Port = 0,
+  [ValidateSet("baseline", "metadata")] [string] $Profile = "baseline"
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "assert-page-metadata.ps1")
+$verifyMetadata = $Profile -eq "metadata"
+$scaffoldVersion = if ($verifyMetadata) { "0.8.7" } else { "0.8.6" }
+$cliVersion = if ($verifyMetadata) { "0.8.11" } else { "0.8.8" }
+$runtimeVersion = if ($verifyMetadata) { "0.8.5" } else { "0.8.3" }
 $ownsWorkDir = [string]::IsNullOrWhiteSpace($WorkDir)
 if ($ownsWorkDir) {
   $WorkDir = Join-Path ([IO.Path]::GetTempPath()) ("axonyx-registry-beta-" + [guid]::NewGuid().ToString("N"))
@@ -33,16 +39,53 @@ function Assert-Link {
   }
 }
 
+function Start-SmokeSite {
+  param([string] $Root, [string[]] $Arguments)
+  $exe = if ($IsWindows) { "cargo-axonyx.exe" } else { "cargo-axonyx" }
+  $start = [Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = Join-Path (Join-Path $toolRoot "bin") $exe
+  $start.WorkingDirectory = $Root
+  $start.UseShellExecute = $false
+  $start.CreateNoWindow = $true
+  foreach ($arg in ($Arguments + @("--host", "127.0.0.1", "--port", "$Port"))) {
+    [void] $start.ArgumentList.Add($arg)
+  }
+  return [Diagnostics.Process]::Start($start)
+}
+
+function Wait-SmokeSite {
+  param([Diagnostics.Process] $Process, [string] $Base)
+  for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    if ($Process.HasExited) { throw "site server exited with code $($Process.ExitCode)" }
+    try {
+      $response = Invoke-WebRequest "$Base/" -TimeoutSec 2 -SkipHttpErrorCheck
+      if ($response.StatusCode -eq 200) { return }
+    } catch { }
+    Start-Sleep -Milliseconds 500
+  }
+  throw "site server did not start"
+}
+
+function Stop-SmokeSite {
+  param([Diagnostics.Process] $Process)
+  if (!$Process) { return }
+  if (!$Process.HasExited) {
+    $Process.Kill($true)
+    $Process.WaitForExit()
+  }
+  $Process.Dispose()
+}
+
 try {
   New-Item -ItemType Directory -Path $toolRoot, $appRoot -Force | Out-Null
   $env:PATH = (Join-Path $toolRoot "bin") + [IO.Path]::PathSeparator + $originalPath
   $env:CARGO_INSTALL_ROOT = $toolRoot
 
   Invoke-CargoStep "install published create-axonyx" {
-    cargo install create-axonyx --version 0.8.6 --locked --root $toolRoot
+    cargo install create-axonyx --version "=$scaffoldVersion" --locked --root $toolRoot
   }
   Invoke-CargoStep "install published cargo-axonyx" {
-    cargo install cargo-axonyx --version 0.8.8 --locked --root $toolRoot
+    cargo install cargo-axonyx --version "=$cliVersion" --locked --root $toolRoot
   }
 
   foreach ($template in @("site", "blog", "docs")) {
@@ -70,9 +113,15 @@ query loadGuardedPage() {
   return true
 }
 '@)
+      if ($verifyMetadata) {
+        $metadataRoute = Join-Path $project "app/metadata"
+        New-Item -ItemType Directory -Path $metadataRoute | Out-Null
+        Copy-Item -Path (Join-Path $PSScriptRoot "../tests/fixtures/native-form-retry/app/*") -Destination $metadataRoute
+      }
     }
     $manifest = Get-Content (Join-Path $project "Cargo.toml") -Raw
-    if ($manifest -notmatch 'axonyx-runtime\s*=\s*\{\s*version\s*=\s*"0\.8\.3"' -or
+    $runtimePattern = 'axonyx-runtime\s*=\s*\{\s*version\s*=\s*"' + [regex]::Escape($runtimeVersion) + '"'
+    if ($manifest -notmatch $runtimePattern -or
         $manifest -notmatch 'axonyx-ui\s*=\s*"0\.0\.86"' -or
         $manifest -match '(?m)^\s*(\[patch\.|.*\b(path|git)\s*=)') {
       throw "$template scaffold did not use published runtime and UI crates"
@@ -80,6 +129,11 @@ query loadGuardedPage() {
 
     Push-Location $project
     try {
+      if ($verifyMetadata) {
+        Invoke-CargoStep "$template resolve Runtime $runtimeVersion" {
+          cargo update -p axonyx-runtime --precise $runtimeVersion
+        }
+      }
       Invoke-CargoStep "$template check" { cargo ax check }
       Invoke-CargoStep "$template strict doctor" { cargo ax doctor --deny-warnings }
       Invoke-CargoStep "$template build" { cargo ax build --clean }
@@ -127,27 +181,17 @@ query loadGuardedPage() {
     $listener.Stop()
   }
   $siteRoot = Join-Path $appRoot "beta-site"
-  $exe = if ($IsWindows) { "cargo-axonyx.exe" } else { "cargo-axonyx" }
-  $start = [Diagnostics.ProcessStartInfo]::new()
-  $start.FileName = Join-Path (Join-Path $toolRoot "bin") $exe
-  $start.WorkingDirectory = $siteRoot
-  $start.UseShellExecute = $false
-  $start.CreateNoWindow = $true
-  foreach ($arg in @("run", "start", "--compiled", "--host", "127.0.0.1", "--port", "$Port")) {
-    [void] $start.ArgumentList.Add($arg)
-  }
-  $server = [Diagnostics.Process]::Start($start)
   $base = "http://127.0.0.1:$Port"
-  $ready = $false
-  for ($attempt = 0; $attempt -lt 60; $attempt++) {
-    if ($server.HasExited) { throw "site server exited with code $($server.ExitCode)" }
-    try {
-      $response = Invoke-WebRequest "$base/" -TimeoutSec 2 -SkipHttpErrorCheck
-      if ($response.StatusCode -eq 200) { $ready = $true; break }
-    } catch { }
-    Start-Sleep -Milliseconds 500
+  if ($verifyMetadata) {
+    $server = Start-SmokeSite -Root $siteRoot -Arguments @("run", "dev")
+    Wait-SmokeSite -Process $server -Base $base
+    Assert-PageMetadata -Url "$base/metadata"
+    Stop-SmokeSite -Process $server
+    $server = $null
   }
-  if (!$ready) { throw "site server did not start" }
+  $server = Start-SmokeSite -Root $siteRoot -Arguments @("run", "start", "--compiled")
+  Wait-SmokeSite -Process $server -Base $base
+  if ($verifyMetadata) { Assert-PageMetadata -Url "$base/metadata" }
 
   foreach ($check in @(
     @{ Path = "/about"; Status = 200; Text = "About" },
@@ -179,11 +223,9 @@ query loadGuardedPage() {
     $handler.Dispose()
   }
   Write-Host "Registry-only Beta 1 smoke passed (site, blog, docs, compiled HTTP, redirect, UI assets, 404)."
+  if ($verifyMetadata) { Write-Host "Published metadata parity passed in run dev and compiled production." }
 } finally {
-  if ($server -and !$server.HasExited) {
-    $server.Kill($true)
-    $server.WaitForExit()
-  }
+  Stop-SmokeSite -Process $server
   $env:PATH = $originalPath
   $env:CARGO_INSTALL_ROOT = $originalInstallRoot
   Set-Location $originalLocation
