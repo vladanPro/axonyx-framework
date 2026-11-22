@@ -1,5 +1,12 @@
 page RetryForm() {
+  data metadata: RetryMetadata = loadRetryMetadata(query.title ?? "Default retry")
   return ASX {
+    <Head>
+      <Title>{metadata.title + " | Axonyx"}</Title>
+      <Meta name="description" content={metadata.description} />
+      <Link rel="canonical" href={metadata.canonical} />
+      <Link rel="alternate" href={null} />
+    </Head>
     <h1>Native form retry smoke</h1>
     <form method="post" action={action SaveDocument} data-ax-retain-fields="title,content_document,ignored">
       <input name="title" value="" />
