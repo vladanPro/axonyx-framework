@@ -1,5 +1,6 @@
 param([int] $Port = 3929)
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'assert-page-metadata.ps1')
 $root = Split-Path $PSScriptRoot -Parent
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('axonyx-form-retry-' + [guid]::NewGuid().ToString('N'))
 $process = $null
@@ -33,8 +34,6 @@ function Assert-Replay {
 try {
     New-Item -ItemType Directory -Path $fixture | Out-Null
     Copy-Item -Path (Join-Path $root 'tests/fixtures/native-form-retry/*') -Destination $fixture -Recurse
-    $runtime = (Join-Path $root 'vendor/axonyx-runtime/crates/axonyx-runtime').Replace('\', '/')
-    [IO.File]::WriteAllText((Join-Path $fixture 'Cargo.toml'), [IO.File]::ReadAllText((Join-Path $fixture 'Cargo.toml.tpl')).Replace('{{RUNTIME_PATH}}', $runtime))
     Push-Location $root
     try {
         & cargo build -p cargo-axonyx --bin cargo-axonyx
@@ -72,8 +71,9 @@ try {
                 Start-Sleep -Milliseconds 100
             }
             if (!$ready) { throw "$mode server did not become ready" }
+            Assert-PageMetadata -Url "$base/"
             Assert-Replay -Base $base
-            Write-Host "Native form retry passed ($mode): escaped document, disabled marker, unmarked exclusion and JSON privacy."
+            Write-Host "Preview/production smoke passed ($mode): per-request page metadata, native form retry and JSON privacy."
             $process.Kill($true)
             $process.WaitForExit()
             $process.Dispose()
