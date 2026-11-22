@@ -50,6 +50,15 @@ For the approved core 0.8.4 / CLI 0.8.10 redirect patch, follow the separate
 [native redirect release gate](releases/native-redirect-0.8.10.md). Runtime
 remains 0.8.4; only publish core and CLI, in that order, after green main CI.
 
+## Server-rendered page metadata
+
+Core and Runtime 0.8.5 are already published. The framework source adopts
+them for preview and sets 0.8.5 as the runtime baseline for scaffold and
+upgrade. The native form retry smoke also verifies per-request head metadata
+in preview and in a compiled app built with published Runtime 0.8.5.
+The published CLI and scaffold should be versioned and verified separately
+before changing registry-only onboarding instructions.
+
 Before publishing, `main` should be green in GitHub Actions.
 
 The framework CI currently checks:

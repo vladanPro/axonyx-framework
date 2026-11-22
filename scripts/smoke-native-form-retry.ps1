@@ -30,11 +30,28 @@ function Assert-Replay {
     if (($json.Headers['Cache-Control'] -join ',') -notmatch '\bno-store\b') { throw 'JSON validation response must not be cached' }
 }
 
+function Assert-PageMetadata {
+    param([string] $Base)
+    foreach ($title in @('Fish & Chips', 'Another title')) {
+        $escapedTitle = [Net.WebUtility]::HtmlEncode($title)
+        $query = [uri]::EscapeDataString($title)
+        $response = Invoke-WebRequest "$Base/?title=$query" -TimeoutSec 10
+        $parts = $response.Content -split '</head>', 2
+        if ($parts.Count -ne 2 -or
+            [regex]::Matches($parts[0], '<title>').Count -ne 1 -or
+            !$parts[0].Contains("<title>$escapedTitle | Axonyx</title>") -or
+            $parts[0] -notmatch '<meta(?=[^>]*name="description")(?=[^>]*content="A quoted &quot;value&quot; &amp; plain text")' -or
+            $parts[0] -notmatch '<link(?=[^>]*rel="canonical")(?=[^>]*href="https://example\.test/retry")' -or
+            [regex]::Matches($response.Content, 'rel="canonical"').Count -ne 1 -or
+            $response.Content.Contains('rel="alternate"')) {
+            throw "Incorrect server-rendered metadata for title '$title'"
+        }
+    }
+}
+
 try {
     New-Item -ItemType Directory -Path $fixture | Out-Null
     Copy-Item -Path (Join-Path $root 'tests/fixtures/native-form-retry/*') -Destination $fixture -Recurse
-    $runtime = (Join-Path $root 'vendor/axonyx-runtime/crates/axonyx-runtime').Replace('\', '/')
-    [IO.File]::WriteAllText((Join-Path $fixture 'Cargo.toml'), [IO.File]::ReadAllText((Join-Path $fixture 'Cargo.toml.tpl')).Replace('{{RUNTIME_PATH}}', $runtime))
     Push-Location $root
     try {
         & cargo build -p cargo-axonyx --bin cargo-axonyx
@@ -72,8 +89,9 @@ try {
                 Start-Sleep -Milliseconds 100
             }
             if (!$ready) { throw "$mode server did not become ready" }
+            Assert-PageMetadata -Base $base
             Assert-Replay -Base $base
-            Write-Host "Native form retry passed ($mode): escaped document, disabled marker, unmarked exclusion and JSON privacy."
+            Write-Host "Preview/production smoke passed ($mode): per-request page metadata, native form retry and JSON privacy."
             $process.Kill($true)
             $process.WaitForExit()
             $process.Dispose()

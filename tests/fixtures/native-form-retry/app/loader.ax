@@ -1,0 +1,9 @@
+export type RetryMetadata {
+  title: String
+  description: String
+  canonical: String
+}
+
+export query loadRetryMetadata(title: String) -> RetryMetadata {
+  return { title: input.title, description: "A quoted \"value\" & plain text", canonical: "https://example.test/retry" }
+}
