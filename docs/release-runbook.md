@@ -52,12 +52,12 @@ remains 0.8.4; only publish core and CLI, in that order, after green main CI.
 
 ## Server-rendered page metadata
 
-Core and Runtime 0.8.5 are already published. The framework source adopts
-them for preview and sets 0.8.5 as the runtime baseline for scaffold and
-upgrade. The native form retry smoke also verifies per-request head metadata
-in preview and in a compiled app built with published Runtime 0.8.5.
-See the [0.8.11 tooling release gate](releases/metadata-tooling-0.8.11.md)
-for the package order and independent-user verification.
+Published Core and Runtime 0.8.6 fix metadata scope under nested layouts.
+The tooling candidates `create-axonyx 0.8.8` and `cargo-axonyx 0.8.12`
+adopt 0.8.6 for preview, scaffold, and upgrade. The earlier 0.8.11
+registry smoke could not build the metadata fixture under the stock site layout.
+See the [0.8.12 tooling release gate](releases/metadata-tooling-0.8.12.md)
+for the package checks and independent-user verification.
 
 Before publishing, `main` should be green in GitHub Actions.
 
