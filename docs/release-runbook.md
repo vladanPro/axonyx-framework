@@ -53,8 +53,8 @@ remains 0.8.4; only publish core and CLI, in that order, after green main CI.
 ## Server-rendered page metadata
 
 Published Core and Runtime 0.8.6 fix metadata scope under nested layouts.
-The tooling candidates `create-axonyx 0.8.8` and `cargo-axonyx 0.8.12`
-adopt 0.8.6 for preview, scaffold, and upgrade. The earlier 0.8.11
+The published tools `create-axonyx 0.8.8` and `cargo-axonyx 0.8.12`
+adopted 0.8.6 for preview, scaffold, and upgrade. The earlier 0.8.11
 registry smoke could not build the metadata fixture under the stock site layout.
 See the [0.8.12 tooling release gate](releases/metadata-tooling-0.8.12.md)
 for the package checks and independent-user verification.
@@ -62,11 +62,13 @@ for the package checks and independent-user verification.
 ## PostgreSQL TLS roots tooling update
 
 Published Runtime 0.8.7 uses the patched `webpki-roots 1.0.12` trust store.
-The tooling candidates `create-axonyx 0.8.9` and `cargo-axonyx 0.8.13`
+The published tools `create-axonyx 0.8.9` and `cargo-axonyx 0.8.13`
 adopt Runtime 0.8.7 for new apps, preview, and upgrade. Core remains at 0.8.6.
 The locked CLI also resolves its HTTPS client to the same patched trust store.
-After both tools are published, rerun `scripts/smoke-registry-beta.ps1 -Profile metadata`
-with the new exact pins. Existing deployments must rebuild to pick up the fix.
+The registry-only acceptance run passed with these exact pins. The default
+`scripts/smoke-registry-beta.ps1` invocation now exercises the metadata profile
+in CI. Use `-Profile baseline` only to reproduce the older published toolchain.
+Existing deployments must rebuild to pick up the fix.
 
 Before publishing, `main` should be green in GitHub Actions.
 

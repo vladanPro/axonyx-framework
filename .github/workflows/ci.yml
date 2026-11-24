@@ -17,7 +17,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Smoke published tools outside the checkout
+      - name: Smoke published tools and page metadata outside the checkout
         shell: pwsh
         run: ./scripts/smoke-registry-beta.ps1
 
