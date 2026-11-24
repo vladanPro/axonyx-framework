@@ -1,7 +1,7 @@
 param(
   [string] $WorkDir = "",
   [int] $Port = 0,
-  [ValidateSet("baseline", "metadata")] [string] $Profile = "baseline"
+  [ValidateSet("baseline", "metadata")] [string] $Profile = "metadata"
 )
 
 $ErrorActionPreference = "Stop"

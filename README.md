@@ -44,7 +44,7 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.8.3"
+axonyx-runtime = "0.8.7"
 axonyx-ui = "0.0.86"
 ```
 
@@ -53,8 +53,8 @@ axonyx-ui = "0.0.86"
 Install the public CLI tools:
 
 ```bash
-cargo install create-axonyx --version 0.8.6 --locked
-cargo install cargo-axonyx --version 0.8.8 --locked
+cargo install create-axonyx --version 0.8.9 --locked
+cargo install cargo-axonyx --version 0.8.13 --locked
 ```
 
 Install the published language server with `cargo install axonyx-lsp`, or use
@@ -159,6 +159,7 @@ The published-tool acceptance check is `scripts/smoke-registry-beta.ps1`.
 It installs those exact CLI releases outside this checkout, scaffolds `site`,
 `blog`, and `docs` against registry crates, then checks builds and the `site`
 compiled HTTP server, guarded query redirects, UI assets, and 404 responses.
+It checks loader-backed page metadata in both dev and compiled production.
 It also rejects build output inside source folders without `--clean`.
 A new scaffold pins `axonyx-ui 0.0.86`; the separate axonyx.dev site currently
 uses `axonyx-ui 0.0.89` and has its own runtime/toolchain pins.
