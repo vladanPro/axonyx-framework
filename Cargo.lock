@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "axonyx-runtime"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "argon2",
  "axonyx-core",
@@ -179,7 +179,7 @@ dependencies = [
  "tokio-postgres-rustls",
  "tokio-util",
  "uuid",
- "webpki-roots 0.26.8",
+ "webpki-roots",
  "zeroize",
  "zeroize_derive",
 ]
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-axonyx"
-version = "0.8.12"
+version = "0.8.13"
 dependencies = [
  "anyhow",
  "axonyx-core",
@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "create-axonyx"
-version = "0.8.8"
+version = "0.8.9"
 dependencies = [
  "anyhow",
  "axonyx-core",
@@ -1904,7 +1904,7 @@ dependencies = [
  "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots 1.0.9",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2032,18 +2032,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.8"
+version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2210b291f7ea53617fbafcc4939f10914214ec15aace5ba62293a668f322c5c9"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
 dependencies = [
  "rustls-pki-types",
 ]

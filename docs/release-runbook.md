@@ -59,6 +59,15 @@ registry smoke could not build the metadata fixture under the stock site layout.
 See the [0.8.12 tooling release gate](releases/metadata-tooling-0.8.12.md)
 for the package checks and independent-user verification.
 
+## PostgreSQL TLS roots tooling update
+
+Published Runtime 0.8.7 uses the patched `webpki-roots 1.0.12` trust store.
+The tooling candidates `create-axonyx 0.8.9` and `cargo-axonyx 0.8.13`
+adopt Runtime 0.8.7 for new apps, preview, and upgrade. Core remains at 0.8.6.
+The locked CLI also resolves its HTTPS client to the same patched trust store.
+After both tools are published, rerun `scripts/smoke-registry-beta.ps1 -Profile metadata`
+with the new exact pins. Existing deployments must rebuild to pick up the fix.
+
 Before publishing, `main` should be green in GitHub Actions.
 
 The framework CI currently checks:

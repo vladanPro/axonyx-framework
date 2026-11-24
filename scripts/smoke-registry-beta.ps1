@@ -7,9 +7,9 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "assert-page-metadata.ps1")
 $verifyMetadata = $Profile -eq "metadata"
-$scaffoldVersion = if ($verifyMetadata) { "0.8.8" } else { "0.8.6" }
-$cliVersion = if ($verifyMetadata) { "0.8.12" } else { "0.8.8" }
-$runtimeVersion = if ($verifyMetadata) { "0.8.6" } else { "0.8.3" }
+$scaffoldVersion = if ($verifyMetadata) { "0.8.9" } else { "0.8.6" }
+$cliVersion = if ($verifyMetadata) { "0.8.13" } else { "0.8.8" }
+$runtimeVersion = if ($verifyMetadata) { "0.8.7" } else { "0.8.3" }
 $ownsWorkDir = [string]::IsNullOrWhiteSpace($WorkDir)
 if ($ownsWorkDir) {
   $WorkDir = Join-Path ([IO.Path]::GetTempPath()) ("axonyx-registry-beta-" + [guid]::NewGuid().ToString("N"))
