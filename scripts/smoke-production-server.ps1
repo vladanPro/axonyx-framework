@@ -197,7 +197,9 @@ function Invoke-SmokeCurlRequest {
   }
   $args += $Url
 
-  $raw = & curl.exe @args
+  $curlName = if ($IsWindows) { "curl.exe" } else { "curl" }
+  $curl = Get-Command $curlName -CommandType Application -ErrorAction Stop
+  $raw = & $curl.Source @args
   if ($LASTEXITCODE -ne 0) {
     throw "curl failed for $Url with exit code $LASTEXITCODE"
   }
