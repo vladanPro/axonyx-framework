@@ -27,6 +27,10 @@ const APP_ERROR_AX: &str = include_str!("../templates/minimal/app/error.asx.tpl"
 const APP_POSTS_PAGE_AX: &str = include_str!("../templates/minimal/app/posts/page.asx.tpl");
 const APP_POSTS_LOADER_AX: &str = include_str!("../templates/minimal/app/posts/loader.ax.tpl");
 const APP_POSTS_ACTIONS_AX: &str = include_str!("../templates/minimal/app/posts/actions.ax.tpl");
+const APP_POSTS_MIGRATION_UP: &str =
+    include_str!("../templates/minimal/db/migrations/create-posts/up.sql");
+const APP_POSTS_MIGRATION_DOWN: &str =
+    include_str!("../templates/minimal/db/migrations/create-posts/down.sql");
 const APP_ROUTE_POSTS_AX: &str = include_str!("../templates/minimal/routes/api/posts.ax.tpl");
 const APP_JOB_DIGEST_AX: &str = include_str!("../templates/minimal/jobs/digest.ax.tpl");
 const APP_README: &str = include_str!("../templates/minimal/README.md.tpl");
@@ -211,6 +215,14 @@ pub fn template_files(
                 TemplateFile {
                     relative_path: "app/posts/actions.ax",
                     contents: apply_vars(APP_POSTS_ACTIONS_AX, &vars),
+                },
+                TemplateFile {
+                    relative_path: "db/migrations/20260101000000_001_create_posts/up.sql",
+                    contents: APP_POSTS_MIGRATION_UP.to_string(),
+                },
+                TemplateFile {
+                    relative_path: "db/migrations/20260101000000_001_create_posts/down.sql",
+                    contents: APP_POSTS_MIGRATION_DOWN.to_string(),
                 },
                 TemplateFile {
                     relative_path: "routes/api/posts.ax",
