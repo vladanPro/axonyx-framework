@@ -70,6 +70,20 @@ The registry-only acceptance run passed with these exact pins. The default
 in CI. Use `-Profile baseline` only to reproduce the older published toolchain.
 Existing deployments must rebuild to pick up the fix.
 
+## First-posts tooling patch
+
+This tooling-only patch ships `axonyx-lsp 0.8.5`, `create-axonyx 0.8.10`,
+and `cargo-axonyx 0.8.14`. LSP adds route-local loader navigation; the
+minimal scaffold includes typed post actions and its first SQLite migration;
+the CLI reports query provenance in Melt and compiled mode requirements in
+Doctor. Core 0.8.6, Runtime 0.8.7, and the scaffold's UI 0.0.86 are unchanged.
+
+Promote the release commit through `dev` to `main`. Wait for green main CI
+and verified packaging for the three tooling crates. Publish in the order
+above, skipping unchanged crates. Update the registry smoke and public install
+pins only once the released tools are available and a registry-only install
+recreates the SQLite first-posts workflow without a framework checkout.
+
 Before publishing, `main` should be green in GitHub Actions.
 
 The framework CI currently checks:
