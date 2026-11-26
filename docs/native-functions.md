@@ -1,7 +1,8 @@
 # Application native functions V0
 
-This development feature connects trusted application Rust code to backend
-`Native.call` bindings. It is not yet part of a new published CLI/runtime release.
+This feature connects trusted application Rust code to server-side
+`Native.call` bindings. It is available with Axonyx Runtime 0.8.7 and
+`cargo-axonyx 0.8.13`.
 
 Create `src/native.rs` in the application:
 
@@ -23,8 +24,8 @@ pub fn register(registry: &mut AxNativeRegistry) -> Result<(), AxNativeError> {
 ```
 
 Add `serde` with the `derive` feature to the application's Cargo dependencies.
-The example uses the runtime version from this development branch; existing
-registry versions may not contain this API.
+Serde validates input at the Rust boundary. A Rust input struct does not
+automatically introduce an Axonyx source type.
 
 Use the registered function in a server `.ax` route or action:
 

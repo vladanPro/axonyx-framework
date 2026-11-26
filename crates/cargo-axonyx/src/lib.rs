@@ -1286,6 +1286,8 @@ struct DataBindingReport {
     query_key: Vec<String>,
     ty: Option<String>,
     type_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    definition_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4167,6 +4169,7 @@ fn doctor_checks(root: &Path, deploy: Option<DeployTarget>) -> Vec<DoctorCheck> 
             "cargo update -p axonyx-runtime",
         ));
     }
+    checks.push(doctor_execution_mode_check(root));
     checks.push(doctor_server_streaming_check(root));
     checks.push(doctor_server_body_limit_check(root));
     checks.push(doctor_action_body_limits_check(root));
@@ -4303,6 +4306,39 @@ fn doctor_server_body_limit_check(root: &Path) -> DoctorCheck {
                 "Set [server].max_body_bytes to a positive number, or a string such as \"1mb\".",
             ),
         },
+    }
+}
+
+fn doctor_execution_mode_check(root: &Path) -> DoctorCheck {
+    const COMPILED: &str = "Run cargo ax build --compiled, then cargo ax run start --compiled.";
+    let mode = (|| -> Result<Vec<&'static str>> {
+        let mut reasons = Vec::new();
+        if application_has_native_registration(root)? {
+            reasons.push("src/native.rs");
+        }
+        if application_has_native_storage(root)? {
+            reasons.push("src/native_storage.rs");
+        }
+        Ok(reasons)
+    })();
+    let (severity, message, hint) = match mode {
+        Ok(reasons) if reasons.is_empty() => (
+            DoctorSeverity::Ok,
+            "No application-native Rust hooks require the compiled server.".to_string(),
+            None,
+        ),
+        Ok(reasons) => (
+            DoctorSeverity::Ok,
+            format!("Compiled server required by {}.", reasons.join(" and ")),
+            Some(COMPILED),
+        ),
+        Err(error) => (DoctorSeverity::Error, error.to_string(), None),
+    };
+    DoctorCheck {
+        code: "execution-mode",
+        severity,
+        message,
+        hint,
     }
 }
 
@@ -5628,6 +5664,10 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
         };
         let file = parse_ax_v2(&source).ok();
         let loader_returns = route_local_query_return_types(&file_path).unwrap_or_default();
+        let loader_file = route
+            .file
+            .rsplit_once('/')
+            .map(|(directory, _)| format!("{directory}/loader.ax"));
 
         let bindings = document
             .page
@@ -5637,6 +5677,7 @@ fn collect_data_report(root: &Path, routes: &RoutesReport) -> Result<DataReport>
                 data_binding_report_from_statement_with_types(
                     statement,
                     file.as_ref(),
+                    loader_file.as_deref(),
                     &loader_returns,
                     &shared_returns,
                 )
@@ -6435,6 +6476,7 @@ fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBin
     data_binding_report_from_statement_with_types(
         statement,
         None,
+        None,
         &std::collections::BTreeMap::new(),
         &std::collections::BTreeMap::new(),
     )
@@ -6443,6 +6485,7 @@ fn data_binding_report_from_statement(statement: &AxStatement) -> Option<DataBin
 fn data_binding_report_from_statement_with_types(
     statement: &AxStatement,
     file: Option<&axonyx_core::ax_ast_v2_prelude::AxFileV2>,
+    loader_file: Option<&str>,
     loader_returns: &std::collections::BTreeMap<String, Option<AxType>>,
     shared_returns: &std::collections::BTreeMap<String, Vec<SharedQueryReturn>>,
 ) -> Option<DataBindingReport> {
@@ -6454,7 +6497,16 @@ fn data_binding_report_from_statement_with_types(
         return None;
     };
 
-    if !is_query_function_path(path) {
+    let (known_query, definition_file) = match path {
+        [name] if loader_returns.contains_key(name) => (true, loader_file),
+        [name] => match shared_returns.get(name).map(Vec::as_slice) {
+            Some([candidate]) => (true, Some(candidate.file.as_str())),
+            Some(candidates) => (!candidates.is_empty(), None),
+            None => (false, None),
+        },
+        _ => (false, None),
+    };
+    if !known_query && !is_query_function_path(path) {
         return None;
     }
 
@@ -6481,6 +6533,7 @@ fn data_binding_report_from_statement_with_types(
         query_key,
         ty,
         type_source: type_source.to_string(),
+        definition_file: definition_file.map(str::to_string),
     })
 }
 
@@ -16408,6 +16461,9 @@ fn print_data_text(report: &DataReport) {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            if let Some(file) = &binding.definition_file {
+                println!("      defined in {file}");
+            }
         }
     }
 }
@@ -24434,6 +24490,10 @@ action publishPost(id: String) -> Post {
             Some("List<Post>")
         );
         assert_eq!(report.data.routes[0].bindings[0].type_source, "loader");
+        assert_eq!(
+            report.data.routes[0].bindings[0].definition_file.as_deref(),
+            Some("app/loader.ax")
+        );
         assert_eq!(report.loaders[0].name, "loadPosts");
         assert_eq!(report.loaders[0].returns.as_deref(), Some("Post[]"));
         assert_eq!(report.loaders[0].inputs[0].name, "status");
@@ -30003,6 +30063,27 @@ route DELETE "/api/posts/:slug"
     }
 
     #[test]
+    fn doctor_explains_when_native_hooks_require_compiled_execution() {
+        let root = make_temp_dir("doctor-native-execution-mode");
+        let preview = doctor_execution_mode_check(&root);
+        assert!(matches!(preview.severity, DoctorSeverity::Ok));
+        assert_eq!(preview.hint, None);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/native.rs"), "").unwrap();
+        fs::write(root.join("src/native_storage.rs"), "").unwrap();
+        let compiled = doctor_execution_mode_check(&root);
+        assert!(matches!(compiled.severity, DoctorSeverity::Ok));
+        assert!(compiled
+            .message
+            .contains("src/native.rs and src/native_storage.rs"));
+        assert!(compiled
+            .hint
+            .unwrap()
+            .contains("cargo ax run start --compiled"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn doctor_reports_page_streaming_config() {
         let root = make_temp_dir("doctor-stream-pages");
         fs::create_dir_all(root.join("app")).expect("app dir should exist");
@@ -35346,6 +35427,10 @@ return ASX {
         assert_eq!(
             report.data.routes[0].bindings[0].type_source,
             "shared-query"
+        );
+        assert_eq!(
+            report.data.routes[0].bindings[0].definition_file.as_deref(),
+            Some("app/shared/queries.ax")
         );
 
         fs::remove_dir_all(root).expect("temp dir should clean up");

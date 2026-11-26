@@ -161,8 +161,11 @@ It installs those exact CLI releases outside this checkout, scaffolds `site`,
 compiled HTTP server, guarded query redirects, UI assets, and 404 responses.
 It checks loader-backed page metadata in both dev and compiled production.
 It also rejects build output inside source folders without `--clean`.
-A new scaffold pins `axonyx-ui 0.0.86`; the separate axonyx.dev site currently
-uses `axonyx-ui 0.0.89` and has its own runtime/toolchain pins.
+A new scaffold pins `axonyx-ui 0.0.86`; the separate axonyx.dev site has
+its own [runtime and UI versions](https://axonyx.dev/docs/getting-started).
+
+See [Getting Started](docs/getting-started.md) for the app workflow and
+[AGENTS.md](AGENTS.md) for a short map of the source and verification boundaries.
 
 For full-stack apps, create and run ordered database migrations through the
 same configured runtime adapter used by loaders, actions, and API routes:

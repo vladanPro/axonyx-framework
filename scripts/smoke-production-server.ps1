@@ -47,7 +47,9 @@ function Invoke-SmokeRequest {
 
     [string] $ExpectHeader = "",
 
-    [string] $ExpectHeaderValue = ""
+    [string] $ExpectHeaderValue = "",
+
+    [switch] $SkipBody
   )
 
   $request = [System.Net.HttpWebRequest]::Create($Url)
@@ -91,7 +93,7 @@ function Invoke-SmokeRequest {
     }
 
     $text = ""
-    if ($Method -ne "HEAD") {
+    if ($Method -ne "HEAD" -and !$SkipBody) {
       $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
       try {
         $text = $reader.ReadToEnd()
@@ -162,48 +164,14 @@ function Invoke-TemplateRouteChecks {
   Invoke-SmokeRequest -Url "$BaseUrl/posts" -ExpectedStatus 200 -Expect "Posts" | Out-Null
   Invoke-SmokeRequest -Url "$BaseUrl/api/posts" -ExpectedStatus 200 -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
   Invoke-SmokeRequest -Url "$BaseUrl/api/posts" -Method "POST" -Body "title=Smoke+Post&featured=true" -ExpectedStatus 200 -Expect "Smoke Post" | Out-Null
-  Invoke-SmokeCurlRequest -Url "$BaseUrl/__axonyx/action?path=%2Fposts&name=CreatePost" -Method "POST" -Body "title=Smoke+Action&excerpt=Action+body&status=review" -Headers @("Accept: application/ax-patch+json", "Content-Type: application/x-www-form-urlencoded") -ExpectedStatus 200 -Expect "draftStatus|review" | Out-Null
-}
-
-function Invoke-SmokeCurlRequest {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string] $Url,
-
-    [string] $Method = "GET",
-
-    [int] $ExpectedStatus = 200,
-
-    [string] $Body = "",
-
-    [string[]] $Headers = @(),
-
-    [string] $Expect = ""
-  )
-
-  $args = @("-sS", "-i", "-X", $Method)
-  foreach ($header in $Headers) {
-    $args += @("-H", $header)
-  }
-  if (![string]::IsNullOrEmpty($Body)) {
-    $args += @("--data", $Body)
-  }
-  $args += $Url
-
-  $raw = & curl.exe @args
-  if ($LASTEXITCODE -ne 0) {
-    throw "curl failed for $Url with exit code $LASTEXITCODE"
-  }
-
-  $text = ($raw -join "`n")
-  if ($text -notmatch "^HTTP/\S+\s+$ExpectedStatus\b") {
-    throw "Expected HTTP $ExpectedStatus from $Url, got response:`n$text"
-  }
-  if (![string]::IsNullOrEmpty($Expect) -and $text -notmatch $Expect) {
-    throw "Expected curl response from $Url to match '$Expect'"
-  }
-
-  return $text
+  $action = "$BaseUrl/__axonyx/action?path=%2Fposts&name=CreatePost"
+  $headers = @{ Accept = "application/ax-patch+json"; Origin = $BaseUrl }
+  Invoke-SmokeRequest -Url $action -Method POST -Body "title=&excerpt=Invalid&status=draft" -Headers $headers -ExpectedStatus 422 -Expect "Enter a title" | Out-Null
+  Invoke-SmokeRequest -Url $action -Method POST -Body "title=Smoke+Action&excerpt=Action+body&status=draft" -Headers $headers -ExpectedStatus 200 -Expect '"ok":\s*true' | Out-Null
+  $posts = (Invoke-SmokeRequest -Url "$BaseUrl/api/posts").Body | ConvertFrom-Json
+  $saved = @($posts | Where-Object { $_.title -eq "Smoke Action" -and $_.status -eq "draft" })
+  if ($saved.Count -ne 1) { throw "Expected one saved SQLite draft" }
+  Invoke-SmokeRequest -Url "$BaseUrl/posts" -ExpectedStatus 200 -Expect "Smoke Action" | Out-Null
 }
 
 function Invoke-OversizedHeaderSmoke {
@@ -323,15 +291,29 @@ try {
   try {
     Push-Location $WorkDir
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p create-axonyx -- $appName --yes --template $Template --runtime-source path
+    if ($LASTEXITCODE -ne 0) { throw "Starter scaffold failed" }
   } finally {
     Pop-Location
   }
 
   try {
     Push-Location $appRoot
+    if ($Template -eq "minimal") {
+      $env:AX_SECRET_DB_DRIVER = "sqlite"
+      $env:AX_SECRET_DB_DIALECT = "sqlite"
+      $env:AX_SECRET_DB_URL = "sqlite://posts.db"
+      $manifest = Join-Path $frameworkRoot "Cargo.toml"
+      foreach ($step in @("migrate", "pull")) {
+        cargo run --locked --manifest-path $manifest -p cargo-axonyx --bin cargo-axonyx -- db $step
+        if ($LASTEXITCODE -ne 0) { throw "Starter database step failed: $step" }
+      }
+    }
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- check
+    if ($LASTEXITCODE -ne 0) { throw "Starter check failed" }
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- doctor --deny-warnings
+    if ($LASTEXITCODE -ne 0) { throw "Starter doctor failed" }
     cargo run --manifest-path (Join-Path $frameworkRoot "Cargo.toml") -p cargo-axonyx --bin cargo-axonyx -- build --clean
+    if ($LASTEXITCODE -ne 0) { throw "Starter build failed" }
   } finally {
     Pop-Location
   }
@@ -353,22 +335,13 @@ try {
     "$Port"
   )
 
-  if ($Template -eq "minimal") {
-    $dbPath = Join-Path $appRoot "production-smoke.db"
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
-    $schema = "CREATE TABLE posts (id TEXT PRIMARY KEY, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL)"
-    $seed = "INSERT INTO posts (id,title,excerpt,status) VALUES (?,?,?,?)"
-    & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.commit();db.close()' $dbPath $schema $seed "smoke-1" "Smoke post" "Production smoke data" "published"
-    if ($LASTEXITCODE -ne 0) { throw "failed to seed production smoke SQLite database" }
-    $env:AX_SECRET_DB_DRIVER = "sqlite"
-    $env:AX_SECRET_DB_DIALECT = "sqlite"
-    $env:AX_SECRET_DB_URL = $dbPath
-  } else {
+  if ($Template -ne "minimal") {
     $env:AX_SECRET_DB_DRIVER = "memory"
     $env:AX_SECRET_DB_DIALECT = "memory"
   }
-  $serverProcess = Start-Process -FilePath "cargo" -ArgumentList $args -WorkingDirectory $appRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+  $windowOptions = @{}
+  if ($IsWindows) { $windowOptions.WindowStyle = "Hidden" }
+  $serverProcess = Start-Process -FilePath "cargo" -ArgumentList $args -WorkingDirectory $appRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru @windowOptions
 
   $baseUrl = "http://127.0.0.1:$Port"
   $url = "$baseUrl/"
@@ -392,7 +365,7 @@ try {
 
   Invoke-TemplateRouteChecks -BaseUrl $baseUrl -Template $Template
   Invoke-SmokeRequest -Url "$baseUrl/" -ExpectedStatus 200 -ExpectHeader "X-Content-Type-Options" -ExpectHeaderValue "nosniff" | Out-Null
-  Invoke-SmokeCurlRequest -Url "$baseUrl/" -Headers @("Accept-Encoding: gzip") -ExpectedStatus 200 -Expect "Content-Encoding: gzip" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/" -Headers @{ "Accept-Encoding" = "gzip" } -ExpectHeader "Content-Encoding" -ExpectHeaderValue "^gzip$" -SkipBody | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/__axonyx/health" -ExpectedStatus 200 -Expect '"ok":true|"ok": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
   if ($Template -eq "minimal") {
     Invoke-SmokeRequest -Url "$baseUrl/__axonyx/ready" -ExpectedStatus 200 -Expect '"required":true|"required": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null

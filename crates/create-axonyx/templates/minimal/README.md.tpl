@@ -26,30 +26,39 @@ sources, regenerates `src/generated/backend.rs`, and writes static HTML into
 `dist/`.
 
 `cargo ax actions` prints route-local action contracts from `app/**/actions.ax`.
-In this template it shows the `CreatePost` inputs, including the optional
-`status?: string = "draft"` field used by the `ActionForm` on `/posts`.
+In this template it shows the `CreatePost` inputs, including the
+`status: String = "draft"` default used by the form on `/posts`.
 
-## Database Migrations
+## First Posts With SQLite
 
-The full-stack template keeps ordered SQL migrations in `db/migrations`, as
-configured by `[db].migrations` in `Axonyx.toml`.
+The initial `memory` demo works without a database file and resets on restart.
+It does not support migrations. This local demo has no sign-in or publishing
+policy; do not deploy it as-is.
 
-Create and edit the first migration:
+To keep posts across restarts, stop the server and replace the database
+settings in the generated `.env`:
 
-```bash
-cargo ax db migration create create_posts
-# edit db/migrations/<version>_create_posts/up.sql
-# edit db/migrations/<version>_create_posts/down.sql
+```dotenv
+AX_SECRET_DB_DIALECT=sqlite
+AX_SECRET_DB_URL=sqlite://posts.db
 ```
 
-Inspect and apply it locally:
+The starter includes the first migration in `db/migrations`. Inspect and apply it:
 
 ```bash
 cargo ax db status
 cargo ax db migrate --dry-run
 cargo ax db migrate
 cargo ax db pull
+cargo ax check
+cargo ax run dev
 ```
+
+Open `http://127.0.0.1:3000/posts`. Submit an empty title to see a validation
+error, then submit a title and excerpt and reload: the post remains in SQLite.
+Follow `app/posts/page.asx` to its neighboring `loader.ax` for the typed read,
+and `actions.ax` for validation, mutation, and revalidation. To change the
+schema, add a migration with `cargo ax db migration create add_post_summary`.
 
 The pull writes `.axonyx/db/schema.json` plus `app/generated/db.ax`. From that
 point, `cargo ax check` validates `db.*` resource and field names against the
@@ -140,9 +149,8 @@ Suggested first edit:
 ## Env
 
 The generated, git-ignored `.env` uses the in-memory adapter so the first
-`cargo ax run dev` works without external infrastructure. Copy the PostgreSQL
-settings from `.env.example` into `.env` when you are ready to use a persistent
-database.
+`cargo ax run dev` works without external infrastructure. Follow the SQLite
+walkthrough above for the first persistent database.
 
 Axonyx backend env convention:
 

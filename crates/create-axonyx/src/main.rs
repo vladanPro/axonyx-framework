@@ -1155,8 +1155,16 @@ mod tests {
         assert!(config.contains("migrations = \"db/migrations\""));
         let readme =
             fs::read_to_string(target_dir.join("README.md")).expect("minimal readme should read");
-        assert!(readme.contains("cargo ax db migration create create_posts"));
+        assert!(readme.lines().any(|line| line == "cargo ax db migrate"));
+        assert!(readme.lines().any(|line| line == "cargo ax db pull"));
         assert!(readme.contains("cargo ax db migrate --env prod --confirm"));
+        let migration = target_dir.join("db/migrations/20260101000000_001_create_posts");
+        assert!(fs::read_to_string(migration.join("up.sql"))
+            .unwrap()
+            .contains("CREATE TABLE posts"));
+        assert!(fs::read_to_string(migration.join("down.sql"))
+            .unwrap()
+            .contains("DROP TABLE posts"));
 
         fs::remove_dir_all(workspace).expect("temp dir should clean up");
     }

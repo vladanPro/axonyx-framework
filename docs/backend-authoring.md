@@ -31,10 +31,7 @@ backend `.ax` files.
 
 ```ax
 query loadPosts() -> Post[] {
-  data posts = db.posts.all()
-    where status = "published"
-    order created_at desc
-    limit 6
+  data posts = db.posts.where({ status: "published" }).order({ created_at: "desc" }).limit(6).all()
   return posts
 }
 ```
@@ -42,15 +39,14 @@ query loadPosts() -> Post[] {
 Pages can consume route-local query functions without a manual API fetch:
 
 ```ax
-page Posts() -> ASX {
+page Posts() {
+  data posts = loadPosts()
 
-data posts = loadPosts()
-
-return {
-<Each items={posts} as="post">
-  <Card title={post.title} />
-</Each>
-}
+  return ASX {
+    <Each items={posts} as="post">
+      <Card title={post.title} />
+    </Each>
+  }
 }
 ```
 

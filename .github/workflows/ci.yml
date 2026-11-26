@@ -66,6 +66,14 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-core-loop.ps1 -Template docs
 
+      - name: Smoke the SQLite first-posts starter
+        shell: pwsh
+        run: |
+          $env:CARGO_INSTALL_ROOT = Join-Path $env:RUNNER_TEMP 'axonyx-first-posts-tools'
+          cargo install --locked --debug --path crates/cargo-axonyx --target-dir target
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/smoke-production-server.ps1 -Template minimal
+
       - name: Smoke compiled action runtime
         shell: pwsh
         run: ./scripts/smoke-compiled-actions.ps1
