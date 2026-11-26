@@ -464,6 +464,8 @@ fn symbol_hover(state: &ServerState, message: &Value) -> Option<Value> {
             "**Import:** `{}`",
             escape_inline_code(import_source)
         ));
+    } else if resolution.reference_uri != resolution.declaration_uri {
+        metadata.push("**Source:** route-local `loader.ax`".to_string());
     } else {
         metadata.push("**Source:** local declaration".to_string());
     }
@@ -1453,7 +1455,61 @@ fn resolve_language_symbol(state: &ServerState, message: &Value) -> Option<Resol
         });
     }
 
+    if kind == AxSourceKind::Page
+        && matches!(
+            importing_path.file_name()?.to_str()?,
+            "page.ax" | "page.asx"
+        )
+        && is_route_data_query_reference(source_line, start_character, &reference_name)
+    {
+        let target = importing_path.with_file_name("loader.ax");
+        let target_uri = path_to_file_uri(&target);
+        let target_source = state
+            .documents
+            .get(&target_uri)
+            .map(|document| document.text.clone())
+            .or_else(|| fs::read_to_string(&target).ok())?;
+        let symbol = ax_source_symbols(&target.to_string_lossy(), &target_source)
+            .into_iter()
+            .find(|symbol| {
+                symbol.kind == AxLanguageSymbolKind::Query && symbol.name == reference_name
+            })?;
+        return Some(ResolvedLanguageSymbol {
+            reference_uri: uri.to_string(),
+            declaration_uri: target_uri,
+            symbol: Some(symbol),
+            local_symbol: None,
+            reference_name,
+            import_source: None,
+            line,
+            start_character,
+            end_character,
+        });
+    }
+
     None
+}
+
+fn is_route_data_query_reference(line: &str, start: usize, name: &str) -> bool {
+    let Some((left, right)) = line.split_once('=') else {
+        return false;
+    };
+    let Some(declaration) = left.trim_start().strip_prefix("data") else {
+        return false;
+    };
+    if !declaration.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let expression = right.trim_start();
+    start
+        == left.encode_utf16().count()
+            + 1
+            + right[..right.len() - expression.len()]
+                .encode_utf16()
+                .count()
+        && expression
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.trim_start().starts_with('('))
 }
 
 fn workspace_references(state: &ServerState, message: &Value) -> Vec<Value> {
@@ -3295,6 +3351,47 @@ mod tests {
             json!({ "line": 2, "character": character - 2 })
         );
         fs::remove_dir_all(root).expect("workspace should be removed");
+    }
+
+    #[test]
+    fn typed_page_binding_navigates_to_its_route_loader() {
+        let root = temp_workspace("route-loader-definition");
+        let route = root.join("app/posts");
+        fs::create_dir_all(&route).unwrap();
+        let loader = route.join("loader.ax");
+        fs::write(
+            &loader,
+            "query listPosts() -> String {\n  return \"ready\"\n}\n",
+        )
+        .unwrap();
+        let page = route.join("page.asx");
+        let uri = file_uri(&page);
+        let source = "page Posts() {\n  data posts: String = listPosts()\n  return ASX { <p>{posts}</p> }\n}";
+        let character = source.lines().nth(1).unwrap().find("listPosts").unwrap();
+        let mut state = ServerState::default();
+        state.documents.insert(
+            uri.clone(),
+            OpenDocument {
+                text: source.to_string(),
+                version: Some(1),
+            },
+        );
+        let request = json!({ "params": {
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": character }
+        } });
+        let result = import_definition(&state, &request).unwrap();
+        assert_eq!(result["uri"], file_uri(&loader));
+        assert!(symbol_hover(&state, &request).unwrap()["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("route-local"));
+        assert!(!is_route_data_query_reference(
+            "  const posts = listPosts()",
+            16,
+            "listPosts"
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
