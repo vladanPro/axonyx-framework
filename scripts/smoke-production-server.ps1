@@ -47,7 +47,9 @@ function Invoke-SmokeRequest {
 
     [string] $ExpectHeader = "",
 
-    [string] $ExpectHeaderValue = ""
+    [string] $ExpectHeaderValue = "",
+
+    [switch] $SkipBody
   )
 
   $request = [System.Net.HttpWebRequest]::Create($Url)
@@ -91,7 +93,7 @@ function Invoke-SmokeRequest {
     }
 
     $text = ""
-    if ($Method -ne "HEAD") {
+    if ($Method -ne "HEAD" -and !$SkipBody) {
       $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
       try {
         $text = $reader.ReadToEnd()
@@ -170,49 +172,6 @@ function Invoke-TemplateRouteChecks {
   $saved = @($posts | Where-Object { $_.title -eq "Smoke Action" -and $_.status -eq "draft" })
   if ($saved.Count -ne 1) { throw "Expected one saved SQLite draft" }
   Invoke-SmokeRequest -Url "$BaseUrl/posts" -ExpectedStatus 200 -Expect "Smoke Action" | Out-Null
-}
-
-function Invoke-SmokeCurlRequest {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string] $Url,
-
-    [string] $Method = "GET",
-
-    [int] $ExpectedStatus = 200,
-
-    [string] $Body = "",
-
-    [string[]] $Headers = @(),
-
-    [string] $Expect = ""
-  )
-
-  $args = @("-sS", "-i", "-X", $Method)
-  foreach ($header in $Headers) {
-    $args += @("-H", $header)
-  }
-  if (![string]::IsNullOrEmpty($Body)) {
-    $args += @("--data", $Body)
-  }
-  $args += $Url
-
-  $curlName = if ($IsWindows) { "curl.exe" } else { "curl" }
-  $curl = Get-Command $curlName -CommandType Application -ErrorAction Stop
-  $raw = & $curl.Source @args
-  if ($LASTEXITCODE -ne 0) {
-    throw "curl failed for $Url with exit code $LASTEXITCODE"
-  }
-
-  $text = ($raw -join "`n")
-  if ($text -notmatch "^HTTP/\S+\s+$ExpectedStatus\b") {
-    throw "Expected HTTP $ExpectedStatus from $Url, got response:`n$text"
-  }
-  if (![string]::IsNullOrEmpty($Expect) -and $text -notmatch $Expect) {
-    throw "Expected curl response from $Url to match '$Expect'"
-  }
-
-  return $text
 }
 
 function Invoke-OversizedHeaderSmoke {
@@ -406,7 +365,7 @@ try {
 
   Invoke-TemplateRouteChecks -BaseUrl $baseUrl -Template $Template
   Invoke-SmokeRequest -Url "$baseUrl/" -ExpectedStatus 200 -ExpectHeader "X-Content-Type-Options" -ExpectHeaderValue "nosniff" | Out-Null
-  Invoke-SmokeCurlRequest -Url "$baseUrl/" -Headers @("Accept-Encoding: gzip") -ExpectedStatus 200 -Expect "Content-Encoding: gzip" | Out-Null
+  Invoke-SmokeRequest -Url "$baseUrl/" -Headers @{ "Accept-Encoding" = "gzip" } -ExpectHeader "Content-Encoding" -ExpectHeaderValue "^gzip$" -SkipBody | Out-Null
   Invoke-SmokeRequest -Url "$baseUrl/__axonyx/health" -ExpectedStatus 200 -Expect '"ok":true|"ok": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
   if ($Template -eq "minimal") {
     Invoke-SmokeRequest -Url "$baseUrl/__axonyx/ready" -ExpectedStatus 200 -Expect '"required":true|"required": true' -ExpectHeader "Content-Type" -ExpectHeaderValue "application/json" | Out-Null
