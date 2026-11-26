@@ -646,7 +646,14 @@ route GET "/api/forbidden-loader" {
   $dbPath = Join-Path $appRoot "compiled-smoke.db"
   $python = Get-Command python -ErrorAction SilentlyContinue
   if ($null -eq $python) { $python = Get-Command python3 -ErrorAction Stop }
-  $schema = "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT, title TEXT NOT NULL, excerpt TEXT NOT NULL, status TEXT NOT NULL); CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL); CREATE TABLE user_permissions (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, permission TEXT NOT NULL, UNIQUE(user_id, permission)); CREATE TABLE credentials (user_id TEXT NOT NULL REFERENCES users(id), email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL);"
+  $postsMigration = Join-Path $appRoot "db/migrations/20260101000000_001_create_posts/up.sql"
+  $schema = [System.IO.File]::ReadAllText($postsMigration) + @'
+
+ALTER TABLE posts ADD COLUMN slug TEXT;
+CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL);
+CREATE TABLE user_permissions (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL, permission TEXT NOT NULL, UNIQUE(user_id, permission));
+CREATE TABLE credentials (user_id TEXT NOT NULL REFERENCES users(id), email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL);
+'@
   $seed = "INSERT INTO posts (slug,title,excerpt,status) VALUES (?,?,?,?)"
   $userSeed = "INSERT INTO users (id,email,role) VALUES (?,?,?)"
   & $python.Source -c 'import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.executescript(sys.argv[2]);db.execute(sys.argv[3],sys.argv[4:8]);db.execute(sys.argv[8],sys.argv[9:12]);db.commit();db.close()' $dbPath $schema $seed "fresh-compiled-post" "Original detail title" "Parameterized loader detail" "published" $userSeed "user-42" "foundry@example.com" "member"
