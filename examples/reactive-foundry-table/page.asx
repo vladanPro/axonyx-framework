@@ -1,0 +1,57 @@
+import { Table } from "@axonyx/ui/foundry/Table"
+import { TableBody } from "@axonyx/ui/foundry/TableBody"
+import { TableCell } from "@axonyx/ui/foundry/TableCell"
+import { TableHead } from "@axonyx/ui/foundry/TableHead"
+import { TableHeaderCell } from "@axonyx/ui/foundry/TableHeaderCell"
+import { TableRow } from "@axonyx/ui/foundry/TableRow"
+
+page ReactiveFoundryTable() {
+  type PostStatus = "draft" | "published" | "archived"
+  type Post {
+    id: String
+    title: String
+    status: PostStatus
+  }
+
+  state posts: List<Post> = [{ id: "draft-z", title: "Zinc notes", status: "draft" }, { id: "published-b", title: "Build guide", status: "published" }, { id: "draft-a", title: "Alloy notes", status: "draft" }]
+  state selectedStatus: String = "archived"
+  state direction: String = "asc"
+
+  return ASX {
+    <section>
+      <h1>Reactive Foundry table</h1>
+      <p>Filter and sort the records already loaded on this page.</p>
+      <div aria-label="Post status" role="group">
+        <button type="button" on:click={selectedStatus = "draft"}>Draft</button>
+        <button type="button" on:click={selectedStatus = "published"}>Published</button>
+        <button type="button" on:click={selectedStatus = "archived"}>Archived</button>
+      </div>
+      <div aria-label="Title order" role="group">
+        <button type="button" on:click={direction = "asc"}>Title ascending</button>
+        <button type="button" on:click={direction = "desc"}>Title descending</button>
+      </div>
+      <Table>
+        <caption>Posts by status</caption>
+        <TableHead>
+          <TableRow>
+            <TableHeaderCell>Title</TableHeaderCell>
+            <TableHeaderCell>Status</TableHeaderCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          <Each
+            items={List.sortBy(List.filterEq(posts, "status", selectedStatus), "title", direction)}
+            as="post"
+            key={post.id}
+          >
+            <TableRow>
+              <TableCell>{post.title}</TableCell>
+              <TableCell>{post.status}</TableCell>
+            </TableRow>
+            <Empty><tr><td colspan="2">No matching posts</td></tr></Empty>
+          </Each>
+        </TableBody>
+      </Table>
+    </section>
+  }
+}
