@@ -31,9 +31,10 @@ In this template it shows the `CreatePost` inputs, including the
 
 ## First Posts With SQLite
 
-The initial `memory` demo works without a database file and resets on restart.
-It does not support migrations. This local demo has no sign-in or publishing
-policy; do not deploy it as-is.
+The initial `memory` demo works without a database file. The UI simulates
+changes until restart, and the API shows the query preview rather than stored
+rows. Memory does not support migrations. This local demo has no sign-in or
+publishing policy; do not deploy it as-is.
 
 To keep posts across restarts, stop the server and replace the database
 settings in the generated `.env`:
@@ -56,6 +57,7 @@ cargo ax run dev
 
 Open `http://127.0.0.1:3000/posts`. Submit an empty title to see a validation
 error, then submit a title and excerpt and reload: the post remains in SQLite.
+Open `http://127.0.0.1:3000/api/posts` to see the same saved row as JSON.
 Follow `app/posts/page.asx` to its neighboring `loader.ax` for the typed read,
 and `actions.ax` for validation, mutation, and revalidation. To change the
 schema, add a migration with `cargo ax db migration create add_post_summary`.
@@ -221,7 +223,9 @@ src/
 
 ## Typed API Route Example
 
-`routes/api/posts.ax` includes a typed `POST /api/posts` example:
+`routes/api/posts.ax` reads saved SQLite rows with `GET /api/posts`. The
+separate typed `POST /api/posts` example only echoes the title; it does not
+create a post. Use the form on `/posts` to persist one.
 
 ```ax
 route POST "/api/posts"
