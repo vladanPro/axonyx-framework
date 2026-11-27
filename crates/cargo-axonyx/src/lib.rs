@@ -20334,16 +20334,18 @@ fn handle_action_request(
         .as_ref()
         .map(|form| form.fields.clone())
         .unwrap_or_else(|| parse_form_body(&request.body));
-    let uses_sessions = backend_source_refs_use_sessions(&action_source_refs)?;
-    let result = if uses_sessions
-        || (mode == AxServerMode::Start && backend_source_refs_use_database(&action_source_refs)?)
-    {
+    let runtime_env = preview_backend_runtime_env(
+        &state.root,
+        &action_source_refs,
+        mode == AxServerMode::Start,
+        true,
+    )?;
+    let result = if let Some(env) = runtime_env {
         let mut store = state
             .preview_store
             .lock()
             .map_err(|_| anyhow::anyhow!("preview store lock was poisoned"))?
             .clone();
-        let env = db_env_for_root(&state.root, None)?;
         let runtime = ax_backend_runtime::runtime_from_env(env)
             .with_context(|| "failed to initialize action database runtime from environment")?;
         execute_preview_action_request_sources_with_runtime_and_storage(
@@ -20479,6 +20481,31 @@ fn render_native_action_validation(
             false,
         ),
     }
+}
+
+fn preview_backend_runtime_env(
+    root: &Path,
+    sources: &[&str],
+    use_database_runtime: bool,
+    live_request: bool,
+) -> Result<Option<ax_backend_runtime::AxEnv>> {
+    if live_request && backend_source_refs_use_sessions(sources)? {
+        return db_env_for_root(root, None).map(Some);
+    }
+    if (!use_database_runtime && !live_request) || !backend_source_refs_use_database(sources)? {
+        return Ok(None);
+    }
+    let env = db_env_for_root(root, None)?;
+    // Dev may use a local SQLite database without changing remote preview writes.
+    if use_database_runtime
+        || (matches!(
+            env.database_driver(),
+            Ok(ax_backend_runtime::AxDatabaseDriver::Sqlite)
+        ) && env.data_transport()? == ax_backend_runtime::AxDataTransport::Direct)
+    {
+        return Ok(Some(env));
+    }
+    Ok(None)
 }
 
 fn backend_source_refs_use_database(sources: &[&str]) -> Result<bool> {
@@ -21732,18 +21759,15 @@ fn render_route_html_with_form_result(
     let catalogs = i18n::load_for_render(&state.root)?;
     let translator = catalogs.as_ref().map(i18n::CatalogInputs::translator);
 
-    let uses_sessions = backend_source_refs_use_sessions(&loader_refs)?;
-    let runtime = if (use_database_runtime && backend_source_refs_use_database(&loader_refs)?)
-        || (request.is_some() && uses_sessions)
-    {
-        let env = db_env_for_root(&state.root, None)?;
-        Some(
-            ax_backend_runtime::runtime_from_env(env)
-                .with_context(|| "failed to initialize page database runtime from environment")?,
-        )
-    } else {
-        None
-    };
+    let runtime = preview_backend_runtime_env(
+        &state.root,
+        &loader_refs,
+        use_database_runtime,
+        request.is_some(),
+    )?
+    .map(ax_backend_runtime::runtime_from_env)
+    .transpose()
+    .context("failed to initialize page database runtime from environment")?;
     let request = request.filter(|_| runtime.is_some() || form.is_some());
     let html = axonyx_runtime::render_preview_route(
         axonyx_runtime::AxPreviewRouteRender {
@@ -33532,6 +33556,75 @@ page Posts() {
         assert!(!body.contains("SQLite Draft"));
 
         fs::remove_dir_all(root).expect("temp dir should clean up");
+    }
+
+    #[test]
+    fn dev_sqlite_post_action_is_visible_to_page_and_api_after_restart() {
+        let root = make_temp_dir("dev-sqlite-first-posts");
+        seed_test_sqlite_posts(&root);
+        let app = root.join("app/posts");
+        let api = root.join("routes/api");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&api).unwrap();
+        fs::write(
+            app.join("page.asx"),
+            r#"page Posts() {
+  data posts = loadPosts()
+  return ASX { <Each items={posts} as="post"><p>{post.title}</p></Each> }
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("loader.ax"),
+            "query loadPosts() -> Post[] {\n  data posts = db.posts.all()\n  return posts\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("actions.ax"),
+            r#"action CreatePost(title: String) {
+  require input.title != "" else invalid({ title: "Enter a title." })
+  db.posts.insert({ title: input.title, excerpt: "Stored in dev", slug: "dev-draft", status: "draft", created_at: "2026-06-12" })
+  return ok()
+}"#,
+        )
+        .unwrap();
+        fs::write(
+            api.join("posts.ax"),
+            "route GET \"/api/posts\"\n  data posts = db.posts.all()\n  return posts\n",
+        )
+        .unwrap();
+
+        let state = test_dev_state(&root);
+        let submit = |body: &[u8]| {
+            let request =
+                AxHttpRequest::new("POST", "/__axonyx/action?path=%2Fposts&name=CreatePost")
+                    .with_header("Content-Type", "application/x-www-form-urlencoded")
+                    .with_header("Accept", "application/ax-patch+json")
+                    .with_body(body.to_vec());
+            handle_http_request(&state, AxServerMode::Dev, request).unwrap()
+        };
+        assert_eq!(submit(b"title=").status, 422);
+        assert_eq!(submit(b"title=Dev+SQLite+draft").status, 200);
+
+        let restarted = test_dev_state(&root);
+        let get = |path| {
+            let response = handle_http_request(
+                &restarted,
+                AxServerMode::Dev,
+                AxHttpRequest::new("GET", path),
+            )
+            .unwrap();
+            assert_eq!(response.status, 200);
+            response.body.into_bytes()
+        };
+        let api_posts: Vec<serde_json::Value> = serde_json::from_slice(&get("/api/posts")).unwrap();
+        assert_eq!(api_posts.len(), 4);
+        assert!(api_posts
+            .iter()
+            .any(|post| post["title"] == "Dev SQLite draft" && post["status"] == "draft"));
+        let html = String::from_utf8(get("/posts")).unwrap();
+        assert!(html.contains("Dev SQLite draft"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
