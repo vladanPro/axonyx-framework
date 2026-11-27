@@ -1,7 +1,7 @@
 param(
   [string] $WorkDir = "",
   [int] $Port = 0,
-  [ValidateSet("baseline", "metadata", "reactive-table")] [string] $Profile = "metadata",
+  [ValidateSet("baseline", "metadata", "reactive-table")] [string] $Profile = "reactive-table",
   [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $ScaffoldRelease,
   [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $CliRelease,
   [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $RuntimeRelease
@@ -12,20 +12,20 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "assert-reactive-table.ps1")
 $verifyReactiveTable = $Profile -eq "reactive-table"
 $verifyMetadata = $Profile -ne "baseline"
-if ($verifyReactiveTable) {
+if ($ScaffoldRelease -or $CliRelease -or $RuntimeRelease) {
+  if (!$verifyReactiveTable) {
+    throw "Release overrides are only accepted by the reactive-table profile."
+  }
   if (!$ScaffoldRelease -or !$CliRelease -or !$RuntimeRelease) {
-    throw "The reactive-table profile requires ScaffoldRelease, CliRelease, and RuntimeRelease."
+    throw "Release overrides require ScaffoldRelease, CliRelease, and RuntimeRelease together."
   }
   $scaffoldVersion = $ScaffoldRelease
   $cliVersion = $CliRelease
   $runtimeVersion = $RuntimeRelease
 } else {
-  if ($ScaffoldRelease -or $CliRelease -or $RuntimeRelease) {
-    throw "Release overrides are only accepted by the reactive-table profile."
-  }
-  $scaffoldVersion = if ($verifyMetadata) { "0.8.9" } else { "0.8.6" }
-  $cliVersion = if ($verifyMetadata) { "0.8.13" } else { "0.8.8" }
-  $runtimeVersion = if ($verifyMetadata) { "0.8.7" } else { "0.8.3" }
+  $scaffoldVersion = if ($verifyMetadata) { "0.8.10" } else { "0.8.6" }
+  $cliVersion = if ($verifyMetadata) { "0.8.15" } else { "0.8.8" }
+  $runtimeVersion = if ($verifyMetadata) { "0.9.0" } else { "0.8.3" }
 }
 $ownsWorkDir = [string]::IsNullOrWhiteSpace($WorkDir)
 if ($ownsWorkDir) {
