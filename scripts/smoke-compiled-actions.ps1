@@ -719,6 +719,13 @@ CREATE TABLE credentials (user_id TEXT NOT NULL REFERENCES users(id), email TEXT
   }
   if (!$ready) { throw "Compiled server did not become ready" }
 
+  $wasm = Invoke-WebRequest "$baseUrl/_ax/runtime/axonyx-state-v2.wasm" -TimeoutSec 10
+  $wasmBytes = $wasm.RawContentStream.ToArray()
+  if ($wasm.Headers['Content-Type'] -ne 'application/wasm' -or $wasmBytes.Length -lt 8 -or
+      [Convert]::ToHexString($wasmBytes, 0, 8) -ne '0061736D01000000') {
+    throw "Compiled server must serve the state WebAssembly module as application/wasm"
+  }
+
   $addition = Invoke-AxRequest -Url "$baseUrl/api/addition-probe" -Body "count=42&ratio=0.5&enabled=true"
   $recordBody = '{"post":{"title":"Hello","tags":["rust"],"count":3,"score":1.25,"author":{"name":"Ada","extra":true},"extra":true}}'
   $recordHeaders = @{ 'Content-Type' = 'application/json'; Accept = 'application/ax-patch+json' }
