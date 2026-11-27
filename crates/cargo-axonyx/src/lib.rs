@@ -14915,6 +14915,7 @@ fn content_type(path: &Path) -> &'static str {{
         "html" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
+        "wasm" => "application/wasm",
         "json" => "application/json; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
@@ -28683,6 +28684,7 @@ action ValidPost
         assert!(source.contains("response.header_value(\"Server-Timing\")"));
         assert!(source.contains("response.with_header(\"Server-Timing\", timing)"));
         assert!(source.contains("Component::Normal"));
+        assert!(source.contains(r#""wasm" => "application/wasm""#));
         assert!(source.contains("application/ax-patch+json"));
         assert!(source.contains("application/ax-data+json"));
         assert!(source.contains("compiled_page_renderer"));
