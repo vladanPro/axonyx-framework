@@ -1,15 +1,32 @@
 param(
   [string] $WorkDir = "",
   [int] $Port = 0,
-  [ValidateSet("baseline", "metadata")] [string] $Profile = "metadata"
+  [ValidateSet("baseline", "metadata", "reactive-table")] [string] $Profile = "metadata",
+  [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $ScaffoldRelease,
+  [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $CliRelease,
+  [ValidatePattern('^\d+\.\d+\.\d+$')] [string] $RuntimeRelease
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "assert-page-metadata.ps1")
-$verifyMetadata = $Profile -eq "metadata"
-$scaffoldVersion = if ($verifyMetadata) { "0.8.9" } else { "0.8.6" }
-$cliVersion = if ($verifyMetadata) { "0.8.13" } else { "0.8.8" }
-$runtimeVersion = if ($verifyMetadata) { "0.8.7" } else { "0.8.3" }
+. (Join-Path $PSScriptRoot "assert-reactive-table.ps1")
+$verifyReactiveTable = $Profile -eq "reactive-table"
+$verifyMetadata = $Profile -ne "baseline"
+if ($verifyReactiveTable) {
+  if (!$ScaffoldRelease -or !$CliRelease -or !$RuntimeRelease) {
+    throw "The reactive-table profile requires ScaffoldRelease, CliRelease, and RuntimeRelease."
+  }
+  $scaffoldVersion = $ScaffoldRelease
+  $cliVersion = $CliRelease
+  $runtimeVersion = $RuntimeRelease
+} else {
+  if ($ScaffoldRelease -or $CliRelease -or $RuntimeRelease) {
+    throw "Release overrides are only accepted by the reactive-table profile."
+  }
+  $scaffoldVersion = if ($verifyMetadata) { "0.8.9" } else { "0.8.6" }
+  $cliVersion = if ($verifyMetadata) { "0.8.13" } else { "0.8.8" }
+  $runtimeVersion = if ($verifyMetadata) { "0.8.7" } else { "0.8.3" }
+}
 $ownsWorkDir = [string]::IsNullOrWhiteSpace($WorkDir)
 if ($ownsWorkDir) {
   $WorkDir = Join-Path ([IO.Path]::GetTempPath()) ("axonyx-registry-beta-" + [guid]::NewGuid().ToString("N"))
@@ -118,6 +135,11 @@ query loadGuardedPage() {
         New-Item -ItemType Directory -Path $metadataRoute | Out-Null
         Copy-Item -Path (Join-Path $PSScriptRoot "../tests/fixtures/native-form-retry/app/*") -Destination $metadataRoute
       }
+      if ($verifyReactiveTable) {
+        $tableRoute = Join-Path $project "app/reactive-table"
+        New-Item -ItemType Directory -Path $tableRoute | Out-Null
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../examples/reactive-foundry-table/page.asx") -Destination $tableRoute
+      }
     }
     $manifest = Get-Content (Join-Path $project "Cargo.toml") -Raw
     $runtimePattern = 'axonyx-runtime\s*=\s*\{\s*version\s*=\s*"' + [regex]::Escape($runtimeVersion) + '"'
@@ -158,6 +180,9 @@ query loadGuardedPage() {
     if ($template -eq "site") {
       Assert-Link $index "/contact" "Start a conversation"
       Assert-Link $index "/about" "Meet the team"
+      if ($verifyReactiveTable) {
+        Assert-ReactiveTableHtml -Html (Get-Content (Join-Path $project "dist/reactive-table/index.html") -Raw)
+      }
     }
     if ($template -eq "blog" -and !(Test-Path (Join-Path $project "dist/blog/hello-axonyx/index.html"))) {
       throw "blog article was not prerendered"
@@ -186,12 +211,14 @@ query loadGuardedPage() {
     $server = Start-SmokeSite -Root $siteRoot -Arguments @("run", "dev")
     Wait-SmokeSite -Process $server -Base $base
     Assert-PageMetadata -Url "$base/metadata"
+    if ($verifyReactiveTable) { Assert-ReactiveTableServed -Base $base }
     Stop-SmokeSite -Process $server
     $server = $null
   }
   $server = Start-SmokeSite -Root $siteRoot -Arguments @("run", "start", "--compiled")
   Wait-SmokeSite -Process $server -Base $base
   if ($verifyMetadata) { Assert-PageMetadata -Url "$base/metadata" }
+  if ($verifyReactiveTable) { Assert-ReactiveTableServed -Base $base }
 
   foreach ($check in @(
     @{ Path = "/about"; Status = 200; Text = "About" },
@@ -224,6 +251,7 @@ query loadGuardedPage() {
   }
   Write-Host "Registry-only Beta 1 smoke passed (site, blog, docs, compiled HTTP, redirect, UI assets, 404)."
   if ($verifyMetadata) { Write-Host "Published metadata parity passed in run dev and compiled production." }
+  if ($verifyReactiveTable) { Write-Host "Published reactive table HTML and WASM asset passed in run dev and compiled production." }
 } finally {
   Stop-SmokeSite -Process $server
   $env:PATH = $originalPath

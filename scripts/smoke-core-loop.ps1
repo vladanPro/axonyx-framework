@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "assert-reactive-table.ps1")
 
 $frameworkRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $ownsWorkDir = $false
@@ -98,12 +99,7 @@ try {
     Assert-Link $index "/about" "Meet the team"
     Assert-Link $contact "mailto:hello@example.com" "hello@example.com"
     $table = Get-Content -LiteralPath (Join-Path $appRoot "dist/reactive-table/index.html") -Raw
-    if ($table -notmatch '<tbody\b[^>]*data-ax-each-row-mode="tr"' -or
-        $table -notmatch '<tr\b[^>]*data-ax-each-empty' -or
-        $table -notmatch '<template\b[^>]*data-ax-each-render-protocol="ax-each-render/1"' -or
-        $table.Contains("<ax-state-each")) {
-      throw "Expected reactive native table ownership, empty row, and template in built HTML"
-    }
+    Assert-ReactiveTableHtml -Html $table
   }
 
   if ($Template -eq "blog") {

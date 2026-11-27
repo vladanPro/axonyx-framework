@@ -22,3 +22,17 @@ filter or sort records that have not been loaded.
 
 The framework's `scripts/smoke-core-loop.ps1 -Template site` copies this
 route into a fresh scaffold and checks the native table in its build output.
+
+After the release candidates are published, run the registry acceptance
+profile with the exact versions that include reactive tables:
+
+```powershell
+pwsh -File scripts/smoke-registry-beta.ps1 -Profile reactive-table `
+  -ScaffoldRelease $scaffoldVersion -CliRelease $cliVersion -RuntimeRelease $runtimeVersion
+```
+
+The profile installs the tools from crates.io, rejects path/git scaffold
+dependencies, and checks HTML and the WASM asset in both dev and compiled
+production. Chromium interaction coverage remains in the Runtime suite.
+Keep the default registry profile pinned to already verified releases until
+this acceptance run has passed.
