@@ -100,36 +100,34 @@ type Post {
 
 ## Typed Data And Each
 
-Axonyx now has an early typed data path for JSX-like `.asx` files. Define a record shape, bind query data to a typed list, and `cargo ax check` can catch wrong field access before render. For example, in `app/posts/page.asx`:
+Define a record shape, bind query data to a typed list, and `cargo ax check`
+can catch wrong field access before render. For example, in `app/posts/page.asx`:
 
 ```ax
-import { Card } from "@axonyx/ui/foundry/Card.asx"
-import { Copy } from "@axonyx/ui/foundry/Copy.asx"
+page Blog() {
+  data posts: List<Post> = loadPosts()
 
-page Blog() -> ASX {
+  return ASX {
+    <Each items={posts} as="post">
+      <article>
+        <h2>{post.title}</h2>
+        <p>{post.excerpt}</p>
+      </article>
+    </Each>
+  }
+}
+```
 
-type Post {
+Put the query and its shared record contract next to the page in
+`app/posts/loader.ax`:
+
+```ax
+export type Post {
   title: String
-  slug: String
   excerpt: String
   summary?: String
 }
 
-data posts: List<Post> = loadPosts()
-
-return {
-<Each items={posts} as="post">
-  <Card title={post.title}>
-    <Copy>{post.excerpt}</Copy>
-  </Card>
-</Each>
-}
-}
-```
-
-Route-local data can live next to the page in `app/posts/loader.ax`:
-
-```ax
 query loadPosts() -> Post[] {
   data posts = db.posts.all()
   return posts
@@ -157,6 +155,9 @@ type Post {
 
 <Copy>{post.summary}</Copy>
 ```
+
+See [Data types and execution boundaries](data-types.md) for the full list
+and what works in API contracts, browser state, and WASM.
 
 For a production-style local run, use:
 
