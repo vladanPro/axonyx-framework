@@ -70,6 +70,26 @@ The registry-only acceptance run passed with these exact pins. The default
 in CI. Use `-Profile baseline` only to reproduce the older published toolchain.
 Existing deployments must rebuild to pick up the fix.
 
+## Reactive tables and first-posts tooling
+
+The release candidates are Core and Runtime `0.9.0`, `axonyx-lsp 0.8.5`,
+`create-axonyx 0.8.10`, and `cargo-axonyx 0.8.14`. Core's public
+`AxEachBlock` changed for reactive expressions, so Core and Runtime move to a
+new pre-1.0 minor. The tooling bundles that Runtime and also ships route-local
+loader navigation, a SQLite first-posts scaffold, and better Melt and Doctor
+output. The scaffold's UI 0.0.86 remains unchanged.
+
+Promote the Runtime and framework candidates through `dev` to `main` and
+verify both main CI runs. Publish Core first, wait for registry propagation,
+then Runtime. Verify that the dependent tooling packages resolve the new
+registry dependencies before publishing them. Do not publish macros or UI.
+
+After the packages are visible, run the `reactive-table` registry acceptance
+profile (framework PR #460) with scaffold `0.8.10`, CLI `0.8.14`, and
+Runtime `0.9.0`. Also recreate the SQLite first-posts flow with the
+published minimal scaffold. Update the default registry smoke and public
+install pins only after this independent install path passes.
+
 Before publishing, `main` should be green in GitHub Actions.
 
 The framework CI currently checks:

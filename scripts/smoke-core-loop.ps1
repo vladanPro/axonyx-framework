@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "assert-reactive-table.ps1")
 
 $frameworkRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $ownsWorkDir = $false
@@ -62,6 +63,12 @@ try {
     Pop-Location
   }
 
+  if ($Template -eq "site") {
+    $tableRoute = Join-Path $appRoot "app/reactive-table"
+    New-Item -ItemType Directory -Path $tableRoute -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $frameworkRoot "examples/reactive-foundry-table/page.asx") -Destination $tableRoute
+  }
+
   try {
     Push-Location $appRoot
     Invoke-Step {
@@ -91,6 +98,8 @@ try {
     Assert-Link $index "/contact" "Start a conversation"
     Assert-Link $index "/about" "Meet the team"
     Assert-Link $contact "mailto:hello@example.com" "hello@example.com"
+    $table = Get-Content -LiteralPath (Join-Path $appRoot "dist/reactive-table/index.html") -Raw
+    Assert-ReactiveTableHtml -Html $table
   }
 
   if ($Template -eq "blog") {
