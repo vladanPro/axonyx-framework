@@ -62,6 +62,12 @@ try {
     Pop-Location
   }
 
+  if ($Template -eq "site") {
+    $tableRoute = Join-Path $appRoot "app/reactive-table"
+    New-Item -ItemType Directory -Path $tableRoute -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $frameworkRoot "examples/reactive-foundry-table/page.asx") -Destination $tableRoute
+  }
+
   try {
     Push-Location $appRoot
     Invoke-Step {
@@ -91,6 +97,13 @@ try {
     Assert-Link $index "/contact" "Start a conversation"
     Assert-Link $index "/about" "Meet the team"
     Assert-Link $contact "mailto:hello@example.com" "hello@example.com"
+    $table = Get-Content -LiteralPath (Join-Path $appRoot "dist/reactive-table/index.html") -Raw
+    if ($table -notmatch '<tbody\b[^>]*data-ax-each-row-mode="tr"' -or
+        $table -notmatch '<tr\b[^>]*data-ax-each-empty' -or
+        $table -notmatch '<template\b[^>]*data-ax-each-render-protocol="ax-each-render/1"' -or
+        $table.Contains("<ax-state-each")) {
+      throw "Expected reactive native table ownership, empty row, and template in built HTML"
+    }
   }
 
   if ($Template -eq "blog") {
