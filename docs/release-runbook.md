@@ -65,14 +65,12 @@ Published Runtime 0.8.7 uses the patched `webpki-roots 1.0.12` trust store.
 The published tools `create-axonyx 0.8.9` and `cargo-axonyx 0.8.13`
 adopt Runtime 0.8.7 for new apps, preview, and upgrade. Core remains at 0.8.6.
 The locked CLI also resolves its HTTPS client to the same patched trust store.
-The registry-only acceptance run passed with these exact pins. The default
-`scripts/smoke-registry-beta.ps1` invocation now exercises the metadata profile
-in CI. Use `-Profile baseline` only to reproduce the older published toolchain.
+The registry-only acceptance run passed with those exact pins.
 Existing deployments must rebuild to pick up the fix.
 
 ## Reactive tables and first-posts tooling
 
-The release candidates are Core and Runtime `0.9.0`, `axonyx-lsp 0.8.5`,
+The initial releases were Core and Runtime `0.9.0`, `axonyx-lsp 0.8.5`,
 `create-axonyx 0.8.10`, and `cargo-axonyx 0.8.14`. Core's public
 `AxEachBlock` changed for reactive expressions, so Core and Runtime move to a
 new pre-1.0 minor. The tooling bundles that Runtime and also ships route-local
@@ -84,11 +82,14 @@ verify both main CI runs. Publish Core first, wait for registry propagation,
 then Runtime. Verify that the dependent tooling packages resolve the new
 registry dependencies before publishing them. Do not publish macros or UI.
 
-After the packages are visible, run the `reactive-table` registry acceptance
-profile (framework PR #460) with scaffold `0.8.10`, CLI `0.8.14`, and
-Runtime `0.9.0`. Also recreate the SQLite first-posts flow with the
-published minimal scaffold. Update the default registry smoke and public
-install pins only after this independent install path passes.
+The initial registry run found that CLI `0.8.14` served WASM as
+`application/octet-stream` in compiled production. CLI `0.8.15` fixes that.
+The default `scripts/smoke-registry-beta.ps1` run now checks the verified
+registry combination: scaffold `0.8.10`, CLI `0.8.15`, and Runtime `0.9.0`.
+Its `reactive-table` profile checks page metadata, table HTML, and the WASM
+media type and bytes in both dev and compiled production. Use the three
+release overrides together to check another published combination before
+changing the defaults. Use `-Profile baseline` to reproduce the older toolchain.
 
 Before publishing, `main` should be green in GitHub Actions.
 

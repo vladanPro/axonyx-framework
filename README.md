@@ -44,7 +44,7 @@ Generated apps consume the runtime and UI packages through crates.io by default:
 
 ```toml
 [dependencies]
-axonyx-runtime = "0.8.7"
+axonyx-runtime = "0.9.0"
 axonyx-ui = "0.0.86"
 ```
 
@@ -53,8 +53,8 @@ axonyx-ui = "0.0.86"
 Install the public CLI tools:
 
 ```bash
-cargo install create-axonyx --version 0.8.9 --locked
-cargo install cargo-axonyx --version 0.8.13 --locked
+cargo install create-axonyx --version 0.8.10 --locked
+cargo install cargo-axonyx --version 0.8.15 --locked
 ```
 
 Install the published language server with `cargo install axonyx-lsp`, or use

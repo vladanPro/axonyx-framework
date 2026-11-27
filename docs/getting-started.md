@@ -7,14 +7,14 @@ This is the practical starting point for Axonyx development today.
 For a new project, install the published CLI tools:
 
 ```bash
-cargo install create-axonyx --version 0.8.9 --locked
-cargo install cargo-axonyx --version 0.8.13 --locked
+cargo install create-axonyx --version 0.8.10 --locked
+cargo install cargo-axonyx --version 0.8.15 --locked
 create-axonyx my-app --yes --template site
 ```
 
 The default starter uses published crates.io packages. You do not need to clone
 the framework repository or initialize its runtime submodule.
-This tested scaffold uses Axonyx Runtime 0.8.7 and Foundry UI 0.0.86.
+This tested scaffold uses Axonyx Runtime 0.9.0 and Foundry UI 0.0.86.
 
 Then:
 
